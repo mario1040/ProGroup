@@ -1,0 +1,6 @@
+{
+  "name": "Naris Ops",
+  "description": "نظام متكامل لإدارة عمليات النظافة والتشغيل والمهام اليومية بمقر الشركة مع لوحة تحكم ومراقبة الأداء",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

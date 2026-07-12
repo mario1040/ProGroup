@@ -1,0 +1,27 @@
+@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Cairo", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --color-brand-primary: #0f172a; /* deep slate */
+  --color-brand-accent: #4f46e5; /* indigo-600 */
+}
+
+body {
+  font-family: var(--font-sans);
+  direction: rtl; /* Right to Left for Arabic */
+  text-align: right;
+  background-color: #f3f4f6;
+  color: #111827;
+}
+
+/* Custom slider style */
+.before-after-slider {
+  position: relative;
+  overflow: hidden;
+}
+
+/* Direction-aware helper classes */
+.rtl-grid {
+  direction: rtl;
+}
