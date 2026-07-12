@@ -1,34 +1,70 @@
 import { Profile, Zone, TaskTemplate, TaskInstance, Notification, OperationalTask, DeviceSwitch } from "../types";
-import { initializeApp, getApps, getApp } from "firebase/app";
 import { 
-  initializeFirestore, 
+  db, 
+  auth, 
+  storage, 
+  OperationType, 
+  handleFirestoreError 
+} from "./firebase";
+import { 
   doc, 
   getDoc, 
   getDocs, 
-  setDoc, 
+  setDoc as firebaseSetDoc, 
   deleteDoc, 
-  updateDoc,
+  updateDoc as firebaseUpdateDoc,
   collection, 
   query, 
   where 
 } from "firebase/firestore";
+import { 
+  ref as storageRef, 
+  uploadString, 
+  getDownloadURL 
+} from "firebase/storage";
+import { 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  signOut 
+} from "firebase/auth";
 import { getSeededDB } from "../db_default";
 
-// Firebase and Firestore project configuration
-const firebaseConfig = {
-  apiKey: "AIzaSyCc3MP4cpQ-wmW9v-ovRPW3bNJ3MwGdYFY",
-  authDomain: "vigilant-welder-0n50x.firebaseapp.com",
-  projectId: "vigilant-welder-0n50x",
-  storageBucket: "vigilant-welder-0n50x.firebasestorage.app",
-  messagingSenderId: "972833537556",
-  appId: "1:972833537556:web:f3ca0894063702f88d7101"
-};
+// --- Clean Undefined Interceptor (Mandatory to prevent Firestore crash) ---
+function cleanUndefined<T extends object>(obj: T): T {
+  if (!obj || typeof obj !== "object") return obj;
+  const result = Array.isArray(obj) ? [] : {};
+  for (const key of Object.keys(obj)) {
+    const val = (obj as any)[key];
+    if (val === undefined) {
+      (result as any)[key] = null; // Convert undefined to null to prevent any Firestore crash
+    } else if (val && typeof val === "object" && !(val instanceof Date)) {
+      (result as any)[key] = cleanUndefined(val);
+    } else {
+      (result as any)[key] = val;
+    }
+  }
+  return result as T;
+}
 
-const BASE_URL = "";
+async function setDoc(docRef: any, data: any, options?: any) {
+  const cleaned = cleanUndefined(data);
+  const path = docRef.path;
+  try {
+    return await firebaseSetDoc(docRef, cleaned, options);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
 
-// Safe initialization of Firebase to prevent "App already exists" errors
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-const db = initializeFirestore(app, {}, "ai-studio-narisops-9f622daa-687a-45a2-a871-9a4fc3b9a3d8");
+async function updateDoc(docRef: any, data: any) {
+  const cleaned = cleanUndefined(data);
+  const path = docRef.path;
+  try {
+    return await firebaseUpdateDoc(docRef, cleaned);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
 
 let seedingPromise: Promise<void> | null = null;
 
@@ -41,12 +77,12 @@ async function ensureSeeded(): Promise<void> {
   }
   
   seedingPromise = (async () => {
+    const pathForCheck = "users";
     try {
       // Check if users collection already has data
       const usersCol = collection(db, "users");
       const usersSnap = await getDocs(usersCol);
       if (!usersSnap.empty) {
-        console.log("[Firestore Client] Database is already seeded.");
         return;
       }
       
@@ -101,6 +137,7 @@ async function ensureSeeded(): Promise<void> {
       console.log("[Firestore Client] Seeding completed successfully.");
     } catch (err) {
       console.error("[Firestore Client] Seeding failed:", err);
+      handleFirestoreError(err, OperationType.WRITE, pathForCheck);
     }
   })();
   
@@ -123,13 +160,17 @@ function getArabicDayName() {
 
 // --- API Operations ---
 
-export async function loginUser(username: string): Promise<Profile> {
+export async function loginUser(username: string, password?: string): Promise<Profile> {
   await ensureSeeded();
   const cleanInput = username.trim().toLowerCase();
   
-  // Fetch users collection directly
-  const colRef = collection(db, "users");
-  const snap = await getDocs(colRef);
+  // Fetch users collection directly to locate profile
+  let snap;
+  try {
+    snap = await getDocs(collection(db, "users"));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, "users");
+  }
   
   const users: Profile[] = [];
   snap.forEach((docSnap) => {
@@ -156,7 +197,7 @@ export async function loginUser(username: string): Promise<Profile> {
     });
   }
 
-  if (!profile && (cleanInput.includes("admin") || cleanInput.includes("مدير") || cleanInput.includes("أحمد") || cleanInput.includes("احمد"))) {
+  if (!profile && (cleanInput.includes("admin") || cleanInput.includes("مدير"))) {
     profile = users.find((p) => p.role === "admin" && p.is_active !== false);
   }
 
@@ -164,13 +205,74 @@ export async function loginUser(username: string): Promise<Profile> {
     throw new Error("الموظف غير مسجل أو غير نشط في النظام");
   }
 
+  // Authenticate with Firebase Auth
+  const email = `${profile.username.toLowerCase()}@narisops.com`;
+  const finalPassword = password || "NarisOps123!";
+
+  try {
+    await signInWithEmailAndPassword(auth, email, finalPassword);
+  } catch (err: any) {
+    if (err.code === "auth/operation-not-allowed") {
+      console.warn("[Firebase Auth] Email/Password provider is disabled in the Firebase console. Falling back to Firestore-only authentication.");
+      return profile;
+    }
+    // If user is not found, dynamically register them inside Firebase Auth to provide smooth transition
+    if (
+      err.code === "auth/user-not-found" || 
+      err.code === "auth/invalid-credential" || 
+      err.code === "auth/wrong-password"
+    ) {
+      try {
+        await createUserWithEmailAndPassword(auth, email, finalPassword);
+      } catch (createErr: any) {
+        if (createErr.code === "auth/operation-not-allowed") {
+          console.warn("[Firebase Auth] Email/Password provider is disabled during registration. Falling back to Firestore-only authentication.");
+          return profile;
+        }
+        throw new Error("اسم المستخدم أو كلمة المرور غير صحيحة");
+      }
+    } else {
+      throw new Error(err.message || "فشل تسجيل الدخول عبر Firebase Auth");
+    }
+  }
+
   return profile;
+}
+
+export async function getCurrentUserProfile(email: string): Promise<Profile | null> {
+  await ensureSeeded();
+  if (!email) return null;
+  const username = email.split("@")[0].toLowerCase();
+  
+  let snap;
+  try {
+    snap = await getDocs(collection(db, "users"));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, "users");
+  }
+
+  let found: Profile | null = null;
+  snap.forEach((docSnap) => {
+    const data = docSnap.data() as Profile;
+    if (data.username?.toLowerCase() === username) {
+      found = data;
+    }
+  });
+  return found;
+}
+
+export async function logoutUser(): Promise<void> {
+  await signOut(auth);
 }
 
 export async function getProfiles(): Promise<Profile[]> {
   await ensureSeeded();
-  const colRef = collection(db, "users");
-  const snap = await getDocs(colRef);
+  let snap;
+  try {
+    snap = await getDocs(collection(db, "users"));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, "users");
+  }
   const profiles: Profile[] = [];
   snap.forEach((docSnap) => {
     profiles.push(docSnap.data() as Profile);
@@ -193,7 +295,12 @@ export async function saveProfile(profile: Partial<Profile>): Promise<Profile> {
     };
   } else {
     const docRef = doc(db, "users", profile.id);
-    const snap = await getDoc(docRef);
+    let snap;
+    try {
+      snap = await getDoc(docRef);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.GET, `users/${profile.id}`);
+    }
     const existing = snap.exists() ? snap.data() : {};
     finalProfile = { ...existing, ...profile };
   }
@@ -204,7 +311,12 @@ export async function saveProfile(profile: Partial<Profile>): Promise<Profile> {
 
 export async function getZones(): Promise<(Zone & { responsible_employee?: Profile })[]> {
   await ensureSeeded();
-  const zonesSnap = await getDocs(collection(db, "zones"));
+  let zonesSnap;
+  try {
+    zonesSnap = await getDocs(collection(db, "zones"));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, "zones");
+  }
   const profiles = await getProfiles();
   
   const zones: (Zone & { responsible_employee?: Profile })[] = [];
@@ -229,7 +341,12 @@ export async function saveZone(zone: Partial<Zone>): Promise<Zone> {
     };
   } else {
     const docRef = doc(db, "zones", zone.id);
-    const snap = await getDoc(docRef);
+    let snap;
+    try {
+      snap = await getDoc(docRef);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.GET, `zones/${zone.id}`);
+    }
     const existing = snap.exists() ? snap.data() : {};
     finalZone = { ...existing, ...zone };
   }
@@ -239,7 +356,12 @@ export async function saveZone(zone: Partial<Zone>): Promise<Zone> {
 
 export async function getTemplates(): Promise<TaskTemplate[]> {
   await ensureSeeded();
-  const snap = await getDocs(collection(db, "task_templates"));
+  let snap;
+  try {
+    snap = await getDocs(collection(db, "task_templates"));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, "task_templates");
+  }
   const templates: TaskTemplate[] = [];
   snap.forEach((docSnap) => {
     templates.push(docSnap.data() as TaskTemplate);
@@ -258,7 +380,12 @@ export async function saveTemplate(template: Partial<TaskTemplate>): Promise<Tas
     };
   } else {
     const docRef = doc(db, "task_templates", template.id);
-    const snap = await getDoc(docRef);
+    let snap;
+    try {
+      snap = await getDoc(docRef);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.GET, `task_templates/${template.id}`);
+    }
     const existing = snap.exists() ? snap.data() : {};
     finalTemplate = { ...existing, ...template, updated_at: new Date().toISOString() };
   }
@@ -268,17 +395,25 @@ export async function saveTemplate(template: Partial<TaskTemplate>): Promise<Tas
 
 export async function deleteTemplate(id: string): Promise<void> {
   await ensureSeeded();
-  await deleteDoc(doc(db, "task_templates", id));
+  try {
+    await deleteDoc(doc(db, "task_templates", id));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `task_templates/${id}`);
+  }
 }
 
 export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone?: Zone; assignee?: Profile; template?: TaskTemplate })[]> {
   await ensureSeeded();
   const todayStr = dateStr || getLocalDateString();
   
-  // Fetch today's instances directly from task_instances collection
-  const instancesSnap = await getDocs(
-    query(collection(db, "task_instances"), where("due_date", "==", todayStr))
-  );
+  let instancesSnap;
+  try {
+    instancesSnap = await getDocs(
+      query(collection(db, "task_instances"), where("due_date", "==", todayStr))
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, "task_instances");
+  }
   
   const instances: TaskInstance[] = [];
   instancesSnap.forEach((docSnap) => {
@@ -336,8 +471,12 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
     }
   }
   
-  // Join related collections
-  const zonesSnap = await getDocs(collection(db, "zones"));
+  let zonesSnap;
+  try {
+    zonesSnap = await getDocs(collection(db, "zones"));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, "zones");
+  }
   const zones: Zone[] = [];
   zonesSnap.forEach((docSnap) => {
     zones.push(docSnap.data() as Zone);
@@ -400,7 +539,12 @@ export async function createTask(task: Partial<TaskInstance>): Promise<TaskInsta
 export async function updateTask(id: string, updates: Partial<TaskInstance>): Promise<TaskInstance> {
   await ensureSeeded();
   const docRef = doc(db, "task_instances", id);
-  const snap = await getDoc(docRef);
+  let snap;
+  try {
+    snap = await getDoc(docRef);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, `task_instances/${id}`);
+  }
   if (!snap.exists()) {
     throw new Error("المهمة غير موجودة");
   }
@@ -409,9 +553,13 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
   
   let template: TaskTemplate | undefined;
   if (currentTask.template_id) {
-    const tplSnap = await getDoc(doc(db, "task_templates", currentTask.template_id));
-    if (tplSnap.exists()) {
-      template = tplSnap.data() as TaskTemplate;
+    try {
+      const tplSnap = await getDoc(doc(db, "task_templates", currentTask.template_id));
+      if (tplSnap.exists()) {
+        template = tplSnap.data() as TaskTemplate;
+      }
+    } catch (error) {
+      console.warn("Could not retrieve template", error);
     }
   }
   
@@ -451,7 +599,12 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
 export async function approveTask(id: string, approval: { supervisor_id: string; quality_grade: 'A' | 'B' | 'C'; supervisor_notes?: string }): Promise<TaskInstance> {
   await ensureSeeded();
   const docRef = doc(db, "task_instances", id);
-  const snap = await getDoc(docRef);
+  let snap;
+  try {
+    snap = await getDoc(docRef);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, `task_instances/${id}`);
+  }
   if (!snap.exists()) {
     throw new Error("المهمة غير موجودة");
   }
@@ -486,7 +639,12 @@ export async function approveTask(id: string, approval: { supervisor_id: string;
 export async function rejectTask(id: string, rejection: { supervisor_id: string; supervisor_notes: string }): Promise<{ original: TaskInstance; rework: TaskInstance }> {
   await ensureSeeded();
   const docRef = doc(db, "task_instances", id);
-  const snap = await getDoc(docRef);
+  let snap;
+  try {
+    snap = await getDoc(docRef);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, `task_instances/${id}`);
+  }
   if (!snap.exists()) {
     throw new Error("المهمة غير موجودة");
   }
@@ -558,7 +716,12 @@ export async function getKpis(): Promise<KpiSummary[]> {
   const profiles = await getProfiles();
   const cleaners = profiles.filter((p) => p.role === "cleaner");
   
-  const instancesSnap = await getDocs(collection(db, "task_instances"));
+  let instancesSnap;
+  try {
+    instancesSnap = await getDocs(collection(db, "task_instances"));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, "task_instances");
+  }
   const tasks: TaskInstance[] = [];
   instancesSnap.forEach((docSnap) => {
     tasks.push(docSnap.data() as TaskInstance);
@@ -623,11 +786,23 @@ export async function getKpis(): Promise<KpiSummary[]> {
 
 export async function getNotifications(recipientId?: string): Promise<Notification[]> {
   await ensureSeeded();
-  let q = query(collection(db, "notifications"));
-  if (recipientId) {
-    q = query(collection(db, "notifications"), where("recipient_id", "==", recipientId));
+  let q;
+  try {
+    if (recipientId) {
+      q = query(collection(db, "notifications"), where("recipient_id", "==", recipientId));
+    } else {
+      q = query(collection(db, "notifications"));
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, "notifications");
   }
-  const snap = await getDocs(q);
+
+  let snap;
+  try {
+    snap = await getDocs(q);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, "notifications");
+  }
   const notifications: Notification[] = [];
   snap.forEach((docSnap) => {
     notifications.push(docSnap.data() as Notification);
@@ -644,7 +819,12 @@ export async function markNotificationAsRead(id: string): Promise<void> {
 
 export async function getOperationalTasks(): Promise<(OperationalTask & { responsible_employee?: Profile })[]> {
   await ensureSeeded();
-  const opSnap = await getDocs(collection(db, "operational_tasks"));
+  let opSnap;
+  try {
+    opSnap = await getDocs(collection(db, "operational_tasks"));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, "operational_tasks");
+  }
   const profiles = await getProfiles();
   
   const tasks: (OperationalTask & { responsible_employee?: Profile })[] = [];
@@ -658,7 +838,12 @@ export async function getOperationalTasks(): Promise<(OperationalTask & { respon
 
 export async function getDeviceSwitches(): Promise<DeviceSwitch[]> {
   await ensureSeeded();
-  const snap = await getDocs(collection(db, "device_switches"));
+  let snap;
+  try {
+    snap = await getDocs(collection(db, "device_switches"));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, "device_switches");
+  }
   const switches: DeviceSwitch[] = [];
   snap.forEach((docSnap) => {
     switches.push(docSnap.data() as DeviceSwitch);
@@ -713,28 +898,17 @@ function compressImage(base64Str: string, maxWidth = 800, maxHeight = 800, quali
   });
 }
 
-export async function uploadPhoto(base64Image: string, fileName?: string): Promise<string> {
+export async function uploadPhoto(base64Image: string, path: string): Promise<string> {
   // Compress first to reduce size substantially (crucial for both network speed and database storage limit)
   const compressedBase64 = await compressImage(base64Image, 800, 800, 0.6);
 
   try {
-    const res = await fetch(`${BASE_URL}/api/upload`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ base64Image: compressedBase64, fileName }),
-    });
-    
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.url) {
-        return data.url;
-      }
-    }
-    
-    console.warn("[Upload] Server endpoint returned non-200 status, falling back to direct base64 storage.");
-    return compressedBase64;
+    const sRef = storageRef(storage, path);
+    const snapshot = await uploadString(sRef, compressedBase64, "data_url");
+    const downloadUrl = await getDownloadURL(snapshot.ref);
+    return downloadUrl;
   } catch (err) {
-    console.warn("[Upload] Server upload request failed or timed out. Falling back to direct base64 storage:", err);
+    console.warn("[Upload] Firebase Storage upload failed, falling back to direct compressed base64 to ensure operation continues:", err);
     return compressedBase64;
   }
 }

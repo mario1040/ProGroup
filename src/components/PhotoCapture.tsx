@@ -1,14 +1,15 @@
 import React, { useState, useRef } from "react";
-import { Camera, RefreshCw, Upload, CheckCircle, Image as ImageIcon } from "lucide-react";
+import { Camera, RefreshCw, Upload, CheckCircle, Loader2 } from "lucide-react";
 import { uploadPhoto } from "../lib/api";
 
 interface PhotoCaptureProps {
   label: string;
   onPhotoUploaded: (url: string) => void;
   required?: boolean;
+  storagePath: string; // Structured path for Firebase Storage
 }
 
-export default function PhotoCapture({ label, onPhotoUploaded, required = true }: PhotoCaptureProps) {
+export default function PhotoCapture({ label, onPhotoUploaded, required = true, storagePath }: PhotoCaptureProps) {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -33,11 +34,11 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true }
     const localUrl = URL.createObjectURL(file);
     setPreviewUrl(localUrl);
 
-    // Read file as base64 for the server API upload
+    // Read file as base64 for the Firebase Storage upload
     const reader = new FileReader();
     reader.onloadend = async () => {
       const base64 = reader.result as string;
-      await uploadToBackend(base64, file.name);
+      await uploadToFirebaseStorage(base64);
     };
     reader.onerror = () => {
       setError("حدث خطأ أثناء قراءة ملف الصورة");
@@ -45,7 +46,7 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true }
     reader.readAsDataURL(file);
   };
 
-  const uploadToBackend = async (base64String: string, originalName: string) => {
+  const uploadToFirebaseStorage = async (base64String: string) => {
     setUploading(true);
     setProgress(15);
     
@@ -58,17 +59,17 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true }
         }
         return prev + 15;
       });
-    }, 120);
+    }, 100);
 
     try {
-      const imageUrl = await uploadPhoto(base64String, originalName);
+      const imageUrl = await uploadPhoto(base64String, storagePath);
       clearInterval(interval);
       setProgress(100);
       setUploadedUrl(imageUrl);
       onPhotoUploaded(imageUrl);
     } catch (err) {
       clearInterval(interval);
-      setError("فشل رفع الصورة إلى الخادم. يرجى المحاولة مرة أخرى.");
+      setError("فشل رفع الصورة إلى Firebase Storage. يرجى المحاولة مرة أخرى.");
       console.error(err);
     } finally {
       setUploading(false);
@@ -120,7 +121,7 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true }
             
             {uploading && (
               <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center text-white p-4">
-                <Upload className="w-6 h-6 animate-bounce text-blue-400 mb-1" />
+                <Loader2 className="w-6 h-6 animate-spin text-blue-400 mb-1" />
                 <span className="text-xs">جاري رفع الصورة... {progress}%</span>
                 <div className="w-full bg-slate-700 h-1.5 rounded-full mt-2 overflow-hidden">
                   <div 
@@ -141,7 +142,7 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true }
           <div className="flex gap-2 w-full justify-center">
             {uploadedUrl && (
               <span className="text-xs text-emerald-600 font-medium flex items-center gap-1 bg-emerald-50 py-1 px-2.5 rounded-full border border-emerald-200">
-                <CheckCircle className="w-3.5 h-3.5" /> تم الرفع والحفظ
+                <CheckCircle className="w-3.5 h-3.5" /> تم الرفع بنجاح
               </span>
             )}
             

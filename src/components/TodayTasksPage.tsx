@@ -672,6 +672,7 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
                     label="صورة المكان قبل التنظيف" 
                     onPhotoUploaded={handlePhotoBeforeSubmitted} 
                     required={true}
+                    storagePath={`task-photos/${selectedTask.zone_id}/${selectedTask.id}/before.jpg`}
                   />
 
                   {isSubmitting && (
@@ -695,6 +696,7 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
                     label="صورة المكان بعد التنظيف" 
                     onPhotoUploaded={handlePhotoAfterSubmitted} 
                     required={true}
+                    storagePath={`task-photos/${selectedTask.zone_id}/${selectedTask.id}/after.jpg`}
                   />
                 </div>
               )}

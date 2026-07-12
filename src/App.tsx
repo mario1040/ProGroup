@@ -13,7 +13,9 @@ import {
   Smartphone,
   LayoutDashboard
 } from "lucide-react";
-import { loginUser, getNotifications, markNotificationAsRead } from "./lib/api";
+import { loginUser, getNotifications, markNotificationAsRead, getCurrentUserProfile, logoutUser } from "./lib/api";
+import { auth } from "./lib/firebase";
+import { onAuthStateChanged } from "firebase/auth";
 import { Profile, Notification } from "./types";
 import TodayTasksPage from "./components/TodayTasksPage";
 import MyKpiPage from "./components/MyKpiPage";
@@ -22,8 +24,9 @@ import AdminDashboard from "./components/AdminDashboard";
 export default function App() {
   const [user, setUser] = useState<Profile | null>(null);
   const [username, setUsername] = useState("");
-  const [password, setPassword] = useState(""); // Dummy, handled gracefully
+  const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [authLoading, setAuthLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   
   // Navigation states for cleaners
@@ -33,17 +36,41 @@ export default function App() {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
 
-  // Load user session from localStorage
+  // Load and listen to user session from Firebase Auth
   useEffect(() => {
-    const savedUser = localStorage.getItem("naris_ops_user");
-    if (savedUser) {
-      try {
-        const parsed = JSON.parse(savedUser);
-        setUser(parsed);
-      } catch (e) {
-        console.error("Failed to parse saved user", e);
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      setAuthLoading(true);
+      if (firebaseUser && firebaseUser.email) {
+        try {
+          const profile = await getCurrentUserProfile(firebaseUser.email);
+          if (profile) {
+            setUser(profile);
+            localStorage.setItem("naris_ops_user", JSON.stringify(profile));
+          } else {
+            setError("تم تسجيل الدخول بنجاح، ولكن ليس لديك ملف تعريف موظف في النظام. يرجى مراجعة المسؤول.");
+            setUser(null);
+            localStorage.removeItem("naris_ops_user");
+          }
+        } catch (e) {
+          console.error("Failed to restore session profile", e);
+          setUser(null);
+        }
+      } else {
+        const savedUser = localStorage.getItem("naris_ops_user");
+        if (savedUser) {
+          try {
+            setUser(JSON.parse(savedUser));
+          } catch (e) {
+            setUser(null);
+          }
+        } else {
+          setUser(null);
+        }
       }
-    }
+      setAuthLoading(false);
+    });
+
+    return () => unsubscribe();
   }, []);
 
   // Fetch notifications for the user
@@ -78,22 +105,29 @@ export default function App() {
     setError(null);
 
     try {
-      const profile = await loginUser(username.trim());
+      const profile = await loginUser(username.trim(), password);
       setUser(profile);
       localStorage.setItem("naris_ops_user", JSON.stringify(profile));
     } catch (err: any) {
-      setError(err.message || "فشل تسجيل الدخول. اسم المستخدم غير موجود");
+      setError(err.message || "فشل تسجيل الدخول. اسم المستخدم أو كلمة المرور غير صحيحة");
     } finally {
       setLoading(false);
     }
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    setLoading(true);
+    try {
+      await logoutUser();
+    } catch (e) {
+      console.error(e);
+    }
     setUser(null);
     setUsername("");
     setPassword("");
     localStorage.removeItem("naris_ops_user");
     setCleanerView('tasks');
+    setLoading(false);
   };
 
   const handleMarkRead = async (id: string) => {
@@ -107,12 +141,23 @@ export default function App() {
 
   const unreadCount = notifications.filter(n => !n.is_read).length;
 
+  if (authLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-900 text-white">
+        <div className="flex flex-col items-center gap-3">
+          <Loader2 className="w-10 h-10 animate-spin text-indigo-500" />
+          <span className="text-sm font-bold">جاري تحميل النظام والتحقق من الهوية...</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-slate-50 font-sans antialiased rtl-grid">
+    <div className="min-h-screen bg-slate-50 font-sans antialiased rtl-grid text-right">
       
       {/* 1. LOGIN SCREEN */}
       {!user && (
-        <div className="min-h-screen flex flex-col items-center justify-center bg-slate-900 px-4 py-12 relative overflow-hidden text-right">
+        <div className="min-h-screen flex flex-col items-center justify-center bg-slate-900 px-4 py-12 relative overflow-hidden">
           
           {/* Subtle design shapes for cosmic feeling */}
           <div className="absolute w-96 h-96 bg-indigo-600/10 rounded-full blur-3xl -top-12 -right-12"></div>

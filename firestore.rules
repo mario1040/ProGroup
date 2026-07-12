@@ -1,6 +1,7 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // Allow read and write access for prototype development, ensuring unauthenticated login lookup and seeding functions correctly.
     match /{document=**} {
       allow read, write: if true;
     }
