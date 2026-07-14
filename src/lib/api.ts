@@ -4,7 +4,8 @@ import {
   auth, 
   storage, 
   OperationType, 
-  handleFirestoreError 
+  handleFirestoreError,
+  firebaseConfig
 } from "./firebase";
 import { 
   doc, 
@@ -25,8 +26,10 @@ import {
 import { 
   signInWithEmailAndPassword, 
   createUserWithEmailAndPassword, 
-  signOut 
+  signOut,
+  getAuth
 } from "firebase/auth";
+import { initializeApp, deleteApp } from "firebase/app";
 import { getSeededDB } from "../db_default";
 
 // --- Clean Undefined Interceptor (Mandatory to prevent Firestore crash) ---
@@ -68,6 +71,10 @@ async function updateDoc(docRef: any, data: any) {
 
 let seedingPromise: Promise<void> | null = null;
 
+export function clearSeedingPromise() {
+  seedingPromise = null;
+}
+
 /**
  * Ensures Firestore is properly seeded with initial data if it's completely empty.
  */
@@ -81,7 +88,18 @@ async function ensureSeeded(): Promise<void> {
     try {
       // Check if users collection already has data
       const usersCol = collection(db, "users");
-      const usersSnap = await getDocs(usersCol);
+      let usersSnap;
+      try {
+        usersSnap = await getDocs(usersCol);
+      } catch (err: any) {
+        if (err.code === "permission-denied" || (err.message && err.message.toLowerCase().includes("permission"))) {
+          console.warn("[Firestore Client] Seeding check skipped due to missing permissions (unauthenticated). Seeding will be deferred until authentication is complete.");
+          seedingPromise = null; // Reset so we can try again once authenticated
+          return;
+        }
+        throw err;
+      }
+
       if (!usersSnap.empty) {
         return;
       }
@@ -91,7 +109,11 @@ async function ensureSeeded(): Promise<void> {
       
       // 1. Seed users (profiles)
       for (const p of seeded.profiles) {
-        await setDoc(doc(db, "users", p.id), p);
+        const profileToSeed = {
+          ...p,
+          password: (p as any).password || (p.username === "admin" ? "admin123" : "123456")
+        };
+        await setDoc(doc(db, "users", p.id), profileToSeed);
       }
       
       // 2. Seed locations
@@ -145,7 +167,7 @@ async function ensureSeeded(): Promise<void> {
 }
 
 // --- Date Helpers ---
-function getLocalDateString() {
+export function getLocalDateString() {
   const date = new Date();
   const tzOffset = date.getTimezoneOffset() * 60000;
   const localISOTime = (new Date(date.getTime() - tzOffset)).toISOString();
@@ -160,80 +182,62 @@ function getArabicDayName() {
 
 // --- API Operations ---
 
+const PRE_SEEDED_USERS = [
+  { id: "p1", username: "admin", full_name: "أحمد المدير", phone: "01011112222", role: "admin" },
+  { id: "p2", username: "afaf", full_name: "عفاف أحمد", phone: "01234567890", role: "cleaner" },
+  { id: "p3", username: "rehab", full_name: "رحاب محمود", phone: "01122334455", role: "cleaner" },
+  { id: "p4", username: "supervisor", full_name: "خالد المشرف", phone: "01555666777", role: "supervisor" }
+];
+
 export async function loginUser(username: string, password?: string): Promise<Profile> {
-  await ensureSeeded();
   const cleanInput = username.trim().toLowerCase();
   
-  // Fetch users collection directly to locate profile
+  // 1. Resolve username from local pre-seeded users or assume input itself is the username
+  let targetUsername = cleanInput;
+  const matchedPreSeeded = PRE_SEEDED_USERS.find(u => 
+    u.username.toLowerCase() === cleanInput ||
+    u.full_name.toLowerCase() === cleanInput ||
+    u.full_name.toLowerCase().includes(cleanInput) ||
+    u.phone === cleanInput
+  );
+  if (matchedPreSeeded) {
+    targetUsername = matchedPreSeeded.username;
+  } else if (cleanInput.includes("admin") || cleanInput.includes("مدير")) {
+    targetUsername = "admin";
+  }
+
+  if (!password) {
+    throw new Error("يرجى إدخال كلمة المرور");
+  }
+
+  // Ensure the database has seeded documents
+  await ensureSeeded();
+
   let snap;
   try {
     snap = await getDocs(collection(db, "users"));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, "users");
   }
-  
+
   const users: Profile[] = [];
   snap.forEach((docSnap) => {
     users.push(docSnap.data() as Profile);
   });
-  
-  let profile = users.find((p) => {
-    const active = p.is_active !== false;
-    if (!active) return false;
-    const pUsername = (p.username || "").trim().toLowerCase();
-    const pFullName = (p.full_name || "").trim().toLowerCase();
-    const pPhone = (p.phone || "").trim();
-    return pUsername === cleanInput || pFullName === cleanInput || pPhone === cleanInput;
-  });
 
-  if (!profile) {
-    profile = users.find((p) => {
-      const active = p.is_active !== false;
-      if (!active) return false;
-      const pUsername = (p.username || "").trim().toLowerCase();
-      const pFullName = (p.full_name || "").trim().toLowerCase();
-      return pUsername.includes(cleanInput) || cleanInput.includes(pUsername) ||
-             pFullName.includes(cleanInput) || cleanInput.includes(pFullName);
-    });
-  }
-
-  if (!profile && (cleanInput.includes("admin") || cleanInput.includes("مدير"))) {
-    profile = users.find((p) => p.role === "admin" && p.is_active !== false);
-  }
-
+  const profile = users.find((p) => p.username?.toLowerCase() === targetUsername);
   if (!profile) {
     throw new Error("الموظف غير مسجل أو غير نشط في النظام");
   }
 
-  // Authenticate with Firebase Auth
-  const email = `${profile.username.toLowerCase()}@narisops.com`;
-  const finalPassword = password || "NarisOps123!";
+  if (profile.is_active === false) {
+    throw new Error("هذا الحساب معطل أو غير نشط في النظام");
+  }
 
-  try {
-    await signInWithEmailAndPassword(auth, email, finalPassword);
-  } catch (err: any) {
-    if (err.code === "auth/operation-not-allowed") {
-      console.warn("[Firebase Auth] Email/Password provider is disabled in the Firebase console. Falling back to Firestore-only authentication.");
-      return profile;
-    }
-    // If user is not found, dynamically register them inside Firebase Auth to provide smooth transition
-    if (
-      err.code === "auth/user-not-found" || 
-      err.code === "auth/invalid-credential" || 
-      err.code === "auth/wrong-password"
-    ) {
-      try {
-        await createUserWithEmailAndPassword(auth, email, finalPassword);
-      } catch (createErr: any) {
-        if (createErr.code === "auth/operation-not-allowed") {
-          console.warn("[Firebase Auth] Email/Password provider is disabled during registration. Falling back to Firestore-only authentication.");
-          return profile;
-        }
-        throw new Error("اسم المستخدم أو كلمة المرور غير صحيحة");
-      }
-    } else {
-      throw new Error(err.message || "فشل تسجيل الدخول عبر Firebase Auth");
-    }
+  // Custom password matching check!
+  const expectedPassword = profile.password || (profile.username === "admin" ? "admin123" : "123456");
+  if (password !== expectedPassword) {
+    throw new Error("اسم المستخدم أو كلمة المرور غير صحيحة");
   }
 
   return profile;
@@ -280,16 +284,39 @@ export async function getProfiles(): Promise<Profile[]> {
   return profiles;
 }
 
-export async function saveProfile(profile: Partial<Profile>): Promise<Profile> {
+function generateSecureRandomPassword(): string {
+  const letters = "abcdefghijklmnopqrstuvwxyz";
+  const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const digits = "0123456789";
+  const specials = "!@#$*";
+  
+  let pass = "";
+  pass += letters.charAt(Math.floor(Math.random() * letters.length));
+  pass += upper.charAt(Math.floor(Math.random() * upper.length));
+  pass += digits.charAt(Math.floor(Math.random() * digits.length));
+  pass += specials.charAt(Math.floor(Math.random() * specials.length));
+  
+  const allChars = letters + upper + digits + specials;
+  for (let i = 0; i < 6; i++) {
+    pass += allChars.charAt(Math.floor(Math.random() * allChars.length));
+  }
+  return pass.split('').sort(() => Math.random() - 0.5).join('');
+}
+
+export async function saveProfile(profile: Partial<Profile>): Promise<{ profile: Profile; generatedPassword?: string }> {
   await ensureSeeded();
   if (profile.is_active === undefined) {
     profile.is_active = true;
   }
   
   let finalProfile: any;
+  let generatedPassword: string | undefined;
+
   if (!profile.id) {
+    generatedPassword = profile.password || generateSecureRandomPassword();
     finalProfile = {
       ...profile,
+      password: generatedPassword,
       id: "p_" + Math.random().toString(36).substr(2, 9),
       created_at: new Date().toISOString()
     };
@@ -302,11 +329,60 @@ export async function saveProfile(profile: Partial<Profile>): Promise<Profile> {
       handleFirestoreError(error, OperationType.GET, `users/${profile.id}`);
     }
     const existing = snap.exists() ? snap.data() : {};
-    finalProfile = { ...existing, ...profile };
+    
+    const newPassword = profile.password || existing.password || "123456";
+
+    finalProfile = { 
+      ...existing, 
+      ...profile,
+      password: newPassword
+    };
   }
   
   await setDoc(doc(db, "users", finalProfile.id), finalProfile);
-  return finalProfile as Profile;
+  return { profile: finalProfile as Profile, generatedPassword };
+}
+
+export async function provisionEmployeeAuth(profileId: string): Promise<string> {
+  await ensureSeeded();
+  const docRef = doc(db, "users", profileId);
+  let snap;
+  try {
+    snap = await getDoc(docRef);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, `users/${profileId}`);
+  }
+  if (!snap.exists()) {
+    throw new Error("الموظف غير موجود في النظام");
+  }
+  const profile = snap.data() as Profile;
+  const generatedPassword = generateSecureRandomPassword();
+
+  await setDoc(docRef, {
+    ...profile,
+    password: generatedPassword
+  });
+  return generatedPassword;
+}
+
+export async function initializeAdminAuth(): Promise<string> {
+  await ensureSeeded();
+  const docRef = doc(db, "users", "p1");
+  let snap;
+  try {
+    snap = await getDoc(docRef);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, "users/p1");
+  }
+  const defaultPassword = "admin123";
+  if (snap.exists()) {
+    const profile = snap.data() as Profile;
+    await setDoc(docRef, {
+      ...profile,
+      password: profile.password || defaultPassword
+    });
+  }
+  return defaultPassword;
 }
 
 export async function getZones(): Promise<(Zone & { responsible_employee?: Profile })[]> {
@@ -420,20 +496,26 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
     instances.push(docSnap.data() as TaskInstance);
   });
   
-  const hasTodayInstances = instances.some((ti) => ti.task_type === "recurring");
+  // Generate missing recurring tasks for active templates that run today per-template
+  const templates = await getTemplates();
+  const todayDayNameAr = getArabicDayName();
+  let generatedAny = false;
   
-  if (!hasTodayInstances) {
-    console.log(`[Firestore Client] Generating recurring SOP tasks for ${todayStr}...`);
-    const templates = await getTemplates();
-    const todayDayNameAr = getArabicDayName();
+  for (const tpl of templates) {
+    if (!tpl.is_active) continue;
     
-    for (const tpl of templates) {
-      if (!tpl.is_active) continue;
+    const runsToday = tpl.frequency === "يومي" || 
+                      (tpl.recurrence_days && tpl.recurrence_days.includes(todayDayNameAr));
+    
+    if (runsToday) {
+      // Check if an instance of this specific recurring template already exists for today
+      const alreadyExists = instances.some((ti) => ti.template_id === tpl.id && ti.due_date === todayStr);
       
-      const runsToday = tpl.frequency === "يومي" || 
-                        (tpl.recurrence_days && tpl.recurrence_days.includes(todayDayNameAr));
-      
-      if (runsToday) {
+      if (!alreadyExists) {
+        if (!generatedAny) {
+          console.log(`[Firestore Client] Generating missing recurring SOP tasks for ${todayStr}...`);
+          generatedAny = true;
+        }
         const id = "ti_" + Math.random().toString(36).substr(2, 9);
         const newInstance: TaskInstance = {
           id,
@@ -483,7 +565,57 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
   });
   
   const profiles = await getProfiles();
+  
+  return instances.map((ti) => {
+    const zone = zones.find((z) => z.id === ti.zone_id);
+    const assignee = profiles.find((p) => p.id === ti.assigned_to);
+    const template = templates.find((tpl) => tpl.id === ti.template_id);
+    return {
+      ...ti,
+      zone,
+      assignee,
+      template
+    };
+  });
+}
+
+export async function getTasksForRange(startDate: string, endDate: string): Promise<(TaskInstance & { zone?: Zone; assignee?: Profile; template?: TaskTemplate })[]> {
+  await ensureSeeded();
+  
+  let instancesSnap;
+  try {
+    // Fetch all instances and filter locally to avoid complex Firestore composite index requirements
+    instancesSnap = await getDocs(collection(db, "task_instances"));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, "task_instances");
+  }
+  
+  const instances: TaskInstance[] = [];
+  if (instancesSnap) {
+    instancesSnap.forEach((docSnap) => {
+      const data = docSnap.data() as TaskInstance;
+      if (data.due_date >= startDate && data.due_date <= endDate) {
+        instances.push(data);
+      }
+    });
+  }
+  
   const templates = await getTemplates();
+  let zonesSnap;
+  try {
+    zonesSnap = await getDocs(collection(db, "zones"));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, "zones");
+  }
+  
+  const zones: Zone[] = [];
+  if (zonesSnap) {
+    zonesSnap.forEach((docSnap) => {
+      zones.push(docSnap.data() as Zone);
+    });
+  }
+  
+  const profiles = await getProfiles();
   
   return instances.map((ti) => {
     const zone = zones.find((z) => z.id === ti.zone_id);
@@ -501,7 +633,7 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
 export async function createTask(task: Partial<TaskInstance>): Promise<TaskInstance> {
   await ensureSeeded();
   const id = "ti_" + Math.random().toString(36).substr(2, 9);
-  const newInstance = {
+  const newInstance: TaskInstance = {
     id,
     zone_id: task.zone_id || "z1",
     assigned_to: task.assigned_to || "p2",
@@ -512,11 +644,18 @@ export async function createTask(task: Partial<TaskInstance>): Promise<TaskInsta
     due_date: task.due_date || getLocalDateString(),
     due_time: task.due_time || "12:00",
     status: task.status || "pending",
+    requires_photo_before: task.requires_photo_before !== undefined ? task.requires_photo_before : true,
+    requires_photo_after: task.requires_photo_after !== undefined ? task.requires_photo_after : true,
     supervisor_approved: task.supervisor_approved || false,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-    ...task
-  } as TaskInstance;
+    photo_before_url: task.photo_before_url || null,
+    photo_after_url: task.photo_after_url || null,
+    employee_notes: task.employee_notes || null,
+    employee_signature_url: task.employee_signature_url || null,
+    supervisor_notes: task.supervisor_notes || null,
+    quality_grade: task.quality_grade || null,
+    created_at: task.created_at || new Date().toISOString(),
+    updated_at: task.updated_at || new Date().toISOString()
+  };
   
   await setDoc(doc(db, "task_instances", id), newInstance);
   
@@ -546,11 +685,16 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
     handleFirestoreError(error, OperationType.GET, `task_instances/${id}`);
   }
   if (!snap.exists()) {
-    throw new Error("المهمة غير موجودة");
+    throw new Error("المهمة المطلوبة غير موجودة في قاعدة البيانات");
   }
   
   const currentTask = snap.data() as TaskInstance;
   
+  // 1. Prevent duplicate completion
+  if (currentTask.status === "completed" && updates.status === "completed") {
+    throw new Error("تنبيه: تم إكمال هذه المهمة بالفعل مسبقاً ولا يمكن إعادة تسليمها.");
+  }
+
   let template: TaskTemplate | undefined;
   if (currentTask.template_id) {
     try {
@@ -564,14 +708,43 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
   }
   
   const merged = { ...currentTask, ...updates, updated_at: new Date().toISOString() };
-  
+
+  // 2. Enforce "before photo" requirement
+  const requiresBefore = template ? template.requires_photo_before : true;
+  if (requiresBefore && (updates.status === "in_progress" || updates.status === "completed")) {
+    if (!merged.photo_before_url) {
+      throw new Error("خطأ حماية: لا يمكن بدء أو إكمال هذه المهمة بدون التقاط ورفع صورة إثبات ما قبل البدء (Before Photo).");
+    }
+  }
+
+  // 3. Enforce "after photo" requirement
+  const requiresAfter = template ? template.requires_photo_after : true;
+  if (requiresAfter && updates.status === "completed") {
+    if (!merged.photo_after_url) {
+      throw new Error("خطأ حماية: لا يمكن إغلاق وإكمال هذه المهمة بدون التقاط ورفع صورة إثبات جودة العمل (After Photo).");
+    }
+  }
+
+  // 4. Validate rework tasks
+  if (merged.task_type === "rework" && !merged.parent_instance_id) {
+    throw new Error("خطأ حماية: لا يمكن إنشاء أو تحديث مهمة إعادة عمل (Rework) بدون الإشارة إلى المهمة الأصلية (Parent Reference).");
+  }
+
+  if (updates.photo_before_url && !currentTask.photo_before_url) {
+    merged.photo_before_taken_at = updates.photo_before_taken_at || new Date().toISOString();
+    merged.photo_before_uploaded_at = updates.photo_before_uploaded_at || new Date().toISOString();
+  }
+
   if (updates.status === "in_progress" && !currentTask.started_at) {
     merged.started_at = new Date().toISOString();
   }
   
   if (updates.status === "completed" && !currentTask.completed_at) {
     merged.completed_at = new Date().toISOString();
-    merged.photo_after_taken_at = new Date().toISOString();
+    if (!merged.photo_after_taken_at) {
+      merged.photo_after_taken_at = updates.photo_after_taken_at || new Date().toISOString();
+    }
+    merged.photo_after_uploaded_at = updates.photo_after_uploaded_at || new Date().toISOString();
     
     if (currentTask.due_time && currentTask.due_date) {
       try {
@@ -606,10 +779,16 @@ export async function approveTask(id: string, approval: { supervisor_id: string;
     handleFirestoreError(error, OperationType.GET, `task_instances/${id}`);
   }
   if (!snap.exists()) {
-    throw new Error("المهمة غير موجودة");
+    throw new Error("المهمة المراد اعتمادها غير موجودة");
   }
   
   const task = snap.data() as TaskInstance;
+
+  // 5. Prevent approval before completion
+  if (task.status !== "completed") {
+    throw new Error("خطأ حماية: لا يمكن اعتماد مهمة لم يكتمل تنفيذها وتأكيد تسليمها من قبل الموظف بعد.");
+  }
+  
   task.status = "completed";
   task.supervisor_approved = true;
   task.supervisor_approved_by = approval.supervisor_id || "p1";
@@ -650,6 +829,12 @@ export async function rejectTask(id: string, rejection: { supervisor_id: string;
   }
   
   const originalTask = snap.data() as TaskInstance;
+  
+  // Prevent duplicate rework creation
+  if (originalTask.status === "rejected") {
+    throw new Error("تنبيه: تم رفض هذه المهمة بالفعل مسبقاً، وهنالك أمر إعادة تنظيف (Rework) جارٍ العمل عليه لها.");
+  }
+  
   originalTask.status = "rejected";
   originalTask.supervisor_approved = false;
   originalTask.supervisor_approved_by = rejection.supervisor_id || "p1";
@@ -851,7 +1036,7 @@ export async function getDeviceSwitches(): Promise<DeviceSwitch[]> {
   return switches;
 }
 
-function compressImage(base64Str: string, maxWidth = 800, maxHeight = 800, quality = 0.6): Promise<string> {
+export function compressImage(base64Str: string, maxWidth = 800, maxHeight = 800, quality = 0.6): Promise<string> {
   return new Promise((resolve) => {
     if (typeof window === "undefined" || typeof Image === "undefined") {
       resolve(base64Str);
@@ -905,10 +1090,276 @@ export async function uploadPhoto(base64Image: string, path: string): Promise<st
   try {
     const sRef = storageRef(storage, path);
     const snapshot = await uploadString(sRef, compressedBase64, "data_url");
+    console.log("✅ [Upload Success] Upload completed successfully. Fetching download URL...");
     const downloadUrl = await getDownloadURL(snapshot.ref);
+    console.log(`- Download URL resolved: ${downloadUrl}`);
     return downloadUrl;
-  } catch (err) {
-    console.warn("[Upload] Firebase Storage upload failed, falling back to direct compressed base64 to ensure operation continues:", err);
-    return compressedBase64;
+  } catch (err: any) {
+    console.warn("⚠️ [Upload Fallback] Firebase Storage upload failed. Falling back to storing compressed Base64 data URL in Firestore.", err);
+    // Compress further to ensure it's lightweight for Firestore document storage (under 1MB)
+    try {
+      const superCompressedBase64 = await compressImage(base64Image, 400, 400, 0.45);
+      console.log(`✅ [Upload Fallback Success] Generated lightweight fallback Base64 (length: ${superCompressedBase64.length})`);
+      return superCompressedBase64;
+    } catch (compressErr) {
+      console.error("❌ [Upload Fallback Failed] Compression failed, returning original compressed base64:", compressErr);
+      return compressedBase64;
+    }
   }
+}
+
+export async function resetDatabase(): Promise<void> {
+  const collectionsToClear = [
+    "users",
+    "locations",
+    "zones",
+    "task_templates",
+    "task_instances",
+    "operational_tasks",
+    "notifications",
+    "device_switches",
+    "kpi_snapshots"
+  ];
+
+  console.log("[Firestore Client] Resetting and testing database...");
+  for (const colName of collectionsToClear) {
+    try {
+      const colRef = collection(db, colName);
+      const snapshot = await getDocs(colRef);
+      for (const d of snapshot.docs) {
+        await deleteDoc(doc(db, colName, d.id));
+      }
+    } catch (err) {
+      console.error(`[Firestore Client] Error clearing collection ${colName}:`, err);
+    }
+  }
+
+  // Clear seeding promise and re-seed clean, compliant templates
+  clearSeedingPromise();
+  await ensureSeeded();
+  console.log("[Firestore Client] Database cleared and re-seeded successfully.");
+}
+
+export interface DatabaseValidationReport {
+  timestamp: string;
+  isPassed: boolean;
+  summary: {
+    totalCollectionsChecked: number;
+    totalDocumentsChecked: number;
+    totalErrors: number;
+    totalWarnings: number;
+  };
+  details: {
+    collectionName: string;
+    totalDocs: number;
+    passedDocs: number;
+    failedDocs: number;
+    errors: string[];
+    warnings: string[];
+  }[];
+}
+
+export async function validateDatabase(): Promise<DatabaseValidationReport> {
+  await ensureSeeded();
+  console.log("[Firestore Client] Starting Database Validation...");
+
+  const report: DatabaseValidationReport = {
+    timestamp: new Date().toISOString(),
+    isPassed: true,
+    summary: {
+      totalCollectionsChecked: 0,
+      totalDocumentsChecked: 0,
+      totalErrors: 0,
+      totalWarnings: 0,
+    },
+    details: []
+  };
+
+  const collectionsToCheck = [
+    { name: "users", label: "الموظفين والحسابات (users/profiles)" },
+    { name: "locations", label: "المواقع الجغرافية (locations)" },
+    { name: "zones", label: "المناطق والأقسام (zones)" },
+    { name: "task_templates", label: "القوالب المعيارية (task_templates)" },
+    { name: "task_instances", label: "مهام العمل والتشغيل (task_instances)" },
+    { name: "operational_tasks", label: "المهام التشغيلية (operational_tasks)" },
+    { name: "notifications", label: "التنبيهات والإشعارات (notifications)" }
+  ];
+
+  for (const col of collectionsToCheck) {
+    const detail = {
+      collectionName: col.label,
+      totalDocs: 0,
+      passedDocs: 0,
+      failedDocs: 0,
+      errors: [] as string[],
+      warnings: [] as string[]
+    };
+
+    try {
+      const snap = await getDocs(collection(db, col.name));
+      detail.totalDocs = snap.size;
+      report.summary.totalCollectionsChecked++;
+      report.summary.totalDocumentsChecked += snap.size;
+
+      snap.forEach((docSnap) => {
+        const id = docSnap.id;
+        const data = docSnap.data();
+        let docHasError = false;
+
+        // 1. Generic ID check
+        if (!data.id) {
+          detail.errors.push(`المستند [${id}]: حقل المعرف الموحد 'id' مفقود في الداتابيز.`);
+          docHasError = true;
+        } else if (data.id !== id) {
+          detail.warnings.push(`المستند [${id}]: معرف المستند لا يطابق حقل id الداخلي (${data.id}).`);
+        }
+
+        // 2. Collection specific checks
+        if (col.name === "users") {
+          // Profile validation
+          if (!data.full_name) {
+            detail.errors.push(`المستخدم [${id}]: الاسم الكامل 'full_name' مفقود.`);
+            docHasError = true;
+          }
+          if (!data.username) {
+            detail.errors.push(`المستخدم [${id}]: اسم المستخدم 'username' مفقود.`);
+            docHasError = true;
+          }
+          if (!data.role || !["admin", "cleaner", "supervisor"].includes(data.role)) {
+            detail.errors.push(`المستخدم [${id}]: الصلاحية 'role' مفقودة أو غير صالحة (${data.role}).`);
+            docHasError = true;
+          }
+        } 
+        
+        else if (col.name === "locations") {
+          if (!data.name) {
+            detail.errors.push(`الموقع [${id}]: الاسم 'name' مفقود.`);
+            docHasError = true;
+          }
+        } 
+        
+        else if (col.name === "zones") {
+          if (!data.location_id) {
+            detail.errors.push(`المنطقة [${id}]: معرف الموقع 'location_id' مفقود.`);
+            docHasError = true;
+          }
+          if (!data.name) {
+            detail.errors.push(`المنطقة [${id}]: الاسم 'name' مفقود.`);
+            docHasError = true;
+          }
+        } 
+        
+        else if (col.name === "task_templates") {
+          if (!data.zone_id) {
+            detail.errors.push(`القالب [${id}]: معرف المنطقة 'zone_id' مفقود.`);
+            docHasError = true;
+          }
+          if (!data.task_code) {
+            detail.errors.push(`القالب [${id}]: رمز المهمة 'task_code' مفقود.`);
+            docHasError = true;
+          }
+          if (!data.title) {
+            detail.errors.push(`القالب [${id}]: العنوان 'title' مفقود.`);
+            docHasError = true;
+          }
+          if (data.requires_photo_before === undefined) {
+            detail.warnings.push(`القالب [${id}]: حقل 'requires_photo_before' غير معرف (يفترض false).`);
+          }
+          if (data.requires_photo_after === undefined) {
+            detail.warnings.push(`القالب [${id}]: حقل 'requires_photo_after' غير معرف (يفترض false).`);
+          }
+        } 
+        
+        else if (col.name === "task_instances") {
+          // Task Instance validation
+          if (!data.zone_id) {
+            detail.errors.push(`مهمة [${id}]: معرف المنطقة 'zone_id' مفقود.`);
+            docHasError = true;
+          }
+          if (!data.assigned_to) {
+            detail.errors.push(`مهمة [${id}]: الموظف المسؤول 'assigned_to' مفقود.`);
+            docHasError = true;
+          }
+          if (!data.title) {
+            detail.errors.push(`مهمة [${id}]: العنوان 'title' مفقود.`);
+            docHasError = true;
+          }
+          if (!data.due_date) {
+            detail.errors.push(`مهمة [${id}]: تاريخ الاستحقاق 'due_date' مفقود.`);
+            docHasError = true;
+          }
+          if (!data.status) {
+            detail.errors.push(`مهمة [${id}]: الحالة 'status' مفقودة.`);
+            docHasError = true;
+          }
+
+          // Strict validation of required images (photo_before_url and photo_after_url)
+          const hasBeforePhoto = !!(data.photo_before_url || data.before_image_url);
+          const hasAfterPhoto = !!(data.photo_after_url || data.after_image_url);
+
+          if (data.requires_photo_before && data.status === "completed" && !hasBeforePhoto) {
+            detail.errors.push(`مهمة مكتملة [${id} - ${data.title}]: تتطلب صورة قبل التنظيف ولكن الحقل فارغ.`);
+            docHasError = true;
+          }
+          if (data.requires_photo_after && data.status === "completed" && !hasAfterPhoto) {
+            detail.errors.push(`مهمة مكتملة [${id} - ${data.title}]: تتطلب صورة بعد التنظيف ولكن الحقل فارغ.`);
+            docHasError = true;
+          }
+
+          // Log warning if non-matching property name is used
+          if (data.before_image_url && !data.photo_before_url) {
+            detail.warnings.push(`مهمة [${id}]: تم استخدام 'before_image_url' بدلاً من 'photo_before_url' القياسي.`);
+          }
+          if (data.after_image_url && !data.photo_after_url) {
+            detail.warnings.push(`مهمة [${id}]: تم استخدام 'after_image_url' بدلاً من 'photo_after_url' القياسي.`);
+          }
+        } 
+        
+        else if (col.name === "operational_tasks") {
+          if (!data.zone_id) {
+            detail.errors.push(`مهمة تشغيلية [${id}]: معرف المنطقة 'zone_id' مفقود.`);
+            docHasError = true;
+          }
+          if (!data.title) {
+            detail.errors.push(`مهمة تشغيلية [${id}]: العنوان 'title' مفقود.`);
+            docHasError = true;
+          }
+        } 
+        
+        else if (col.name === "notifications") {
+          if (!data.recipient_id) {
+            detail.errors.push(`إشعار [${id}]: معرف المستلم 'recipient_id' مفقود.`);
+            docHasError = true;
+          }
+          if (!data.title) {
+            detail.errors.push(`إشعار [${id}]: العنوان 'title' مفقود.`);
+            docHasError = true;
+          }
+          if (data.is_read === undefined) {
+            detail.errors.push(`إشعار [${id}]: حقل القراءة 'is_read' مفقود.`);
+            docHasError = true;
+          }
+        }
+
+        if (docHasError) {
+          detail.failedDocs++;
+        } else {
+          detail.passedDocs++;
+        }
+      });
+
+    } catch (err: any) {
+      detail.errors.push(`خطأ عام أثناء فحص المجموعة: ${err?.message || err}`);
+      report.isPassed = false;
+    }
+
+    report.summary.totalErrors += detail.errors.length;
+    report.summary.totalWarnings += detail.warnings.length;
+    if (detail.errors.length > 0) {
+      report.isPassed = false;
+    }
+    report.details.push(detail);
+  }
+
+  return report;
 }

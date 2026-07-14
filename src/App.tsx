@@ -13,13 +13,14 @@ import {
   Smartphone,
   LayoutDashboard
 } from "lucide-react";
-import { loginUser, getNotifications, markNotificationAsRead, getCurrentUserProfile, logoutUser } from "./lib/api";
+import { loginUser, getNotifications, markNotificationAsRead, getCurrentUserProfile, logoutUser, initializeAdminAuth } from "./lib/api";
 import { auth } from "./lib/firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import { Profile, Notification } from "./types";
 import TodayTasksPage from "./components/TodayTasksPage";
 import MyKpiPage from "./components/MyKpiPage";
 import AdminDashboard from "./components/AdminDashboard";
+import ProfessorLogo from "./components/ProfessorLogo";
 
 export default function App() {
   const [user, setUser] = useState<Profile | null>(null);
@@ -29,6 +30,8 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  
   // Navigation states for cleaners
   const [cleanerView, setCleanerView] = useState<'tasks' | 'kpis'>('tasks');
   
@@ -36,41 +39,23 @@ export default function App() {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
 
-  // Load and listen to user session from Firebase Auth
+  // Load and listen to user session from localStorage (since we bypass Firebase Auth)
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      setAuthLoading(true);
-      if (firebaseUser && firebaseUser.email) {
-        try {
-          const profile = await getCurrentUserProfile(firebaseUser.email);
-          if (profile) {
-            setUser(profile);
-            localStorage.setItem("naris_ops_user", JSON.stringify(profile));
-          } else {
-            setError("تم تسجيل الدخول بنجاح، ولكن ليس لديك ملف تعريف موظف في النظام. يرجى مراجعة المسؤول.");
-            setUser(null);
-            localStorage.removeItem("naris_ops_user");
-          }
-        } catch (e) {
-          console.error("Failed to restore session profile", e);
-          setUser(null);
-        }
-      } else {
-        const savedUser = localStorage.getItem("naris_ops_user");
-        if (savedUser) {
-          try {
-            setUser(JSON.parse(savedUser));
-          } catch (e) {
-            setUser(null);
-          }
-        } else {
-          setUser(null);
-        }
+    setAuthLoading(true);
+    const savedUser = localStorage.getItem("naris_ops_user");
+    if (savedUser) {
+      try {
+        const profile = JSON.parse(savedUser) as Profile;
+        setUser(profile);
+      } catch (e) {
+        console.error("Failed to restore session profile", e);
+        setUser(null);
+        localStorage.removeItem("naris_ops_user");
       }
-      setAuthLoading(false);
-    });
-
-    return () => unsubscribe();
+    } else {
+      setUser(null);
+    }
+    setAuthLoading(false);
   }, []);
 
   // Fetch notifications for the user
@@ -103,6 +88,7 @@ export default function App() {
 
     setLoading(true);
     setError(null);
+    setSuccessMessage(null);
 
     try {
       const profile = await loginUser(username.trim(), password);
@@ -166,12 +152,11 @@ export default function App() {
           <div className="w-full max-w-md z-10 flex flex-col gap-6">
             
             {/* Logo and branding */}
-            <div className="text-center">
-              <div className="inline-flex bg-indigo-600 p-3 rounded-2xl shadow-xl shadow-indigo-900/30 text-white mb-3">
-                <Shield className="w-8 h-8 animate-pulse" />
+            <div className="text-center flex flex-col items-center">
+              <div className="mb-4 w-4/5 max-w-[280px]">
+                <ProfessorLogo variant="full" light={true} className="h-16" />
               </div>
-              <h1 className="text-2xl font-black text-white tracking-tight">Naris Ops</h1>
-              <p className="text-xs text-slate-400 mt-1 font-semibold">نظام تشغيل النظافة والجودة الرقمي الموحد</p>
+              <p className="text-xs text-indigo-300 mt-1 font-semibold">نظام تشغيل النظافة والجودة الرقمي الموحد (Naris Ops)</p>
             </div>
 
             {/* Login Card */}
@@ -196,12 +181,13 @@ export default function App() {
                 </div>
 
                 <div className="flex flex-col gap-1.5">
-                  <label className="text-slate-500">كلمة المرور (اختيارية للتوضيح):</label>
+                  <label className="text-slate-500">كلمة المرور (Password):</label>
                   <div className="relative">
                     <Lock className="w-4 h-4 text-slate-400 absolute right-3 top-3.5" />
                     <input
                       type="password"
-                      placeholder="••••••••"
+                      required
+                      placeholder="أدخل كلمة المرور"
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       className="w-full pr-10 pl-3 py-3 border border-slate-200 rounded-xl outline-none focus:border-slate-400 bg-slate-50/50 text-slate-800"
@@ -213,6 +199,13 @@ export default function App() {
                   <div className="p-3 bg-red-50 text-red-800 border border-red-100 rounded-xl text-xs font-semibold flex items-center gap-2">
                     <AlertTriangle className="w-4 h-4 shrink-0 text-red-600" />
                     <span>{error}</span>
+                  </div>
+                )}
+
+                {successMessage && (
+                  <div className="p-3 bg-emerald-50 text-emerald-800 border border-emerald-100 rounded-xl text-xs font-semibold flex items-center gap-2">
+                    <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600" />
+                    <span>{successMessage}</span>
                   </div>
                 )}
 
@@ -232,29 +225,54 @@ export default function App() {
               {/* Helper Quick Account Credentials Block - Beautiful evaluation help */}
               <div className="mt-6 border-t border-slate-100 pt-4">
                 <span className="text-[10px] text-slate-400 block font-bold mb-2 flex items-center gap-1">
-                  <Info className="w-3.5 h-3.5 text-blue-500" /> حسابات افتراضية مبرمجة للتقييم:
+                  <Info className="w-3.5 h-3.5 text-blue-500" /> حسابات افتراضية للتقييم:
                 </span>
                 <div className="grid grid-cols-3 gap-2 text-center text-[10px] font-bold">
                   <button
                     type="button"
-                    onClick={() => { setUsername("afaf"); setPassword("123"); }}
+                    onClick={() => { setUsername("afaf"); setPassword(""); setError("يرجى إدخال كلمة المرور المخصصة بعد تهيئتها."); setSuccessMessage(null); }}
                     className="bg-slate-50 hover:bg-slate-100 border border-slate-200 p-2 rounded-lg cursor-pointer text-slate-700"
                   >
                     🙋‍♀️ الموظفة عفاف <span className="block text-[8px] text-slate-400 mt-0.5">(afaf)</span>
                   </button>
                   <button
                     type="button"
-                    onClick={() => { setUsername("rehab"); setPassword("123"); }}
+                    onClick={() => { setUsername("rehab"); setPassword(""); setError("يرجى إدخال كلمة المرور المخصصة بعد تهيئتها."); setSuccessMessage(null); }}
                     className="bg-slate-50 hover:bg-slate-100 border border-slate-200 p-2 rounded-lg cursor-pointer text-slate-700"
                   >
                     🙋‍♀️ الموظفة رحاب <span className="block text-[8px] text-slate-400 mt-0.5">(rehab)</span>
                   </button>
                   <button
                     type="button"
-                    onClick={() => { setUsername("admin"); setPassword("123"); }}
+                    onClick={() => { setUsername("admin"); setPassword("admin123"); setError(null); setSuccessMessage(null); }}
                     className="bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 p-2 rounded-lg cursor-pointer text-indigo-700"
                   >
                     👑 مدير العمليات <span className="block text-[8px] text-indigo-400 mt-0.5">(admin)</span>
+                  </button>
+                </div>
+
+                <div className="mt-3 bg-indigo-50/50 p-2.5 rounded-xl border border-indigo-100 text-[10px] text-indigo-800 leading-relaxed font-bold">
+                  <span>💡 إذا تم مسح حسابات التوثيق من Firebase Console مؤخراً، يمكنك إعادة إنشاء حساب المدير الافتراضي بالضغط على الزر أدناه:</span>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setLoading(true);
+                      setError(null);
+                      setSuccessMessage(null);
+                      try {
+                        const pass = await initializeAdminAuth();
+                        setSuccessMessage(`تم تهيئة حساب المدير بنجاح! البريد: admin@narisops.com، كلمة المرور: ${pass}`);
+                        setUsername("admin");
+                        setPassword(pass);
+                      } catch (err: any) {
+                        setError(err.message || "فشل تهيئة حساب المدير");
+                      } finally {
+                        setLoading(false);
+                      }
+                    }}
+                    className="mt-1.5 w-full bg-indigo-600 hover:bg-indigo-700 text-white py-1 rounded-lg text-[9px] font-bold cursor-pointer transition"
+                  >
+                    تهيئة حساب المدير الافتراضي (admin@narisops.com) ⚙️
                   </button>
                 </div>
               </div>

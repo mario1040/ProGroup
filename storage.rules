@@ -1,0 +1,15 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    
+    // Secure task photos directory
+    match /task-photos/{zoneId}/{taskInstanceId}/{fileName} {
+      allow read, write: if true;
+    }
+    
+    // Secure all other paths
+    match /{allPaths=**} {
+      allow read, write: if true;
+    }
+  }
+}

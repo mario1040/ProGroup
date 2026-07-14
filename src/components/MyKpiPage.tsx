@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { Profile } from "../types";
 import { getKpis, KpiSummary } from "../lib/api";
+import ProfessorLogo from "./ProfessorLogo";
 
 interface MyKpiPageProps {
   user: Profile;
@@ -69,12 +70,15 @@ export default function MyKpiPage({ user, onBack }: MyKpiPageProps) {
           </button>
           
           <div className="flex items-center gap-3">
-            <div className="bg-indigo-500/20 text-indigo-300 p-2.5 rounded-2xl border border-indigo-500/30">
-              <Award className="w-6 h-6" />
+            <div className="bg-slate-800 p-1.5 rounded-xl border border-slate-700 flex items-center justify-center">
+              <ProfessorLogo variant="icon" className="h-10 w-10" />
             </div>
             <div>
-              <h1 className="text-lg font-bold">لوحة مؤشرات أداء العمل</h1>
-              <p className="text-xs text-slate-400 mt-0.5">متابعة دقيقة لنسب الالتزام والجودة المنجزة</p>
+              <div className="flex items-center gap-1.5">
+                <ProfessorLogo variant="logo-text" light={true} className="h-4.5" />
+                <span className="text-[10px] bg-emerald-500 text-white py-0.5 px-2 rounded-full font-bold">مؤشرات الأداء</span>
+              </div>
+              <p className="text-xs text-slate-400 mt-1">متابعة دقيقة لنسب الالتزام والجودة المنجزة للعمليات</p>
             </div>
           </div>
         </div>
@@ -155,7 +159,7 @@ export default function MyKpiPage({ user, onBack }: MyKpiPageProps) {
                   <Clock className="w-4 h-4" />
                 </div>
                 <div>
-                  <span className="text-[10px] text-slate-400 block">سرعة العمل</span>
+                  <span className="text-[10px] text-slate-400 block">سرعة .العمل</span>
                   <span className="text-sm font-bold text-slate-800 block mt-0.5">{kpi.avg_execution_time_minutes} دقيقة</span>
                   <span className="text-[9px] text-slate-400 block">متوسط تنفيذ البند الواحد</span>
                 </div>

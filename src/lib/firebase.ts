@@ -4,7 +4,7 @@ import { initializeFirestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 
 // Hardcoded static configuration as a robust fallback to ensure zero runtime file system or download dependencies
-const firebaseConfig = {
+export const firebaseConfig = {
   projectId: "vigilant-welder-0n50x",
   appId: "1:972833537556:web:f3ca0894063702f88d7101",
   apiKey: "AIzaSyCc3MP4cpQ-wmW9v-ovRPW3bNJ3MwGdYFY",
@@ -22,6 +22,11 @@ const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 export const db = initializeFirestore(app, {}, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 export const storage = getStorage(app);
+
+// Configure Storage retry timeouts to fail fast (within 4 seconds) if storage is unprovisioned or blocked,
+// allowing the robust Base64 fallback to kick in instantly.
+storage.maxUploadRetryTime = 4000;
+storage.maxOperationRetryTime = 4000;
 
 // --- Custom Firestore Error Handler (Mandatory as per Firebase Skill Guidelines) ---
 export enum OperationType {

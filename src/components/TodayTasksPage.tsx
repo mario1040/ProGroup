@@ -18,14 +18,9 @@ import {
   Sparkles
 } from "lucide-react";
 import { Profile, TaskInstance, Zone, TaskTemplate } from "../types";
-import { getTasks, updateTask } from "../lib/api";
+import { getTasks, updateTask, getLocalDateString } from "../lib/api";
 import PhotoCapture from "./PhotoCapture";
-
-function getLocalDateString() {
-  const date = new Date();
-  const tzOffset = date.getTimezoneOffset() * 60000;
-  return new Date(date.getTime() - tzOffset).toISOString().split("T")[0];
-}
+import ProfessorLogo from "./ProfessorLogo";
 
 interface TodayTasksPageProps {
   user: Profile;
@@ -43,6 +38,7 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
   const [executingStep, setExecutingStep] = useState<'details' | 'before_photo' | 'after_photo' | 'signature_and_notes'>('details');
   const [photoBefore, setPhotoBefore] = useState<string | null>(null);
   const [photoAfter, setPhotoAfter] = useState<string | null>(null);
+  const [photoAfterMeta, setPhotoAfterMeta] = useState<{ url: string; size: number; mimeType: string; takenAt: string } | null>(null);
   const [notes, setNotes] = useState<string>("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'warning' } | null>(null);
@@ -116,7 +112,9 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
   const handleStartTask = async () => {
     if (!selectedTask) return;
     
-    const requiresPhotoBefore = selectedTask.template ? selectedTask.template.requires_photo_before : true;
+    const requiresPhotoBefore = selectedTask.requires_photo_before !== undefined
+      ? selectedTask.requires_photo_before
+      : (selectedTask.template ? selectedTask.template.requires_photo_before : true);
 
     if (requiresPhotoBefore) {
       // Go to take before photo
@@ -142,14 +140,19 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
   };
 
   // Confirm photo before and transition to in_progress
-  const handlePhotoBeforeSubmitted = async (url: string) => {
+  const handlePhotoBeforeSubmitted = async (meta: { url: string; size: number; mimeType: string; takenAt: string }) => {
     if (!selectedTask) return;
-    setPhotoBefore(url);
+    setPhotoBefore(meta.url);
     
     try {
       setIsSubmitting(true);
       const updated = await updateTask(selectedTask.id, { 
-        photo_before_url: url,
+        photo_before_url: meta.url,
+        photo_before_taken_at: meta.takenAt,
+        photo_before_uploaded_at: new Date().toISOString(),
+        photo_before_size: meta.size,
+        photo_before_mime_type: meta.mimeType,
+        photo_capture_status: 'uploaded',
         status: 'in_progress' 
       });
       showToast("تم تسجيل صورة قبل وبدء المهمة! ⚡", "success");
@@ -170,22 +173,25 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
   // Complete task flow trigger
   const handleFinishTaskClick = () => {
     if (!selectedTask) return;
-    const requiresPhotoAfter = selectedTask.template ? selectedTask.template.requires_photo_after : true;
+    const requiresPhotoAfter = selectedTask.requires_photo_after !== undefined
+      ? selectedTask.requires_photo_after
+      : (selectedTask.template ? selectedTask.template.requires_photo_after : true);
 
     if (requiresPhotoAfter) {
       setExecutingStep('after_photo');
     } else {
       // Skip photo after and go to signature or submit directly
-      goToSignatureOrSubmit();
+      goToSignatureOrSubmit(undefined);
     }
   };
 
-  const handlePhotoAfterSubmitted = (url: string) => {
-    setPhotoAfter(url);
-    goToSignatureOrSubmit();
+  const handlePhotoAfterSubmitted = (meta: { url: string; size: number; mimeType: string; takenAt: string }) => {
+    setPhotoAfter(meta.url);
+    setPhotoAfterMeta(meta);
+    goToSignatureOrSubmit(meta.url);
   };
 
-  const goToSignatureOrSubmit = () => {
+  const goToSignatureOrSubmit = (afterUrl?: string) => {
     if (!selectedTask) return;
     const requiresSignature = selectedTask.template ? selectedTask.template.requires_signature : false;
 
@@ -193,11 +199,11 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
       setExecutingStep('signature_and_notes');
     } else {
       // Submit immediately
-      submitTaskCompleted();
+      submitTaskCompleted(undefined, afterUrl);
     }
   };
 
-  const submitTaskCompleted = async (signatureUrl?: string) => {
+  const submitTaskCompleted = async (signatureUrl?: string, afterUrl?: string) => {
     if (!selectedTask) return;
     setIsSubmitting(true);
     
@@ -205,9 +211,17 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
       const updates: Partial<TaskInstance> = {
         status: 'completed',
         employee_notes: notes,
-        photo_after_url: photoAfter || undefined,
+        photo_after_url: afterUrl || photoAfter || undefined,
         employee_signature_url: signatureUrl || undefined
       };
+
+      if (photoAfterMeta) {
+        updates.photo_after_taken_at = photoAfterMeta.takenAt;
+        updates.photo_after_uploaded_at = new Date().toISOString();
+        updates.photo_after_size = photoAfterMeta.size;
+        updates.photo_after_mime_type = photoAfterMeta.mimeType;
+        updates.photo_capture_status = 'uploaded';
+      }
 
       const updated = await updateTask(selectedTask.id, updates);
       
@@ -222,6 +236,7 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
       setSelectedTask(null);
       setPhotoBefore(null);
       setPhotoAfter(null);
+      setPhotoAfterMeta(null);
       setNotes("");
       setHasSigned(false);
       
@@ -331,11 +346,12 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
       {/* Modern Top Employee Bar */}
       <div className="bg-slate-900 text-white rounded-b-3xl shadow-md p-6">
         <div className="max-w-md mx-auto">
-          <div className="flex justify-between items-start">
+          <div className="flex justify-between items-start gap-4">
             <div>
-              <span className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold block mb-1">
-                تشغيل العمليات • Naris Ops
-              </span>
+              <div className="flex items-center gap-1.5 mb-2">
+                <ProfessorLogo variant="icon" className="h-6 w-6" />
+                <ProfessorLogo variant="logo-text" light={true} className="h-4.5" />
+              </div>
               <h2 className="text-xl font-bold text-white flex items-center gap-2">
                 مرحباً، {user.full_name} 👋
               </h2>
@@ -433,6 +449,10 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
               <div
                 key={task.id}
                 onClick={() => {
+                  setPhotoBefore(null);
+                  setPhotoAfter(null);
+                  setNotes("");
+                  setHasSigned(false);
                   setSelectedTask(task);
                   setExecutingStep('details');
                 }}
@@ -510,6 +530,8 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
                   setSelectedTask(null);
                   setPhotoBefore(null);
                   setPhotoAfter(null);
+                  setNotes("");
+                  setHasSigned(false);
                 }}
                 className="text-xs font-bold text-slate-500 hover:text-slate-800 cursor-pointer flex items-center gap-1 bg-slate-100 py-1.5 px-3 rounded-full"
               >

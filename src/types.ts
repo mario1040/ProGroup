@@ -10,6 +10,7 @@ export interface Profile {
   shift_end?: string; // time
   work_days?: string[]; // e.g. ['السبت', 'الأحد', ...]
   created_at?: string;
+  password?: string;
 }
 
 export interface Location {
@@ -70,9 +71,19 @@ export interface TaskInstance {
   due_date: string; // YYYY-MM-DD
   due_time?: string; // HH:MM
   status: 'pending' | 'in_progress' | 'completed' | 'late' | 'rejected' | 'escalated';
+  requires_photo_before?: boolean;
+  requires_photo_after?: boolean;
   photo_before_url?: string;
+  photo_before_taken_at?: string;
+  photo_before_uploaded_at?: string;
+  photo_before_size?: number;
+  photo_before_mime_type?: string;
   photo_after_url?: string;
   photo_after_taken_at?: string;
+  photo_after_uploaded_at?: string;
+  photo_after_size?: number;
+  photo_after_mime_type?: string;
+  photo_capture_status?: 'pending' | 'uploading' | 'uploaded' | 'failed';
   employee_signature_url?: string;
   employee_notes?: string;
   supervisor_approved: boolean;
