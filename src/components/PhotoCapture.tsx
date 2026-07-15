@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import { Camera, RefreshCw, Upload, CheckCircle, Loader2, AlertCircle, Trash2, ShieldCheck } from "lucide-react";
-import { uploadPhoto, compressImage } from "../lib/api";
+import { uploadPhotoTask, compressImage } from "../lib/api";
+import { getDownloadURL, UploadTask } from "firebase/storage";
 
 interface PhotoCaptureProps {
   label: string;
@@ -104,7 +105,7 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
     }
 
     setUploading(true);
-    setProgress(10);
+    setProgress(0);
     setError(null);
 
     // 1. Verify and parse storagePath parameters
@@ -135,53 +136,62 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
       return;
     }
 
-    // Dynamic progress bar increments to provide visual assurance
-    let currentProgress = 10;
-    const interval = setInterval(() => {
-      setProgress((prev) => {
-        const next = prev >= 85 ? 85 : prev + 15;
-        console.log(`[PhotoCapture] ⏳ Stage 2: Upload progress incrementing: ${next}%`);
-        return next;
-      });
-    }, 120);
-
     try {
       console.log(`[PhotoCapture] 📡 Stage 3: Contacting storage service. Path: ${storagePath}`);
-      const imageUrl = await uploadPhoto(payload, storagePath);
-      
-      clearInterval(interval);
-      setProgress(100);
-      setUploadedUrl(imageUrl);
-      
-      // Determine final metadata safely
-      const finalSize = compressedSize || originalSize || 0;
-      const finalMimeType = mimeType || "image/jpeg";
-      const finalTakenAt = takenAt || new Date().toISOString();
+      const { task: uploadTask } = await uploadPhotoTask(payload, storagePath);
 
-      console.log("[PhotoCapture] 🎉 Stage 4: Upload response received", {
-        imageUrlPrefix: imageUrl ? imageUrl.substring(0, 50) + "..." : "EMPTY",
-        isBase64Fallback: imageUrl ? imageUrl.startsWith("data:") : false,
-        finalSize,
-        finalMimeType,
-        finalTakenAt
-      });
+      uploadTask.on(
+        "state_changed",
+        (snapshot) => {
+          const p = Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100);
+          setProgress(p);
+          console.log(`[PhotoCapture] ⏳ Stage 2: Upload progress: ${p}%`);
+        },
+        (err) => {
+          setError(err.message || "فشل رفع الصورة إلى التخزين السحابي. يرجى المحاولة مرة أخرى.");
+          console.error("[PhotoCapture] ❌ Stage 7: Upload error caught in component:", err);
+          setUploading(false);
+        },
+        async () => {
+          try {
+            const imageUrl = await getDownloadURL(uploadTask.snapshot.ref);
+            setProgress(100);
+            setUploadedUrl(imageUrl);
+            
+            // Determine final metadata safely
+            const finalSize = compressedSize || originalSize || 0;
+            const finalMimeType = mimeType || "image/jpeg";
+            const finalTakenAt = takenAt || new Date().toISOString();
 
-      const metadata = {
-        url: imageUrl,
-        size: finalSize,
-        mimeType: finalMimeType,
-        takenAt: finalTakenAt
-      };
+            console.log("[PhotoCapture] 🎉 Stage 4: Upload response received", {
+              imageUrlPrefix: imageUrl ? imageUrl.substring(0, 50) + "..." : "EMPTY",
+              isBase64Fallback: imageUrl ? imageUrl.startsWith("data:") : false,
+              finalSize,
+              finalMimeType,
+              finalTakenAt
+            });
 
-      console.log("[PhotoCapture] 💾 Stage 5: Emitting metadata to onPhotoUploaded", metadata);
-      
-      onPhotoUploaded(metadata);
-      console.log("[PhotoCapture] ✅ Stage 6: Upload flow fully completed successfully.");
+            const metadata = {
+              url: imageUrl,
+              size: finalSize,
+              mimeType: finalMimeType,
+              takenAt: finalTakenAt
+            };
+
+            console.log("[PhotoCapture] 💾 Stage 5: Emitting metadata to onPhotoUploaded", metadata);
+            
+            onPhotoUploaded(metadata);
+            console.log("[PhotoCapture] ✅ Stage 6: Upload flow fully completed successfully.");
+          } catch (err: any) {
+            setError(err.message || "فشل جلب رابط الصورة. يرجى المحاولة مرة أخرى.");
+          } finally {
+            setUploading(false);
+          }
+        }
+      );
     } catch (err: any) {
-      clearInterval(interval);
       setError(err.message || "فشل رفع الصورة إلى التخزين السحابي. يرجى المحاولة مرة أخرى.");
       console.error("[PhotoCapture] ❌ Stage 7: Upload error caught in component:", err);
-    } finally {
       setUploading(false);
     }
   };

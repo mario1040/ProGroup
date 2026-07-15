@@ -16,12 +16,16 @@ import {
   updateDoc as firebaseUpdateDoc,
   collection, 
   query, 
-  where 
+  where,
+  onSnapshot
 } from "firebase/firestore";
 import { 
   ref as storageRef, 
   uploadString, 
-  getDownloadURL 
+  getDownloadURL,
+  uploadBytesResumable,
+  UploadTask,
+  deleteObject
 } from "firebase/storage";
 import { 
   signInWithEmailAndPassword, 
@@ -725,6 +729,19 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
     }
   }
 
+  // Enforce Signature
+  const requiresSignature = template ? template.requires_signature : false;
+  if (requiresSignature && updates.status === "completed") {
+    if (!merged.employee_signature_url) {
+      throw new Error("خطأ حماية: لا يمكن إغلاق وإكمال هذه المهمة بدون التوقيع الرقمي للموظف.");
+    }
+  }
+
+  // Prevent lifting After photo before Before photo
+  if (updates.photo_after_url && requiresBefore && !merged.photo_before_url) {
+    throw new Error("خطأ حماية: لا يمكن رفع صورة الإثبات بعد العمل قبل رفع صورة الإثبات قبل العمل.");
+  }
+
   // 4. Validate rework tasks
   if (merged.task_type === "rework" && !merged.parent_instance_id) {
     throw new Error("خطأ حماية: لا يمكن إنشاء أو تحديث مهمة إعادة عمل (Rework) بدون الإشارة إلى المهمة الأصلية (Parent Reference).");
@@ -969,6 +986,26 @@ export async function getKpis(): Promise<KpiSummary[]> {
   });
 }
 
+export function listenNotifications(recipientId: string | undefined, callback: (notifications: Notification[]) => void): () => void {
+  let q;
+  if (recipientId) {
+    q = query(collection(db, "notifications"), where("recipient_id", "==", recipientId));
+  } else {
+    q = query(collection(db, "notifications"));
+  }
+
+  const unsubscribe = onSnapshot(q, (snap) => {
+    const list = snap.docs.map(d => ({ id: d.id, ...d.data() } as Notification));
+    // Sort locally because composite index might not exist
+    list.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    callback(list);
+  }, (error) => {
+    console.error("Error listening to notifications:", error);
+  });
+
+  return unsubscribe;
+}
+
 export async function getNotifications(recipientId?: string): Promise<Notification[]> {
   await ensureSeeded();
   let q;
@@ -1083,29 +1120,25 @@ export function compressImage(base64Str: string, maxWidth = 800, maxHeight = 800
   });
 }
 
-export async function uploadPhoto(base64Image: string, path: string): Promise<string> {
-  // Compress first to reduce size substantially (crucial for both network speed and database storage limit)
-  const compressedBase64 = await compressImage(base64Image, 800, 800, 0.6);
-
-  try {
-    const sRef = storageRef(storage, path);
-    const snapshot = await uploadString(sRef, compressedBase64, "data_url");
-    console.log("✅ [Upload Success] Upload completed successfully. Fetching download URL...");
-    const downloadUrl = await getDownloadURL(snapshot.ref);
-    console.log(`- Download URL resolved: ${downloadUrl}`);
-    return downloadUrl;
-  } catch (err: any) {
-    console.warn("⚠️ [Upload Fallback] Firebase Storage upload failed. Falling back to storing compressed Base64 data URL in Firestore.", err);
-    // Compress further to ensure it's lightweight for Firestore document storage (under 1MB)
-    try {
-      const superCompressedBase64 = await compressImage(base64Image, 400, 400, 0.45);
-      console.log(`✅ [Upload Fallback Success] Generated lightweight fallback Base64 (length: ${superCompressedBase64.length})`);
-      return superCompressedBase64;
-    } catch (compressErr) {
-      console.error("❌ [Upload Fallback Failed] Compression failed, returning original compressed base64:", compressErr);
-      return compressedBase64;
-    }
+export function base64ToBlob(base64: string): Blob {
+  const arr = base64.split(",");
+  const mimeMatch = arr[0].match(/:(.*?);/);
+  const mime = mimeMatch ? mimeMatch[1] : "image/jpeg";
+  const bstr = atob(arr[1]);
+  let n = bstr.length;
+  const u8arr = new Uint8Array(n);
+  while (n--) {
+    u8arr[n] = bstr.charCodeAt(n);
   }
+  return new Blob([u8arr], { type: mime });
+}
+
+export async function uploadPhotoTask(base64Image: string, path: string): Promise<{ task: UploadTask }> {
+  const compressedBase64 = await compressImage(base64Image, 800, 800, 0.6);
+  const blob = base64ToBlob(compressedBase64);
+  const sRef = storageRef(storage, path);
+  const task = uploadBytesResumable(sRef, blob);
+  return { task };
 }
 
 export async function resetDatabase(): Promise<void> {

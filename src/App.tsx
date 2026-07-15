@@ -13,7 +13,7 @@ import {
   Smartphone,
   LayoutDashboard
 } from "lucide-react";
-import { loginUser, getNotifications, markNotificationAsRead, getCurrentUserProfile, logoutUser, initializeAdminAuth } from "./lib/api";
+import { loginUser, listenNotifications, markNotificationAsRead, getCurrentUserProfile, logoutUser, initializeAdminAuth } from "./lib/api";
 import { auth } from "./lib/firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import { Profile, Notification } from "./types";
@@ -58,24 +58,13 @@ export default function App() {
     setAuthLoading(false);
   }, []);
 
-  // Fetch notifications for the user
-  const loadNotifications = async () => {
-    if (!user) return;
-    try {
-      // In cleaner role, fetch only theirs; in admin, fetch all
-      const list = await getNotifications(user.role === "cleaner" ? user.id : undefined);
-      setNotifications(list);
-    } catch (e) {
-      console.error("Failed to load notifications", e);
-    }
-  };
-
   useEffect(() => {
     if (user) {
-      loadNotifications();
-      // Poll notifications every 8 seconds for a rich, real-time feel
-      const interval = setInterval(loadNotifications, 8000);
-      return () => clearInterval(interval);
+      const recipientId = user.role === "cleaner" ? user.id : undefined;
+      const unsubscribe = listenNotifications(recipientId, (list) => {
+        setNotifications(list);
+      });
+      return () => unsubscribe();
     }
   }, [user]);
 
