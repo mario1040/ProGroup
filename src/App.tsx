@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, useRef } from "react";
 import {
   AlertTriangle,
   Bell,
@@ -66,6 +66,34 @@ function parseStoredSession(raw: string | null): SessionSummary | null {
   }
 }
 
+const playNotificationSound = () => {
+  try {
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContextClass) return;
+    
+    const audioCtx = new AudioContextClass();
+    const oscillator = audioCtx.createOscillator();
+    const gainNode = audioCtx.createGain();
+    
+    // Very quick, gentle notification "ping" sound
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); 
+    oscillator.frequency.exponentialRampToValueAtTime(1760, audioCtx.currentTime + 0.05);
+    
+    gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+    gainNode.gain.linearRampToValueAtTime(0.2, audioCtx.currentTime + 0.02);
+    gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
+    
+    oscillator.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+    
+    oscillator.start(audioCtx.currentTime);
+    oscillator.stop(audioCtx.currentTime + 0.2);
+  } catch (e) {
+    console.error("Audio playback failed", e);
+  }
+};
+
 export default function App() {
   const [user, setUser] = useState<Profile | null>(null);
   const [username, setUsername] = useState("");
@@ -78,6 +106,7 @@ export default function App() {
   const [cleanerView, setCleanerView] = useState<"tasks" | "kpis">("tasks");
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
+  const notifiedIds = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -126,12 +155,50 @@ export default function App() {
     if (!user) {
       setNotifications([]);
       setShowNotifications(false);
+      notifiedIds.current.clear();
       return;
+    }
+
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission();
     }
 
     const recipientId = user.role === "cleaner" ? user.id : undefined;
     const unsubscribe = listenNotifications(recipientId, (list) => {
       setNotifications(list);
+
+      let playedSound = false;
+
+      if ("Notification" in window && Notification.permission === "granted") {
+        list.forEach((notif) => {
+          if (!notif.is_read && !notifiedIds.current.has(notif.id)) {
+            notifiedIds.current.add(notif.id);
+            // Only alert for recent notifications (last 2 minutes)
+            const isRecent = notif.created_at && (new Date().getTime() - new Date(notif.created_at).getTime() < 120000);
+            if (isRecent) {
+              if (!playedSound) {
+                playNotificationSound();
+                playedSound = true;
+              }
+              new Notification(notif.title, {
+                body: notif.body,
+              });
+            }
+          }
+        });
+      } else {
+        // Fallback: still play sound even if system notifications are denied
+        list.forEach((notif) => {
+          if (!notif.is_read && !notifiedIds.current.has(notif.id)) {
+            notifiedIds.current.add(notif.id);
+            const isRecent = notif.created_at && (new Date().getTime() - new Date(notif.created_at).getTime() < 120000);
+            if (isRecent && !playedSound) {
+              playNotificationSound();
+              playedSound = true;
+            }
+          }
+        });
+      }
     });
 
     return () => unsubscribe();
