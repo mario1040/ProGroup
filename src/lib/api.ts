@@ -115,7 +115,7 @@ async function ensureSeeded(): Promise<void> {
       for (const p of seeded.profiles) {
         const profileToSeed = {
           ...p,
-          password: (p as any).password || (p.username === "admin" ? "admin123" : "123456")
+          password: await normalizePasswordRecord((p as any).password, p.username === "admin" ? "admin123" : "123456")
         };
         await setDoc(doc(db, "users", p.id), profileToSeed);
       }
@@ -193,28 +193,14 @@ const PRE_SEEDED_USERS = [
   { id: "p4", username: "supervisor", full_name: "خالد المشرف", phone: "01555666777", role: "supervisor" }
 ];
 
+
 export async function loginUser(username: string, password?: string): Promise<Profile> {
   const cleanInput = username.trim().toLowerCase();
-  
-  // 1. Resolve username from local pre-seeded users or assume input itself is the username
-  let targetUsername = cleanInput;
-  const matchedPreSeeded = PRE_SEEDED_USERS.find(u => 
-    u.username.toLowerCase() === cleanInput ||
-    u.full_name.toLowerCase() === cleanInput ||
-    u.full_name.toLowerCase().includes(cleanInput) ||
-    u.phone === cleanInput
-  );
-  if (matchedPreSeeded) {
-    targetUsername = matchedPreSeeded.username;
-  } else if (cleanInput.includes("admin") || cleanInput.includes("مدير")) {
-    targetUsername = "admin";
-  }
 
   if (!password) {
     throw new Error("يرجى إدخال كلمة المرور");
   }
 
-  // Ensure the database has seeded documents
   await ensureSeeded();
 
   let snap;
@@ -229,7 +215,17 @@ export async function loginUser(username: string, password?: string): Promise<Pr
     users.push(docSnap.data() as Profile);
   });
 
-  const profile = users.find((p) => p.username?.toLowerCase() === targetUsername);
+  let profile = users.find((p) => p.username?.trim().toLowerCase() === cleanInput);
+  if (!profile) {
+    profile = users.find((p) => p.phone?.trim() === cleanInput);
+  }
+  if (!profile) {
+    profile = users.find((p) => p.full_name?.trim().toLowerCase() === cleanInput);
+  }
+  if (!profile && (cleanInput === "admin" || cleanInput.includes("مدير"))) {
+    profile = users.find((p) => p.role === "admin" && p.is_active !== false);
+  }
+
   if (!profile) {
     throw new Error("الموظف غير مسجل أو غير نشط في النظام");
   }
@@ -238,9 +234,11 @@ export async function loginUser(username: string, password?: string): Promise<Pr
     throw new Error("هذا الحساب معطل أو غير نشط في النظام");
   }
 
-  // Custom password matching check!
-  const expectedPassword = profile.password || (profile.username === "admin" ? "admin123" : "123456");
-  if (password !== expectedPassword) {
+  const fallbackPassword = profile.username === "admin" ? "admin123" : "123456";
+  const storedPassword = profile.password || fallbackPassword;
+  const matched = await verifyPassword(password, storedPassword);
+
+  if (!matched) {
     throw new Error("اسم المستخدم أو كلمة المرور غير صحيحة");
   }
 
@@ -288,40 +286,130 @@ export async function getProfiles(): Promise<Profile[]> {
   return profiles;
 }
 
-function generateSecureRandomPassword(): string {
-  const letters = "abcdefghijklmnopqrstuvwxyz";
+
+function getRandomBytes(length: number): Uint8Array {
+  const bytes = new Uint8Array(length);
+  if (typeof globalThis !== "undefined" && globalThis.crypto && typeof globalThis.crypto.getRandomValues === "function") {
+    globalThis.crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < length; i++) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+  return bytes;
+}
+
+function randomHex(length = 16): string {
+  return Array.from(getRandomBytes(length), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function randomInt(maxExclusive: number): number {
+  if (maxExclusive <= 0) return 0;
+  const bytes = getRandomBytes(4);
+  const view = new DataView(bytes.buffer);
+  return view.getUint32(0, false) % maxExclusive;
+}
+
+function shuffleWithCrypto<T>(items: T[]): T[] {
+  const arr = [...items];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = randomInt(i + 1);
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function generateSecureRandomPassword(length = 12): string {
+  const lower = "abcdefghijklmnopqrstuvwxyz";
   const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   const digits = "0123456789";
   const specials = "!@#$*";
-  
-  let pass = "";
-  pass += letters.charAt(Math.floor(Math.random() * letters.length));
-  pass += upper.charAt(Math.floor(Math.random() * upper.length));
-  pass += digits.charAt(Math.floor(Math.random() * digits.length));
-  pass += specials.charAt(Math.floor(Math.random() * specials.length));
-  
-  const allChars = letters + upper + digits + specials;
-  for (let i = 0; i < 6; i++) {
-    pass += allChars.charAt(Math.floor(Math.random() * allChars.length));
+  const all = lower + upper + digits + specials;
+
+  const seed = [
+    lower[randomInt(lower.length)],
+    upper[randomInt(upper.length)],
+    digits[randomInt(digits.length)],
+    specials[randomInt(specials.length)],
+  ];
+
+  while (seed.length < length) {
+    seed.push(all[randomInt(all.length)]);
   }
-  return pass.split('').sort(() => Math.random() - 0.5).join('');
+
+  return shuffleWithCrypto(seed).join("");
 }
+
+function isStoredPasswordRecord(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{16,}:[a-f0-9]{64}$/i.test(value);
+}
+
+async function hashText(value: string): Promise<string> {
+  if (typeof globalThis === "undefined" || !globalThis.crypto || !globalThis.crypto.subtle) {
+    // Fallback only for extremely constrained runtimes.
+    return `legacy:${value}`;
+  }
+
+  const bytes = new TextEncoder().encode(value);
+  const hashBuffer = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(hashBuffer), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function createPasswordRecord(plainPassword: string): Promise<string> {
+  const salt = randomHex(16);
+  const hash = await hashText(`${salt}:${plainPassword}`);
+  return `${salt}:${hash}`;
+}
+
+async function normalizePasswordRecord(existingPassword: unknown, fallbackPlain: string): Promise<string> {
+  if (isStoredPasswordRecord(existingPassword)) {
+    return existingPassword;
+  }
+
+  const plain = typeof existingPassword === "string" && existingPassword.trim().length > 0
+    ? existingPassword
+    : fallbackPlain;
+
+  return createPasswordRecord(plain);
+}
+
+async function verifyPassword(plainPassword: string, storedPassword: unknown): Promise<boolean> {
+  if (typeof storedPassword !== "string" || !storedPassword) {
+    return false;
+  }
+
+  if (isStoredPasswordRecord(storedPassword)) {
+    const [salt, expectedHash] = storedPassword.split(":");
+    const hash = await hashText(`${salt}:${plainPassword}`);
+    return hash === expectedHash;
+  }
+
+  // Backward compatibility for legacy seeded data or pre-hashed runtime values.
+  return storedPassword === plainPassword;
+}
+
+function makeDocumentId(prefix: string): string {
+  return `${prefix}_${randomHex(8)}`;
+}
+
 
 export async function saveProfile(profile: Partial<Profile>): Promise<{ profile: Profile; generatedPassword?: string }> {
   await ensureSeeded();
   if (profile.is_active === undefined) {
     profile.is_active = true;
   }
-  
+
+  const { password, ...profileWithoutPassword } = profile as any;
+
   let finalProfile: any;
   let generatedPassword: string | undefined;
 
   if (!profile.id) {
-    generatedPassword = profile.password || generateSecureRandomPassword();
+    generatedPassword = typeof password === "string" && password.length > 0 ? password : generateSecureRandomPassword();
     finalProfile = {
-      ...profile,
-      password: generatedPassword,
-      id: "p_" + Math.random().toString(36).substr(2, 9),
+      ...profileWithoutPassword,
+      password: await createPasswordRecord(generatedPassword),
+      id: makeDocumentId("p"),
       created_at: new Date().toISOString()
     };
   } else {
@@ -333,16 +421,30 @@ export async function saveProfile(profile: Partial<Profile>): Promise<{ profile:
       handleFirestoreError(error, OperationType.GET, `users/${profile.id}`);
     }
     const existing = snap.exists() ? snap.data() : {};
-    
-    const newPassword = profile.password || existing.password || "123456";
 
-    finalProfile = { 
-      ...existing, 
-      ...profile,
-      password: newPassword
-    };
+    if (typeof password === "string" && password.length > 0) {
+      finalProfile = {
+        ...existing,
+        ...profileWithoutPassword,
+        password: await createPasswordRecord(password)
+      };
+    } else if ((existing as any).password) {
+      finalProfile = {
+        ...existing,
+        ...profileWithoutPassword,
+        password: await normalizePasswordRecord((existing as any).password, profile.username === "admin" ? "admin123" : "123456")
+      };
+    } else {
+      const fallback = profile.username === "admin" ? "admin123" : generateSecureRandomPassword();
+      finalProfile = {
+        ...existing,
+        ...profileWithoutPassword,
+        password: await createPasswordRecord(fallback)
+      };
+      generatedPassword = fallback;
+    }
   }
-  
+
   await setDoc(doc(db, "users", finalProfile.id), finalProfile);
   return { profile: finalProfile as Profile, generatedPassword };
 }
@@ -364,8 +466,9 @@ export async function provisionEmployeeAuth(profileId: string): Promise<string> 
 
   await setDoc(docRef, {
     ...profile,
-    password: generatedPassword
+    password: await createPasswordRecord(generatedPassword)
   });
+
   return generatedPassword;
 }
 
@@ -378,14 +481,16 @@ export async function initializeAdminAuth(): Promise<string> {
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, "users/p1");
   }
+
   const defaultPassword = "admin123";
   if (snap.exists()) {
     const profile = snap.data() as Profile;
     await setDoc(docRef, {
       ...profile,
-      password: profile.password || defaultPassword
+      password: await normalizePasswordRecord((profile as any).password, defaultPassword)
     });
   }
+
   return defaultPassword;
 }
 
@@ -416,7 +521,7 @@ export async function saveZone(zone: Partial<Zone>): Promise<Zone> {
   if (!zone.id) {
     finalZone = {
       ...zone,
-      id: "z_" + Math.random().toString(36).substr(2, 9),
+      id: "z_" + randomHex(8),
       created_at: new Date().toISOString()
     };
   } else {
@@ -455,7 +560,7 @@ export async function saveTemplate(template: Partial<TaskTemplate>): Promise<Tas
   if (!template.id) {
     finalTemplate = {
       ...template,
-      id: "t_" + Math.random().toString(36).substr(2, 9),
+      id: "t_" + randomHex(8),
       created_at: new Date().toISOString()
     };
   } else {
@@ -520,7 +625,7 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
           console.log(`[Firestore Client] Generating missing recurring SOP tasks for ${todayStr}...`);
           generatedAny = true;
         }
-        const id = "ti_" + Math.random().toString(36).substr(2, 9);
+        const id = "ti_" + randomHex(8);
         const newInstance: TaskInstance = {
           id,
           template_id: tpl.id,
@@ -541,7 +646,7 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
         await setDoc(doc(db, "task_instances", id), newInstance);
         instances.push(newInstance);
         
-        const notifId = "n_" + Math.random().toString(36).substr(2, 9);
+        const notifId = "n_" + randomHex(8);
         const notif = {
           id: notifId,
           recipient_id: newInstance.assigned_to,
@@ -636,7 +741,7 @@ export async function getTasksForRange(startDate: string, endDate: string): Prom
 
 export async function createTask(task: Partial<TaskInstance>): Promise<TaskInstance> {
   await ensureSeeded();
-  const id = "ti_" + Math.random().toString(36).substr(2, 9);
+  const id = "ti_" + randomHex(8);
   const newInstance: TaskInstance = {
     id,
     zone_id: task.zone_id || "z1",
@@ -663,7 +768,7 @@ export async function createTask(task: Partial<TaskInstance>): Promise<TaskInsta
   
   await setDoc(doc(db, "task_instances", id), newInstance);
   
-  const notifId = "n_" + Math.random().toString(36).substr(2, 9);
+  const notifId = "n_" + randomHex(8);
   const notif = {
     id: notifId,
     recipient_id: newInstance.assigned_to,
@@ -816,7 +921,7 @@ export async function approveTask(id: string, approval: { supervisor_id: string;
   
   await setDoc(docRef, task);
   
-  const notifId = "n_" + Math.random().toString(36).substr(2, 9);
+  const notifId = "n_" + randomHex(8);
   const notif = {
     id: notifId,
     recipient_id: task.assigned_to,
@@ -861,7 +966,7 @@ export async function rejectTask(id: string, rejection: { supervisor_id: string;
   
   await setDoc(docRef, originalTask);
   
-  const reworkId = "ti_rework_" + Math.random().toString(36).substr(2, 9);
+  const reworkId = "ti_rework_" + randomHex(8);
   const reworkTask: TaskInstance = {
     id: reworkId,
     template_id: originalTask.template_id,
@@ -882,7 +987,7 @@ export async function rejectTask(id: string, rejection: { supervisor_id: string;
   
   await setDoc(doc(db, "task_instances", reworkId), reworkTask);
   
-  const notifId = "n_" + Math.random().toString(36).substr(2, 9);
+  const notifId = "n_" + randomHex(8);
   const notif = {
     id: notifId,
     recipient_id: originalTask.assigned_to,
@@ -929,7 +1034,7 @@ export async function getKpis(): Promise<KpiSummary[]> {
     tasks.push(docSnap.data() as TaskInstance);
   });
   
-  return cleaners.map((cleaner) => {
+  const kpisData = cleaners.map((cleaner) => {
     const cleanerTasks = tasks.filter((t) => t.assigned_to === cleaner.id);
     
     const total = cleanerTasks.length;
@@ -939,7 +1044,7 @@ export async function getKpis(): Promise<KpiSummary[]> {
     const reworked = cleanerTasks.filter((t) => t.task_type === "rework").length;
     const rejected = cleanerTasks.filter((t) => t.status === "rejected").length;
     
-    const compliance_rate = completed > 0 ? Math.round((onTime / completed) * 100) : 100;
+    const compliance_rate = completed > 0 ? Math.round((onTime / completed) * 100) : 0;
     
     let totalDuration = 0;
     let durationCount = 0;
@@ -954,7 +1059,7 @@ export async function getKpis(): Promise<KpiSummary[]> {
         }
       }
     });
-    const avg_execution_time_minutes = durationCount > 0 ? Math.round((totalDuration / durationCount) * 10) / 10 : 20;
+    const avg_execution_time_minutes = durationCount > 0 ? Math.round((totalDuration / durationCount) * 10) / 10 : 0;
     
     let qualitySum = 0;
     let gradedCount = 0;
@@ -966,8 +1071,8 @@ export async function getKpis(): Promise<KpiSummary[]> {
         else if (t.quality_grade === "C") qualitySum += 60;
       }
     });
-    const quality_score = gradedCount > 0 ? Math.round(qualitySum / gradedCount) : 95;
-    const supervisor_rating = quality_score >= 90 ? 4.9 : quality_score >= 80 ? 4.5 : 3.8;
+    const quality_score = gradedCount > 0 ? Math.round(qualitySum / gradedCount) : 0;
+    const supervisor_rating = quality_score > 0 ? (quality_score >= 90 ? 4.9 : quality_score >= 80 ? 4.5 : 3.8) : 0;
     
     return {
       profile_id: cleaner.id,
@@ -983,6 +1088,19 @@ export async function getKpis(): Promise<KpiSummary[]> {
       quality_score,
       supervisor_rating
     };
+  });
+
+  return kpisData.sort((a, b) => {
+    // Primary sort: Quality Score
+    if (b.quality_score !== a.quality_score) {
+      return b.quality_score - a.quality_score;
+    }
+    // Secondary sort: Compliance Rate
+    if (b.compliance_rate !== a.compliance_rate) {
+      return b.compliance_rate - a.compliance_rate;
+    }
+    // Tertiary sort: Completed tasks on time
+    return b.tasks_completed_on_time - a.tasks_completed_on_time;
   });
 }
 
@@ -1120,6 +1238,7 @@ export function compressImage(base64Str: string, maxWidth = 800, maxHeight = 800
   });
 }
 
+
 export function base64ToBlob(base64: string): Blob {
   const arr = base64.split(",");
   const mimeMatch = arr[0].match(/:(.*?);/);
@@ -1133,12 +1252,52 @@ export function base64ToBlob(base64: string): Blob {
   return new Blob([u8arr], { type: mime });
 }
 
+function waitForUploadTask(task: UploadTask): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const unsubscribe = task.on(
+      "state_changed",
+      () => {
+        // Intentionally handled by the caller / component if needed.
+      },
+      (error) => {
+        unsubscribe();
+        reject(error);
+      },
+      async () => {
+        try {
+          const downloadUrl = await getDownloadURL(task.snapshot.ref);
+          unsubscribe();
+          resolve(downloadUrl);
+        } catch (err) {
+          unsubscribe();
+          reject(err);
+        }
+      }
+    );
+  });
+}
+
 export async function uploadPhotoTask(base64Image: string, path: string): Promise<{ task: UploadTask }> {
   const compressedBase64 = await compressImage(base64Image, 800, 800, 0.6);
   const blob = base64ToBlob(compressedBase64);
   const sRef = storageRef(storage, path);
   const task = uploadBytesResumable(sRef, blob);
   return { task };
+}
+
+export async function uploadPhoto(base64Image: string, path: string): Promise<string> {
+  const { task } = await uploadPhotoTask(base64Image, path);
+  return waitForUploadTask(task);
+}
+
+export async function deletePhoto(path: string): Promise<void> {
+  try {
+    const sRef = storageRef(storage, path);
+    await deleteObject(sRef);
+    console.log(`[Storage] Rollback successful: deleted ${path}`);
+  } catch (err) {
+    console.warn(`[Storage] Rollback failed: couldn't delete ${path}`, err);
+  }
 }
 
 export async function resetDatabase(): Promise<void> {

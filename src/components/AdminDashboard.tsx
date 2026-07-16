@@ -1040,19 +1040,25 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                               </div>
                               <div>
                                 <h4 className="text-xs font-bold text-slate-800">{kpi.cleaner_name}</h4>
-                                <span className="text-[10px] text-slate-400 font-medium">متوسط وقت إنجاز البند: {kpi.avg_execution_time_minutes} دقيقة</span>
+                                <span className="text-[10px] text-slate-400 font-medium">متوسط وقت إنجاز البند: {(kpi.tasks_completed_on_time + kpi.tasks_late + kpi.tasks_reworked + kpi.tasks_rejected) === 0 ? '-' : kpi.avg_execution_time_minutes} دقيقة</span>
                               </div>
                             </div>
 
                             <div className="flex items-center gap-6">
                               <div className="text-left">
                                 <span className="text-[10px] text-slate-400 block font-bold">نسبة الالتزام</span>
-                                <span className={`text-xs font-extrabold ${kpi.compliance_rate >= 90 ? 'text-emerald-600' : 'text-amber-500'}`}>{kpi.compliance_rate}%</span>
+                                {(kpi.tasks_completed_on_time + kpi.tasks_late + kpi.tasks_reworked + kpi.tasks_rejected) === 0 ? (
+                                  <span className="text-[10px] font-bold text-slate-400">-</span>
+                                ) : (
+                                  <span className={`text-xs font-extrabold ${kpi.compliance_rate >= 90 ? 'text-emerald-600' : 'text-amber-500'}`}>{kpi.compliance_rate}%</span>
+                                )}
                               </div>
 
                               <div className="text-left">
                                 <span className="text-[10px] text-slate-400 block font-bold">تقييم الجودة</span>
-                                <span className="text-xs font-extrabold text-slate-800">{kpi.quality_score}%</span>
+                                <span className="text-xs font-extrabold text-slate-800">
+                                  {(kpi.tasks_completed_on_time + kpi.tasks_late + kpi.tasks_reworked + kpi.tasks_rejected) === 0 ? "-" : `${kpi.quality_score}%`}
+                                </span>
                               </div>
 
                               <div className="text-left">
@@ -1075,9 +1081,9 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                         <div>
                           <div className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">أفضل أداء التزام هذا الأسبوع</div>
                           <div className="text-sm font-black font-sans text-indigo-200">
-                            {kpis.length > 0 
-                              ? `${[...kpis].sort((a,b) => b.compliance_rate - a.compliance_rate)[0].cleaner_name} (${[...kpis].sort((a,b) => b.compliance_rate - a.compliance_rate)[0].compliance_rate}%)`
-                              : "عفاف حسن (98.5%)"}
+                            {kpis.filter(k => k.tasks_completed_on_time > 0).length > 0 
+                              ? `${[...kpis].filter(k => k.tasks_completed_on_time > 0).sort((a,b) => b.compliance_rate - a.compliance_rate)[0].cleaner_name} (${[...kpis].filter(k => k.tasks_completed_on_time > 0).sort((a,b) => b.compliance_rate - a.compliance_rate)[0].compliance_rate}%)`
+                              : "لا يوجد تقييم كافي"}
                           </div>
                         </div>
                       </div>
@@ -1089,9 +1095,9 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                         <div>
                           <div className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">متوسط سرعة الإنجاز الموحد</div>
                           <div className="text-sm font-black font-sans text-emerald-300">
-                            {kpis.length > 1
-                              ? `${Math.round(kpis.reduce((acc, curr) => acc + curr.avg_execution_time_minutes, 0) / kpis.length)} دقيقة / بند`
-                              : "18 دقيقة / بند"}
+                            {kpis.filter(k => k.avg_execution_time_minutes > 0).length > 0
+                              ? `${Math.round(kpis.filter(k => k.avg_execution_time_minutes > 0).reduce((acc, curr) => acc + curr.avg_execution_time_minutes, 0) / kpis.filter(k => k.avg_execution_time_minutes > 0).length)} دقيقة / بند`
+                              : "لا يوجد تقييم كافي"}
                           </div>
                         </div>
                       </div>
@@ -1664,18 +1670,28 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                               <td className="p-3 text-rose-600 font-bold">{kpi.tasks_late}</td>
                               <td className="p-3 text-purple-600 font-bold">{kpi.tasks_reworked}</td>
                               <td className="p-3">
-                                <span className={`font-bold py-0.5 px-2 rounded-full border ${
-                                  kpi.compliance_rate >= 90 ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
-                                  kpi.compliance_rate >= 80 ? "bg-amber-50 text-amber-700 border-amber-200" :
-                                  "bg-rose-50 text-rose-700 border-rose-200"
-                                }`}>
-                                  {kpi.compliance_rate}%
-                                </span>
+                                {(kpi.tasks_completed_on_time + kpi.tasks_late + kpi.tasks_reworked + kpi.tasks_rejected) === 0 ? (
+                                  <span className="font-bold py-0.5 px-2 rounded-full border bg-slate-50 text-slate-500 border-slate-200 text-[10px]">لم يتم التقييم</span>
+                                ) : (
+                                  <span className={`font-bold py-0.5 px-2 rounded-full border ${
+                                    kpi.compliance_rate >= 90 ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
+                                    kpi.compliance_rate >= 80 ? "bg-amber-50 text-amber-700 border-amber-200" :
+                                    "bg-rose-50 text-rose-700 border-rose-200"
+                                  }`}>
+                                    {kpi.compliance_rate}%
+                                  </span>
+                                )}
                               </td>
-                              <td className="p-3 text-slate-600">{kpi.avg_execution_time_minutes} دقيقة</td>
-                              <td className="p-3 text-slate-800 font-extrabold">{kpi.quality_score}%</td>
+                              <td className="p-3 text-slate-600">
+                                {(kpi.tasks_completed_on_time + kpi.tasks_late + kpi.tasks_reworked + kpi.tasks_rejected) === 0 ? "-" : `${kpi.avg_execution_time_minutes} دقيقة`}
+                              </td>
+                              <td className="p-3 text-slate-800 font-extrabold">
+                                {(kpi.tasks_completed_on_time + kpi.tasks_late + kpi.tasks_reworked + kpi.tasks_rejected) === 0 ? "-" : `${kpi.quality_score}%`}
+                              </td>
                               <td className="p-3">
-                                {kpi.compliance_rate >= 90 ? (
+                                {(kpi.tasks_completed_on_time + kpi.tasks_late + kpi.tasks_reworked + kpi.tasks_rejected) === 0 ? (
+                                  <span className="text-[10px] text-slate-400">لا توجد بيانات</span>
+                                ) : kpi.compliance_rate >= 90 ? (
                                   <span className="text-xs text-amber-600 font-bold flex items-center gap-1 bg-amber-50 py-1 px-2 rounded-full border border-amber-200 w-max">
                                     <Sparkles className="w-3.5 h-3.5 text-amber-500" /> مرشحة للتميز
                                   </span>
@@ -1699,7 +1715,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                       
                       <div className="h-64">
                         <ResponsiveContainer width="100%" height="100%">
-                          <BarChart data={kpis} margin={{ top: 10, right: 10, left: 10, bottom: 5 }}>
+                          <BarChart data={kpis.filter(k => (k.tasks_completed_on_time + k.tasks_late + k.tasks_reworked + k.tasks_rejected) > 0)} margin={{ top: 10, right: 10, left: 10, bottom: 5 }}>
                             <CartesianGrid strokeDasharray="3 3" />
                             <XAxis dataKey="cleaner_name" tick={{ fontSize: 11 }} />
                             <YAxis domain={[0, 100]} />
@@ -1718,7 +1734,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                       
                       <div className="h-64">
                         <ResponsiveContainer width="100%" height="100%">
-                          <BarChart data={kpis} margin={{ top: 10, right: 10, left: 10, bottom: 5 }}>
+                          <BarChart data={kpis.filter(k => (k.tasks_completed_on_time + k.tasks_late + k.tasks_reworked + k.tasks_rejected) > 0)} margin={{ top: 10, right: 10, left: 10, bottom: 5 }}>
                             <CartesianGrid strokeDasharray="3 3" />
                             <XAxis dataKey="cleaner_name" tick={{ fontSize: 11 }} />
                             <YAxis />

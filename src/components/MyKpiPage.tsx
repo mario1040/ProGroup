@@ -37,15 +37,15 @@ export default function MyKpiPage({ user, onBack }: MyKpiPageProps) {
             profile_id: user.id,
             cleaner_name: user.full_name,
             username: user.username,
-            tasks_assigned: 12,
-            tasks_completed_on_time: 11,
-            tasks_late: 1,
+            tasks_assigned: 0,
+            tasks_completed_on_time: 0,
+            tasks_late: 0,
             tasks_reworked: 0,
             tasks_rejected: 0,
-            compliance_rate: 92,
-            avg_execution_time_minutes: 18,
-            quality_score: 95,
-            supervisor_rating: 4.8
+            compliance_rate: 0,
+            avg_execution_time_minutes: 0,
+            quality_score: 0,
+            supervisor_rating: 0
           });
         }
       } catch (err) {
@@ -125,18 +125,24 @@ export default function MyKpiPage({ user, onBack }: MyKpiPageProps) {
                     cx="64"
                     cy="64"
                     r="54"
-                    stroke={kpi.compliance_rate >= 90 ? "#10b981" : kpi.compliance_rate >= 80 ? "#f59e0b" : "#ef4444"}
+                    stroke={(kpi.tasks_completed_on_time + kpi.tasks_late + kpi.tasks_reworked + kpi.tasks_rejected) === 0 ? "#cbd5e1" : kpi.compliance_rate >= 90 ? "#10b981" : kpi.compliance_rate >= 80 ? "#f59e0b" : "#ef4444"}
                     strokeWidth="10"
                     fill="transparent"
                     strokeDasharray={2 * Math.PI * 54}
-                    strokeDashoffset={2 * Math.PI * 54 * (1 - kpi.compliance_rate / 100)}
+                    strokeDashoffset={2 * Math.PI * 54 * (1 - ((kpi.tasks_completed_on_time + kpi.tasks_late + kpi.tasks_reworked + kpi.tasks_rejected) === 0 ? 0 : kpi.compliance_rate) / 100)}
                     strokeLinecap="round"
                     className="transition-all duration-1000 ease-out"
                   />
                 </svg>
                 <div className="absolute inset-0 flex flex-col items-center justify-center">
-                  <span className="text-2xl font-extrabold text-slate-800">{kpi.compliance_rate}%</span>
-                  <span className="text-[9px] text-slate-400 font-bold block">معدل الانضباط</span>
+                  {(kpi.tasks_completed_on_time + kpi.tasks_late + kpi.tasks_reworked + kpi.tasks_rejected) === 0 ? (
+                     <span className="text-xs font-bold text-slate-500">لم يتم<br/>التقييم</span>
+                  ) : (
+                    <>
+                      <span className="text-2xl font-extrabold text-slate-800">{kpi.compliance_rate}%</span>
+                      <span className="text-[9px] text-slate-400 font-bold block">معدل الانضباط</span>
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -159,8 +165,10 @@ export default function MyKpiPage({ user, onBack }: MyKpiPageProps) {
                   <Clock className="w-4 h-4" />
                 </div>
                 <div>
-                  <span className="text-[10px] text-slate-400 block">سرعة .العمل</span>
-                  <span className="text-sm font-bold text-slate-800 block mt-0.5">{kpi.avg_execution_time_minutes} دقيقة</span>
+                  <span className="text-[10px] text-slate-400 block">سرعة العمل</span>
+                  <span className="text-sm font-bold text-slate-800 block mt-0.5">
+                    {(kpi.tasks_completed_on_time + kpi.tasks_late + kpi.tasks_reworked + kpi.tasks_rejected) === 0 ? "-" : `${kpi.avg_execution_time_minutes} دقيقة`}
+                  </span>
                   <span className="text-[9px] text-slate-400 block">متوسط تنفيذ البند الواحد</span>
                 </div>
               </div>
@@ -171,7 +179,9 @@ export default function MyKpiPage({ user, onBack }: MyKpiPageProps) {
                 </div>
                 <div>
                   <span className="text-[10px] text-slate-400 block">متوسط الجودة</span>
-                  <span className="text-sm font-bold text-slate-800 block mt-0.5">{kpi.quality_score}%</span>
+                  <span className="text-sm font-bold text-slate-800 block mt-0.5">
+                    {(kpi.tasks_completed_on_time + kpi.tasks_late + kpi.tasks_reworked + kpi.tasks_rejected) === 0 ? "-" : `${kpi.quality_score}%`}
+                  </span>
                   <span className="text-[9px] text-slate-400 block">تقييم المشرف لمهامك</span>
                 </div>
               </div>

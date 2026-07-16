@@ -23,10 +23,9 @@ export const db = initializeFirestore(app, {}, firebaseConfig.firestoreDatabaseI
 export const auth = getAuth(app);
 export const storage = getStorage(app);
 
-// Configure Storage retry timeouts to fail fast (within 4 seconds) if storage is unprovisioned or blocked,
-// allowing the robust Base64 fallback to kick in instantly.
-storage.maxUploadRetryTime = 4000;
-storage.maxOperationRetryTime = 4000;
+// Enable standard retry behavior for uploads (reduced to 15s to avoid long hangs on CORS/Network errors)
+storage.maxUploadRetryTime = 2000;
+storage.maxOperationRetryTime = 2000;
 
 // --- Custom Firestore Error Handler (Mandatory as per Firebase Skill Guidelines) ---
 export enum OperationType {

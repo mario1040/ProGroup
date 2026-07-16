@@ -18,7 +18,7 @@ import {
   Sparkles
 } from "lucide-react";
 import { Profile, TaskInstance, Zone, TaskTemplate } from "../types";
-import { getTasks, updateTask, getLocalDateString } from "../lib/api";
+import { getTasks, updateTask, getLocalDateString, deletePhoto } from "../lib/api";
 import PhotoCapture from "./PhotoCapture";
 import ProfessorLogo from "./ProfessorLogo";
 
@@ -165,6 +165,10 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
     } catch (err) {
       console.error(err);
       showToast("حدث خطأ أثناء حفظ صورة قبل", "error");
+      // Rollback the uploaded photo from Storage
+      const path = `task-photos/${selectedTask.zone_id}/${selectedTask.id}/before.jpg`;
+      await deletePhoto(path);
+      setPhotoBefore(null);
     } finally {
       setIsSubmitting(false);
     }
@@ -245,6 +249,17 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
     } catch (err) {
       console.error(err);
       showToast("فشل تسليم المهمة. يرجى المحاولة لاحقاً.", "error");
+      
+      // Rollback the uploaded photo after from Storage
+      if (afterUrl || photoAfter) {
+        const path = `task-photos/${selectedTask.zone_id}/${selectedTask.id}/after.jpg`;
+        await deletePhoto(path);
+      }
+      // Rollback the signature from Storage
+      if (signatureUrl) {
+        const path = `task-photos/${selectedTask.zone_id}/${selectedTask.id}/signature.jpg`;
+        await deletePhoto(path);
+      }
     } finally {
       setIsSubmitting(false);
     }

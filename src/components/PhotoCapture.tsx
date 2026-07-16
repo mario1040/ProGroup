@@ -25,6 +25,8 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
   const [compressedSize, setCompressedSize] = useState<number>(0);
   const [mimeType, setMimeType] = useState<string>("image/jpeg");
   const [takenAt, setTakenAt] = useState<string>("");
+  const [activeTask, setActiveTask] = useState<UploadTask | null>(null);
+  const [isPaused, setIsPaused] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -57,6 +59,19 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
     setError(null);
     setUploadedUrl(null);
     setProgress(0);
+    
+    // File Validation
+    const maxSize = 10 * 1024 * 1024; // 10MB
+    if (file.size > maxSize) {
+      setError("حجم الصورة كبير جداً. الحد الأقصى هو 10 ميجابايت.");
+      return;
+    }
+    
+    const validTypes = ["image/jpeg", "image/png", "image/webp"];
+    if (!validTypes.includes(file.type)) {
+      setError("نوع الملف غير مدعوم. يرجى اختيار صورة بصيغة JPG، PNG، أو WEBP.");
+      return;
+    }
 
     const size = file.size;
     const type = file.type || "image/jpeg";
@@ -139,6 +154,7 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
     try {
       console.log(`[PhotoCapture] 📡 Stage 3: Contacting storage service. Path: ${storagePath}`);
       const { task: uploadTask } = await uploadPhotoTask(payload, storagePath);
+      setActiveTask(uploadTask);
 
       uploadTask.on(
         "state_changed",
@@ -147,10 +163,35 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
           setProgress(p);
           console.log(`[PhotoCapture] ⏳ Stage 2: Upload progress: ${p}%`);
         },
-        (err) => {
-          setError(err.message || "فشل رفع الصورة إلى التخزين السحابي. يرجى المحاولة مرة أخرى.");
-          console.error("[PhotoCapture] ❌ Stage 7: Upload error caught in component:", err);
-          setUploading(false);
+        async (err) => {
+          setActiveTask(null);
+          console.warn("[PhotoCapture] ⚠️ Stage 7: Upload error caught. Falling back to Base64...", err);
+          try {
+            const superCompressedBase64 = await compressImage(payload, 400, 400, 0.45);
+            console.log(`[PhotoCapture] ✅ Fallback Success: Generated base64 (length: ${superCompressedBase64.length})`);
+            
+            const imageUrl = superCompressedBase64;
+            setProgress(100);
+            setUploadedUrl(imageUrl);
+            
+            const finalSize = Math.round((superCompressedBase64.length - "data:image/jpeg;base64,".length) * 3 / 4);
+            const finalMimeType = "image/jpeg";
+            const finalTakenAt = takenAt || new Date().toISOString();
+
+            const metadata = {
+              url: imageUrl,
+              size: finalSize,
+              mimeType: finalMimeType,
+              takenAt: finalTakenAt
+            };
+            
+            onPhotoUploaded(metadata);
+          } catch (fallbackErr: any) {
+            setError(err.message || "فشل رفع الصورة إلى التخزين السحابي. يرجى المحاولة مرة أخرى.");
+            console.error("[PhotoCapture] ❌ Stage 7: Upload and Fallback error caught in component:", fallbackErr);
+          } finally {
+            setUploading(false);
+          }
         },
         async () => {
           try {
@@ -185,14 +226,62 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
           } catch (err: any) {
             setError(err.message || "فشل جلب رابط الصورة. يرجى المحاولة مرة أخرى.");
           } finally {
+            setActiveTask(null);
             setUploading(false);
           }
         }
       );
     } catch (err: any) {
-      setError(err.message || "فشل رفع الصورة إلى التخزين السحابي. يرجى المحاولة مرة أخرى.");
-      console.error("[PhotoCapture] ❌ Stage 7: Upload error caught in component:", err);
+      setActiveTask(null);
+      console.warn("[PhotoCapture] ⚠️ Stage 7: Upload error caught. Falling back to Base64...", err);
+      try {
+        const superCompressedBase64 = await compressImage(payload, 400, 400, 0.45);
+        console.log(`[PhotoCapture] ✅ Fallback Success: Generated base64 (length: ${superCompressedBase64.length})`);
+        
+        const imageUrl = superCompressedBase64;
+        setProgress(100);
+        setUploadedUrl(imageUrl);
+        
+        const finalSize = Math.round((superCompressedBase64.length - "data:image/jpeg;base64,".length) * 3 / 4);
+        const finalMimeType = "image/jpeg";
+        const finalTakenAt = takenAt || new Date().toISOString();
+
+        const metadata = {
+          url: imageUrl,
+          size: finalSize,
+          mimeType: finalMimeType,
+          takenAt: finalTakenAt
+        };
+        
+        onPhotoUploaded(metadata);
+      } catch (fallbackErr: any) {
+        setError(err.message || "فشل رفع الصورة إلى التخزين السحابي. يرجى المحاولة مرة أخرى.");
+        console.error("[PhotoCapture] ❌ Stage 7: Upload and Fallback error caught in component:", fallbackErr);
+      } finally {
+        setUploading(false);
+      }
+    }
+  };
+
+  const handleCancelUpload = () => {
+    if (activeTask) {
+      activeTask.cancel();
+      setActiveTask(null);
       setUploading(false);
+      setProgress(0);
+      setError("تم إلغاء الرفع.");
+    }
+  };
+
+  const handlePauseResume = () => {
+    if (activeTask) {
+      if (isPaused) {
+        activeTask.resume();
+        setIsPaused(false);
+      } else {
+        activeTask.pause();
+        setIsPaused(true);
+      }
     }
   };
 
@@ -253,13 +342,29 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
             
             {uploading && (
               <div className="absolute inset-0 bg-slate-900/80 flex flex-col items-center justify-center text-white p-6 backdrop-blur-xs">
-                <Loader2 className="w-8 h-8 animate-spin text-blue-400 mb-2" />
-                <span className="text-sm font-bold">جاري الرفع للتخزين السحابي... {progress}%</span>
+                <Loader2 className={`w-8 h-8 text-blue-400 mb-2 ${isPaused ? '' : 'animate-spin'}`} />
+                <span className="text-sm font-bold">
+                  {isPaused ? 'متوقف مؤقتاً...' : 'جاري الرفع للتخزين السحابي...'} {progress}%
+                </span>
                 <div className="w-full bg-slate-800 h-2 rounded-full mt-3 overflow-hidden border border-slate-700 max-w-xs">
                   <div 
-                    className="bg-blue-500 h-full transition-all duration-300 rounded-full shadow-[0_0_8px_rgba(59,130,246,0.5)]"
+                    className={`h-full transition-all duration-300 rounded-full shadow-[0_0_8px_rgba(59,130,246,0.5)] ${isPaused ? 'bg-slate-400' : 'bg-blue-500'}`}
                     style={{ width: `${progress}%` }}
                   ></div>
+                </div>
+                <div className="flex gap-2 mt-4">
+                  <button 
+                    onClick={handlePauseResume}
+                    className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                  >
+                    {isPaused ? 'استئناف' : 'إيقاف مؤقت'}
+                  </button>
+                  <button 
+                    onClick={handleCancelUpload}
+                    className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                  >
+                    إلغاء
+                  </button>
                 </div>
               </div>
             )}
