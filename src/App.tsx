@@ -187,6 +187,7 @@ export default function App() {
                     body: notif.body,
                     icon: '/icon.png',
                     badge: '/icon.png',
+                    // @ts-ignore
                     vibrate: [100, 50, 100],
                   });
                 });

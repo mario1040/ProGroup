@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from "react";
+import html2canvas from 'html2canvas';
+import jsPDF from 'jspdf';
 import ProfessorLogo from "./ProfessorLogo";
 import { 
   CheckCircle, 
@@ -24,7 +26,9 @@ import {
   Trash2, 
   UserCheck,
   Calendar,
-  Users
+  Users,
+  Box,
+  Zap
 } from "lucide-react";
 import { 
   getTasks, 
@@ -49,6 +53,7 @@ import {
   getTasksForRange
 } from "../lib/api";
 import { Profile, Zone, TaskTemplate, TaskInstance, OperationalTask, DeviceSwitch } from "../types";
+import InventoryManager from "./InventoryManager";
 
 // Import Recharts for KPI charts
 import { 
@@ -74,7 +79,7 @@ interface AdminDashboardProps {
 
 export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) {
   // Navigation tabs for the Admin Panel
-  const [activeTab, setActiveTab] = useState<'overview' | 'tasks' | 'approvals' | 'kpis' | 'sop' | 'operational' | 'employees' | 'reports'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'tasks' | 'approvals' | 'kpis' | 'sop' | 'operational' | 'employees' | 'reports' | 'inventory'>('overview');
   
   // App data states
   const [tasks, setTasks] = useState<(TaskInstance & { zone?: Zone; assignee?: Profile; template?: TaskTemplate })[]>([]);
@@ -227,6 +232,87 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
 
   const totalTasksCount = tasks.length;
   const completionPercentage = totalTasksCount > 0 ? Math.round((statsCompleted / totalTasksCount) * 100) : 0;
+
+  // Smart Analytics calculations
+  const smartInsights = React.useMemo(() => {
+    const empCounts: Record<string, { count: number; name: string }> = {};
+    const zoneCounts: Record<string, { count: number; name: string }> = {};
+    const bottleneckCounts: Record<string, { count: number; name: string }> = {};
+    const qualityMetrics: Record<string, { id: string; employeeName: string; completedCount: number; reworkCount: number }> = {};
+    
+    let totalDelay = 0;
+    let delayedTasksCount = 0;
+    
+    let totalTimeTaken = 0;
+    let completedTasksWithTime = 0;
+    const lateTasksList: (TaskInstance & { zone?: Zone; assignee?: Profile; template?: TaskTemplate })[] = [];
+
+    tasks.forEach(t => {
+      // Calculate completion time
+      if (t.status === "completed" && t.started_at && t.completed_at) {
+        const start = new Date(t.started_at).getTime();
+        const end = new Date(t.completed_at).getTime();
+        const diffMinutes = (end - start) / (1000 * 60);
+        if (diffMinutes > 0) {
+          totalTimeTaken += diffMinutes;
+          completedTasksWithTime++;
+        }
+      }
+
+      // Quality metrics per employee
+      if (t.assignee) {
+        if (!qualityMetrics[t.assignee.id]) {
+          qualityMetrics[t.assignee.id] = { id: t.assignee.id, employeeName: t.assignee.full_name, completedCount: 0, reworkCount: 0 };
+        }
+        if (t.status === "completed") {
+          qualityMetrics[t.assignee.id].completedCount++;
+        }
+        if (t.task_type === "rework") {
+          qualityMetrics[t.assignee.id].reworkCount++;
+        }
+      }
+
+      // Busiest zone
+      if (t.zone) {
+        if (!zoneCounts[t.zone.id]) zoneCounts[t.zone.id] = { count: 0, name: t.zone.name };
+        zoneCounts[t.zone.id].count++;
+      }
+      
+      // Bottlenecks (Late or in_progress for a long time - proxy by late)
+      if (t.status === 'late' || (t.status === 'completed' && (t.delay_minutes || 0) > 0)) {
+        if (t.zone) {
+          if (!bottleneckCounts[t.zone.id]) bottleneckCounts[t.zone.id] = { count: 0, name: t.zone.name };
+          bottleneckCounts[t.zone.id].count++;
+        }
+        totalDelay += (t.delay_minutes || 0);
+        delayedTasksCount++;
+        lateTasksList.push(t);
+      }
+
+      // Employee of the day
+      if (t.status === "completed" && t.assignee) {
+        if (!empCounts[t.assignee.id]) empCounts[t.assignee.id] = { count: 0, name: t.assignee.full_name };
+        empCounts[t.assignee.id].count++;
+      }
+    });
+
+    const topEmployee = Object.values(empCounts).sort((a, b) => b.count - a.count)[0];
+    const topZone = Object.values(zoneCounts).sort((a, b) => b.count - a.count)[0];
+    const topBottleneck = Object.values(bottleneckCounts).sort((a, b) => b.count - a.count)[0];
+    const avgDelay = delayedTasksCount > 0 ? Math.round(totalDelay / delayedTasksCount) : 0;
+    const avgCompletionTime = completedTasksWithTime > 0 ? Math.round(totalTimeTaken / completedTasksWithTime) : 0;
+    const qualityMetricsArray = Object.values(qualityMetrics).sort((a, b) => b.completedCount - a.completedCount);
+
+    return {
+      topEmployee,
+      topZone,
+      topBottleneck,
+      avgDelay,
+      avgCompletionTime,
+      lateTasksList,
+      qualityMetrics: qualityMetricsArray,
+    };
+  }, [tasks]);
 
   // Filter Tasks Board
   const getFilteredTasks = () => {
@@ -524,6 +610,33 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
     }
   };
 
+  const exportToPDF = async () => {
+    const element = document.getElementById("pdf-report-container");
+    if (!element) {
+      showToast("لا يمكن العثور على محتوى التقرير.", "error");
+      return;
+    }
+    
+    try {
+      showToast("جاري تحضير ملف PDF... يرجى الانتظار", "success");
+      const canvas = await html2canvas(element, {
+        scale: 2,
+        useCORS: true,
+      });
+      const imgData = canvas.toDataURL('image/png');
+      const pdf = new jsPDF('p', 'mm', 'a4');
+      const pdfWidth = pdf.internal.pageSize.getWidth();
+      const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
+      
+      pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
+      pdf.save(`narisops_report_${reportStartDate}_to_${reportEndDate}.pdf`);
+      showToast("تم تصدير التقرير كملف PDF بنجاح ✅", "success");
+    } catch (error) {
+      console.error("PDF generation error:", error);
+      showToast("حدث خطأ أثناء إنشاء ملف PDF", "error");
+    }
+  };
+
   const PIE_COLORS = ["#4f46e5", "#10b981", "#3b82f6", "#f59e0b", "#ec4899", "#8b5cf6", "#14b8a6"];
 
   const getEmployeePieData = () => {
@@ -714,6 +827,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
               { id: 'kpis', label: 'تحليلات الأداء ومؤشرات KPI', icon: BarChart2 },
               { id: 'sop', label: 'أدلة الجودة وبنود SOP المعيارية', icon: Settings },
               { id: 'operational', label: 'تشغيل الإضاءة والأجهزة', icon: Lightbulb },
+              { id: 'inventory', label: 'إدارة المخزون والمعدات', icon: Box },
               { id: 'employees', label: 'إدارة الموظفين وكلمات المرور', icon: Users },
               { id: 'reports', label: 'التقارير الشهرية والأرشيف', icon: Calendar }
             ].map((item: any) => {
@@ -829,6 +943,103 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                         >
                           اعتماد سريع <ChevronLeft className="w-3 h-3" />
                         </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* AI Smart Insights */}
+                  <div className="bg-gradient-to-l from-indigo-50 to-blue-50 border border-indigo-100 p-5 rounded-2xl shadow-sm">
+                    <div className="flex items-center gap-2 mb-4">
+                      <div className="bg-indigo-100 p-2 rounded-lg">
+                        <Zap className="w-5 h-5 text-indigo-600" />
+                      </div>
+                      <h3 className="text-sm font-black text-indigo-900">التحليلات الذكية للمهام والأداء (AI Smart Analytics)</h3>
+                    </div>
+                    
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                      <div className="bg-white/90 p-4 rounded-xl border border-white/60 shadow-sm backdrop-blur-md">
+                        <div className="text-xs text-slate-500 font-bold mb-1">معدل الإنجاز اليومي</div>
+                        <div className="flex items-end gap-2">
+                          <span className="text-3xl font-black text-emerald-600">{completionPercentage}%</span>
+                        </div>
+                      </div>
+                      
+                      <div className="bg-white/90 p-4 rounded-xl border border-white/60 shadow-sm backdrop-blur-md">
+                        <div className="text-xs text-slate-500 font-bold mb-1">متوسط الوقت المستغرق لكل مهمة</div>
+                        <div className="flex items-end gap-2">
+                          <span className="text-3xl font-black text-blue-600">{smartInsights.avgCompletionTime}</span>
+                          <span className="text-xs text-slate-400 mb-1.5 font-bold">دقيقة</span>
+                        </div>
+                      </div>
+
+                      <div className="bg-white/90 p-4 rounded-xl border border-white/60 shadow-sm backdrop-blur-md">
+                        <div className="text-xs text-slate-500 font-bold mb-1">تنبيهات تأخير المهام الحالية</div>
+                        <div className="flex items-end gap-2">
+                          {smartInsights.lateTasksList.length > 0 ? (
+                            <>
+                              <span className="text-3xl font-black text-rose-600">{smartInsights.lateTasksList.length}</span>
+                              <span className="text-xs text-rose-500 mb-1.5 font-bold flex items-center gap-1"><AlertTriangle className="w-3 h-3"/> مهام متأخرة/معطلة</span>
+                            </>
+                          ) : (
+                            <span className="text-sm font-bold text-emerald-600 flex items-center gap-1 mt-2"><CheckCircle className="w-4 h-4"/> لا توجد مهام متأخرة</span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="bg-white/90 p-4 rounded-xl border border-white/60 shadow-sm backdrop-blur-md">
+                        <div className="text-xs text-slate-500 font-bold mb-1">تحليل الاختناقات (المنطقة)</div>
+                        <div className="text-sm font-black text-slate-800 leading-tight mt-1">
+                          {smartInsights.topBottleneck ? (
+                            <span>عقبات في <span className="text-rose-600">{smartInsights.topBottleneck.name}</span> بمتوسط تأخير {smartInsights.avgDelay} د.</span>
+                          ) : (
+                            <span className="text-emerald-600">التوزيع الحالي ممتاز ولا يوجد اختناق.</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="bg-white/90 rounded-xl border border-white/60 shadow-sm backdrop-blur-md overflow-hidden">
+                      <div className="p-4 border-b border-slate-100 bg-white">
+                        <h4 className="text-xs font-bold text-slate-800 flex items-center gap-2">
+                          <UserCheck className="w-4 h-4 text-slate-400" /> 
+                          تقييم الجودة اللحظي للموظفين (المهام المكتملة مقابل طلبات الإعادة Rework)
+                        </h4>
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-right text-xs">
+                          <thead className="bg-slate-50/50 text-slate-500 font-bold border-b border-slate-100">
+                            <tr>
+                              <th className="p-3">اسم الموظف</th>
+                              <th className="p-3 text-center">المهام المكتملة بنجاح</th>
+                              <th className="p-3 text-center">طلبات إعادة التنفيذ (Rework)</th>
+                              <th className="p-3 text-center">مؤشر الجودة</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {smartInsights.qualityMetrics.length === 0 ? (
+                              <tr><td colSpan={4} className="p-4 text-center text-slate-400 font-medium">لا توجد بيانات كافية لتقييم الموظفين اليوم.</td></tr>
+                            ) : smartInsights.qualityMetrics.map((metric) => {
+                              const total = metric.completedCount + metric.reworkCount;
+                              const qualityScore = total > 0 ? Math.round((metric.completedCount / total) * 100) : 100;
+                              let scoreColor = "text-emerald-600 bg-emerald-50 border-emerald-100";
+                              if (qualityScore < 70) scoreColor = "text-rose-600 bg-rose-50 border-rose-100";
+                              else if (qualityScore < 90) scoreColor = "text-amber-600 bg-amber-50 border-amber-100";
+
+                              return (
+                                <tr key={metric.id} className="hover:bg-slate-50/50 transition">
+                                  <td className="p-3 font-bold text-slate-800">{metric.employeeName}</td>
+                                  <td className="p-3 text-center font-black text-emerald-600">{metric.completedCount}</td>
+                                  <td className="p-3 text-center font-black text-rose-500">{metric.reworkCount}</td>
+                                  <td className="p-3 text-center">
+                                    <span className={`inline-block px-2 py-1 rounded border font-bold text-[10px] ${scoreColor}`}>
+                                      {qualityScore}%
+                                    </span>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
                       </div>
                     </div>
                   </div>
@@ -1688,6 +1899,60 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
               {/* TAB 4: EMPLOYEES KPIs REPORT */}
               {activeTab === 'kpis' && (
                 <div className="flex flex-col gap-6">
+
+                  {/* AI Predictions Section */}
+                  <div className="bg-gradient-to-r from-indigo-50 to-blue-50 border border-indigo-100 p-5 rounded-2xl shadow-sm">
+                    <div className="flex items-center gap-2 mb-4">
+                      <div className="bg-indigo-100 p-2 rounded-lg">
+                        <Zap className="w-4 h-4 text-indigo-600" />
+                      </div>
+                      <h3 className="text-sm font-bold text-indigo-900">تحليلات وتوقعات النظام الذكية (AI Insights)</h3>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                      <div className="bg-white/80 p-4 rounded-xl border border-white/40 shadow-sm backdrop-blur-sm">
+                        <div className="text-xs text-slate-500 font-bold mb-2">توقع الإنجاز لنهاية اليوم</div>
+                        <div className="flex items-end gap-2">
+                          <span className="text-2xl font-black text-emerald-600">
+                            {Math.min(100, Math.round(completionPercentage + (statsInProgress > 0 ? 15 : 0)))}%
+                          </span>
+                          <span className="text-[10px] text-slate-400 mb-1">معدل متوقع</span>
+                        </div>
+                      </div>
+                      
+                      <div className="bg-white/80 p-4 rounded-xl border border-white/40 shadow-sm backdrop-blur-sm">
+                        <div className="text-xs text-slate-500 font-bold mb-2">توصية توزيع العمالة</div>
+                        <div className="text-sm font-black text-slate-800 leading-tight">
+                          {smartInsights.topBottleneck ? (
+                            <span>ينصح بتوجيه دعم إضافي لمنطقة <span className="text-rose-600">{smartInsights.topBottleneck.name}</span> لتقليل الاختناق.</span>
+                          ) : (
+                            <span className="text-emerald-600">التوزيع الحالي ممتاز ولا يحتاج لتعديل.</span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="bg-white/80 p-4 rounded-xl border border-white/40 shadow-sm backdrop-blur-sm">
+                        <div className="text-xs text-slate-500 font-bold mb-2">نمط التأخير الشائع</div>
+                        <div className="text-sm font-black text-slate-800 leading-tight">
+                          {smartInsights.avgDelay > 20 ? (
+                            <span>معظم التأخيرات تحدث بسبب المهام التي تستغرق أكثر من وقتها المعياري المبرمج.</span>
+                          ) : (
+                            <span className="text-indigo-600">الالتزام بالوقت المعياري ضمن المعدلات الطبيعية.</span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="bg-white/80 p-4 rounded-xl border border-white/40 shadow-sm backdrop-blur-sm">
+                        <div className="text-xs text-slate-500 font-bold mb-2">أفضل موظف متاح للتدخل السريع</div>
+                        <div className="text-sm font-black text-slate-800 leading-tight">
+                          {smartInsights.topEmployee ? (
+                            <span><span className="text-indigo-600">{smartInsights.topEmployee.name}</span> (معدل إنجاز عالي ومتاح للمهام الطارئة).</span>
+                          ) : (
+                            <span>جاري جمع البيانات...</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                   
                   {/* KPI Summary Comparison Table */}
                   <div className="bg-white border border-slate-200 p-5 rounded-2xl shadow-sm">
@@ -2237,6 +2502,12 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
               )}
 
               {/* TAB 8: MONTHLY REPORTS & OPERATIONAL ARCHIVE */}
+              {activeTab === 'inventory' && (
+                <div className="flex flex-col gap-6 text-right" style={{ direction: 'rtl' }}>
+                  <InventoryManager />
+                </div>
+              )}
+
               {activeTab === 'reports' && (
                 <div className="flex flex-col gap-6 text-right" style={{ direction: 'rtl' }}>
                   {/* Header Title Card */}
@@ -2252,32 +2523,42 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                       
                       {/* Export Button if historical tasks are loaded */}
                       {historicalTasks.length > 0 && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const blob = new Blob([JSON.stringify(historicalTasks, null, 2)], { type: "application/json" });
-                            const url = URL.createObjectURL(blob);
-                            const link = document.createElement("a");
-                            link.href = url;
-                            link.download = `narisops_report_${reportStartDate}_to_${reportEndDate}.json`;
-                            link.click();
-                            URL.revokeObjectURL(url);
-                            showToast("تم تصدير التقرير كملف JSON بنجاح ✅", "success");
-                          }}
-                          className="bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold py-2 px-3.5 rounded-xl transition duration-150 flex items-center gap-2 cursor-pointer shadow-sm"
-                        >
-                          📥 تصدير التقرير كملف JSON
-                        </button>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const blob = new Blob([JSON.stringify(historicalTasks, null, 2)], { type: "application/json" });
+                              const url = URL.createObjectURL(blob);
+                              const link = document.createElement("a");
+                              link.href = url;
+                              link.download = `narisops_report_${reportStartDate}_to_${reportEndDate}.json`;
+                              link.click();
+                              URL.revokeObjectURL(url);
+                              showToast("تم تصدير التقرير كملف JSON بنجاح ✅", "success");
+                            }}
+                            className="bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold py-2 px-3.5 rounded-xl transition duration-150 flex items-center gap-2 cursor-pointer shadow-sm"
+                          >
+                            📥 تصدير التقرير JSON
+                          </button>
+                          <button
+                            type="button"
+                            onClick={exportToPDF}
+                            className="bg-red-600 hover:bg-red-700 text-white text-xs font-bold py-2 px-3.5 rounded-xl transition duration-150 flex items-center gap-2 cursor-pointer shadow-sm"
+                          >
+                            📄 تصدير كملف PDF
+                          </button>
+                        </div>
                       )}
                     </div>
                   </div>
 
                   {/* Filter & Retrieval Engine Panel */}
-                  <div className="bg-white border border-slate-200 p-5 rounded-2xl shadow-sm">
-                    <h4 className="text-xs font-extrabold text-slate-700 mb-4 flex items-center gap-2">
-                      <Search className="w-4 h-4 text-indigo-500" />
-                      مستعلم الأرشيف ومحرك تصفية البيانات
-                    </h4>
+                  <div id="pdf-report-container" className="flex flex-col gap-6">
+                    <div className="bg-white border border-slate-200 p-5 rounded-2xl shadow-sm">
+                      <h4 className="text-xs font-extrabold text-slate-700 mb-4 flex items-center gap-2">
+                        <Search className="w-4 h-4 text-indigo-500" />
+                        مستعلم الأرشيف ومحرك تصفية البيانات
+                      </h4>
 
                     <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end text-xs">
                       {/* Select Employee */}
@@ -2747,7 +3028,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                       </div>
                     )}
                   </div>
-
+                  </div>
                 </div>
               )}
 
