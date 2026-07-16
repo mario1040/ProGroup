@@ -18,7 +18,7 @@ import {
   Sparkles
 } from "lucide-react";
 import { Profile, TaskInstance, Zone, TaskTemplate } from "../types";
-import { getTasks, updateTask, getLocalDateString, deletePhoto } from "../lib/api";
+import { getTasks, listenTodayTasks, updateTask, getLocalDateString, deletePhoto } from "../lib/api";
 import PhotoCapture from "./PhotoCapture";
 import ProfessorLogo from "./ProfessorLogo";
 
@@ -53,23 +53,20 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
     setTimeout(() => setToast(null), 4000);
   };
 
-  const fetchTasks = async () => {
-    try {
-      setLoading(true);
-      const data = await getTasks();
-      // Only show tasks assigned to this cleaner
-      const myTasks = data.filter((t: any) => t.assigned_to === user.id);
-      setTasks(myTasks);
-    } catch (err) {
-      console.error(err);
-      showToast("فشل في تحميل مهام اليوم", "error");
-    } finally {
-      setLoading(false);
-    }
-  };
-
   useEffect(() => {
-    fetchTasks();
+    setLoading(true);
+    const unsubscribe = listenTodayTasks(user.id, (myTasks) => {
+      setTasks(myTasks);
+      setLoading(false);
+      
+      setSelectedTask((prevSelected) => {
+         if (!prevSelected) return null;
+         const updatedTask = myTasks.find(t => t.id === prevSelected.id);
+         return updatedTask || null;
+      });
+    });
+
+    return () => unsubscribe();
   }, [user.id]);
 
   // Filter logic

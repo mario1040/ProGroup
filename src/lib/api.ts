@@ -688,6 +688,71 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
   });
 }
 
+export function listenTodayTasks(
+  userId: string | undefined, 
+  callback: (tasks: (TaskInstance & { zone?: Zone; assignee?: Profile; template?: TaskTemplate })[]) => void
+): () => void {
+  const todayStr = getLocalDateString();
+  
+  // Fire off getTasks in background to generate any missing recurring tasks
+  getTasks(todayStr).catch(console.error);
+
+  const q = query(
+    collection(db, "task_instances"), 
+    where("due_date", "==", todayStr)
+  );
+
+  const unsubscribe = onSnapshot(q, async (snap) => {
+    try {
+      const instances: TaskInstance[] = [];
+      snap.forEach((docSnap) => {
+        instances.push(docSnap.data() as TaskInstance);
+      });
+
+      const filteredInstances = userId 
+        ? instances.filter(ti => ti.assigned_to === userId)
+        : instances;
+
+      const [zonesSnap, profiles, templates] = await Promise.all([
+        getDocs(collection(db, "zones")),
+        getProfiles(),
+        getTemplates()
+      ]);
+
+      const zones: Zone[] = [];
+      zonesSnap.forEach((d) => zones.push(d.data() as Zone));
+
+      const enrichedTasks = filteredInstances.map((ti) => {
+        const zone = zones.find((z) => z.id === ti.zone_id);
+        const assignee = profiles.find((p) => p.id === ti.assigned_to);
+        const template = templates.find((tpl) => tpl.id === ti.template_id);
+        return {
+          ...ti,
+          zone,
+          assignee,
+          template
+        };
+      });
+
+      // Sort by creation time so they appear predictably, or we can sort by due_time
+      enrichedTasks.sort((a, b) => {
+         if (a.due_time !== b.due_time) {
+            return (a.due_time || "").localeCompare(b.due_time || "");
+         }
+         return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+      });
+
+      callback(enrichedTasks);
+    } catch (error) {
+      console.error("Error processing real-time tasks:", error);
+    }
+  }, (error) => {
+    console.error("Error listening to task_instances:", error);
+  });
+
+  return unsubscribe;
+}
+
 export async function getTasksForRange(startDate: string, endDate: string): Promise<(TaskInstance & { zone?: Zone; assignee?: Profile; template?: TaskTemplate })[]> {
   await ensureSeeded();
   
