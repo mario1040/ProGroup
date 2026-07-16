@@ -553,6 +553,28 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
     return data;
   };
 
+  const getDailyPerformanceData = () => {
+    const completed = tasks.filter(t => t.status === "completed").length;
+    const late = tasks.filter(t => t.status === "late").length;
+    const pending = tasks.filter(t => t.status === "pending" || t.status === "in_progress").length;
+    
+    const data = [
+      { name: "مكتملة", value: completed, color: "#10b981" }, // emerald-500
+      { name: "متأخرة", value: late, color: "#f43f5e" }, // rose-500
+      { name: "قيد التنفيذ/معلقة", value: pending, color: "#f59e0b" }, // amber-500
+    ].filter(item => item.value > 0);
+    
+    // Add dummy data if empty so the chart looks good
+    if (data.length === 0) {
+        return [
+          { name: "مكتملة", value: 10, color: "#10b981" },
+          { name: "متأخرة", value: 2, color: "#f43f5e" },
+          { name: "قيد التنفيذ", value: 5, color: "#f59e0b" },
+        ];
+    }
+    return data;
+  };
+
   // Let's generate the past 7 days of completion rates (Weekly Completion Rate)
   const getWeeklyCompletionTrend = () => {
     const daysOfWeek = ["الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
@@ -891,11 +913,11 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                       {/* Weekly Completion Rate Trend (Line Chart) */}
                       <div className="border border-slate-100 p-4 rounded-xl bg-slate-50/50">
                         <div className="flex justify-between items-center mb-3">
-                          <h4 className="text-xs font-bold text-slate-700">معدل الإنجاز والالتزام الأسبوعي (%)</h4>
+                          <h4 className="text-xs font-bold text-slate-700">معدل الإنجاز الأسبوعي (%)</h4>
                           <span className="text-[10px] text-indigo-600 bg-indigo-50 font-bold px-2 py-0.5 rounded border border-indigo-100">مستهدف SLA: 90%</span>
                         </div>
                         <div className="h-64 text-xs" style={{ direction: 'ltr' }}>
@@ -919,7 +941,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                       {/* Average Task Duration Across Zones (Bar Chart) */}
                       <div className="border border-slate-100 p-4 rounded-xl bg-slate-50/50">
                         <div className="flex justify-between items-center mb-3">
-                          <h4 className="text-xs font-bold text-slate-700">متوسط سرعة إنجاز بند التنظيف حسب المنطقة (بالدقائق)</h4>
+                          <h4 className="text-xs font-bold text-slate-700">متوسط سرعة التنظيف (دقائق)</h4>
                           <span className="text-[10px] text-emerald-600 bg-emerald-50 font-bold px-2 py-0.5 rounded border border-emerald-100">كلما قل الوقت زادت الكفاءة</span>
                         </div>
                         <div className="h-64 text-xs" style={{ direction: 'ltr' }}>
@@ -933,8 +955,41 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                                 labelStyle={{ fontWeight: 'bold', color: '#10b981' }}
                               />
                               <Legend wrapperStyle={{ fontSize: '10px', marginTop: '10px' }} />
-                              <Bar dataKey="duration" name="متوسط الزمن (دقيقة)" fill="#10b981" radius={[4, 4, 0, 0]} />
+                              <Bar dataKey="duration" name="متوسط الزمن" fill="#10b981" radius={[4, 4, 0, 0]} />
                             </BarChart>
+                          </ResponsiveContainer>
+                        </div>
+                      </div>
+
+                      {/* Daily Performance Summary (Pie Chart) */}
+                      <div className="border border-slate-100 p-4 rounded-xl bg-slate-50/50">
+                        <div className="flex justify-between items-center mb-3">
+                          <h4 className="text-xs font-bold text-slate-700">ملخص الأداء اليومي</h4>
+                          <span className="text-[10px] text-rose-600 bg-rose-50 font-bold px-2 py-0.5 rounded border border-rose-100">توزيع المهام</span>
+                        </div>
+                        <div className="h-64 text-xs" style={{ direction: 'ltr' }}>
+                          <ResponsiveContainer width="100%" height="100%">
+                            <PieChart margin={{ top: 10, right: 10, left: 10, bottom: 5 }}>
+                              <Pie
+                                data={getDailyPerformanceData()}
+                                dataKey="value"
+                                nameKey="name"
+                                cx="50%"
+                                cy="50%"
+                                innerRadius={50}
+                                outerRadius={80}
+                                paddingAngle={5}
+                              >
+                                {getDailyPerformanceData().map((entry, index) => (
+                                  <Cell key={`cell-${index}`} fill={entry.color} />
+                                ))}
+                              </Pie>
+                              <RechartsTooltip 
+                                contentStyle={{ background: '#0f172a', color: '#fff', borderRadius: '8px', fontSize: '11px', border: 'none', textAlign: 'right' }}
+                                itemStyle={{ color: '#fff', fontWeight: 'bold' }}
+                              />
+                              <Legend wrapperStyle={{ fontSize: '10px', marginTop: '10px' }} />
+                            </PieChart>
                           </ResponsiveContainer>
                         </div>
                       </div>

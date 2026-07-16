@@ -240,9 +240,6 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
       setPhotoAfterMeta(null);
       setNotes("");
       setHasSigned(false);
-      
-      // Refresh task list
-      fetchTasks();
     } catch (err) {
       console.error(err);
       showToast("فشل تسليم المهمة. يرجى المحاولة لاحقاً.", "error");

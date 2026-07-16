@@ -180,9 +180,22 @@ export default function App() {
                 playNotificationSound();
                 playedSound = true;
               }
-              new Notification(notif.title, {
-                body: notif.body,
-              });
+              
+              if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.ready.then(registration => {
+                  registration.showNotification(notif.title, {
+                    body: notif.body,
+                    icon: '/icon.png',
+                    badge: '/icon.png',
+                    vibrate: [100, 50, 100],
+                  });
+                });
+              } else {
+                new Notification(notif.title, {
+                  body: notif.body,
+                  icon: '/icon.png',
+                });
+              }
             }
           }
         });
