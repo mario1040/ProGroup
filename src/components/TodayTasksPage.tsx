@@ -22,6 +22,58 @@ import { getTasks, listenTodayTasks, updateTask, getLocalDateString, deletePhoto
 import PhotoCapture from "./PhotoCapture";
 import ProfessorLogo from "./ProfessorLogo";
 
+const TaskTimer = ({ task }: { task: TaskInstance & { zone?: Zone; template?: TaskTemplate } }) => {
+  const [elapsed, setElapsed] = useState<number>(0);
+
+  useEffect(() => {
+    if (!task.started_at) return;
+    
+    if (task.status === "in_progress") {
+      const start = new Date(task.started_at).getTime();
+      const tick = () => {
+        setElapsed(Math.max(0, Math.floor((Date.now() - start) / 1000)));
+      };
+      tick();
+      const interval = setInterval(tick, 1000);
+      return () => clearInterval(interval);
+    } else if (task.status === "completed" && task.completed_at) {
+      const start = new Date(task.started_at).getTime();
+      const end = new Date(task.completed_at).getTime();
+      setElapsed(Math.max(0, Math.floor((end - start) / 1000)));
+    } else if (task.started_at) {
+      const start = new Date(task.started_at).getTime();
+      const end = task.completed_at ? new Date(task.completed_at).getTime() : Date.now();
+      setElapsed(Math.max(0, Math.floor((end - start) / 1000)));
+      if (!task.completed_at) {
+        const interval = setInterval(() => {
+          setElapsed(Math.max(0, Math.floor((Date.now() - start) / 1000)));
+        }, 1000);
+        return () => clearInterval(interval);
+      }
+    }
+  }, [task.status, task.started_at, task.completed_at]);
+
+  if (!task.started_at) return null;
+
+  const minutes = Math.floor(elapsed / 60);
+  const seconds = elapsed % 60;
+  const timeString = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+
+  if (task.status === "completed") {
+    return (
+      <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 py-0.5 px-2 rounded-full flex items-center gap-1 border border-emerald-100">
+        <Clock className="w-3 h-3" /> تم الإنجاز في {timeString} دقيقة
+      </span>
+    );
+  }
+
+  return (
+    <span className="text-[10px] font-bold text-amber-600 bg-amber-50 py-0.5 px-2 rounded-full flex items-center gap-1 border border-amber-200 animate-pulse">
+      <Clock className="w-3 h-3" /> جاري التنفيذ: {timeString}
+    </span>
+  );
+};
+
 interface TodayTasksPageProps {
   user: Profile;
   onLogout: () => void;
@@ -194,14 +246,7 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
 
   const goToSignatureOrSubmit = (afterUrl?: string) => {
     if (!selectedTask) return;
-    const requiresSignature = selectedTask.template ? selectedTask.template.requires_signature : false;
-
-    if (requiresSignature) {
-      setExecutingStep('signature_and_notes');
-    } else {
-      // Submit immediately
-      submitTaskCompleted(undefined, afterUrl);
-    }
+    setExecutingStep('signature_and_notes');
   };
 
   const submitTaskCompleted = async (signatureUrl?: string, afterUrl?: string) => {
@@ -475,13 +520,14 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
                 )}
 
                 <div className="flex flex-col gap-1.5">
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 flex-wrap">
                     <span className={`text-[10px] font-bold py-0.5 px-2 rounded-full border ${getStatusColor(task.status, task.task_type)}`}>
                       {getStatusLabel(task.status, task.task_type)}
                     </span>
                     <span className="text-xs font-bold text-slate-400">
                       {task.template?.task_code || "ONE_TIME"}
                     </span>
+                    <TaskTimer task={task} />
                   </div>
 
                   <h3 className="text-sm font-bold text-slate-800 mt-1">
@@ -509,11 +555,6 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
                     {task.template?.requires_photo_after && (
                       <span className="text-[9px] font-semibold text-slate-400 bg-slate-100 py-0.5 px-1.5 rounded flex items-center gap-0.5">
                         <Camera className="w-3 h-3" /> صورة بعد
-                      </span>
-                    )}
-                    {task.template?.requires_signature && (
-                      <span className="text-[9px] font-semibold text-slate-400 bg-slate-100 py-0.5 px-1.5 rounded flex items-center gap-0.5">
-                        <PenTool className="w-3 h-3" /> توقيع
                       </span>
                     )}
                   </div>
@@ -566,6 +607,9 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
                       <h2 className="text-base font-bold text-slate-800 leading-snug">
                         {selectedTask.title}
                       </h2>
+                      <div className="mt-2">
+                        <TaskTimer task={selectedTask} />
+                      </div>
                     </div>
                   </div>
 
@@ -732,65 +776,29 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
                 </div>
               )}
 
-              {/* STEP 4: Signature and Optional Notes */}
+              {/* STEP 4: Optional Notes */}
               {executingStep === 'signature_and_notes' && (
                 <div className="flex flex-col gap-4">
                   <div>
-                    <h3 className="text-sm font-bold text-slate-800">الخطوة الأخيرة: التوقيع والملاحظات</h3>
-                    <p className="text-xs text-slate-400 mt-0.5">يرجى كتابة اسمك/توقيعك بإصبعك على اللوحة وكتابة أي ملاحظات</p>
+                    <h3 className="text-sm font-bold text-slate-800">الخطوة الأخيرة: الملاحظات (اختياري)</h3>
+                    <p className="text-xs text-slate-400 mt-0.5">هل تود إضافة أي ملاحظات للمشرف قبل تسليم المهمة؟</p>
                   </div>
 
                   {/* Notes */}
                   <div className="flex flex-col gap-1.5">
-                    <label className="text-xs font-semibold text-slate-600">ملاحظاتك للمشرف (اختياري):</label>
                     <textarea
                       value={notes}
                       onChange={(e) => setNotes(e.target.value)}
                       placeholder="مثال: تم مسح الموقع بالكامل وملء مناديل الديتول..."
-                      rows={2}
+                      rows={4}
                       className="w-full text-xs p-3 border border-slate-200 rounded-xl focus:border-slate-400 focus:ring-0 resize-none outline-none"
                     ></textarea>
                   </div>
 
-                  {/* Canvas Signature Drawer */}
-                  <div className="flex flex-col gap-1.5">
-                    <div className="flex justify-between items-center">
-                      <label className="text-xs font-semibold text-slate-600">توقيع الموظف بالإصبع:</label>
-                      <button
-                        type="button"
-                        onClick={clearCanvas}
-                        className="text-[10px] font-bold text-red-500 hover:text-red-700 bg-red-50 py-0.5 px-2 rounded cursor-pointer"
-                      >
-                        مسح التوقيع
-                      </button>
-                    </div>
-
-                    <div className="border border-slate-200 rounded-xl bg-slate-50 overflow-hidden relative">
-                      <canvas
-                        ref={canvasRef}
-                        width={350}
-                        height={120}
-                        onMouseDown={startDrawing}
-                        onMouseMove={draw}
-                        onMouseUp={stopDrawing}
-                        onMouseLeave={stopDrawing}
-                        onTouchStart={startDrawing}
-                        onTouchMove={draw}
-                        onTouchEnd={stopDrawing}
-                        className="w-full h-[120px] block cursor-crosshair touch-none"
-                      />
-                      {!hasSigned && (
-                        <div className="absolute inset-0 flex items-center justify-center text-slate-400 text-[10px] pointer-events-none">
-                          وقّع هنا بإصبعك
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
                   <button
                     type="button"
-                    onClick={handleSignatureSubmit}
-                    disabled={isSubmitting || !hasSigned}
+                    onClick={() => submitTaskCompleted()}
+                    disabled={isSubmitting}
                     className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold py-3.5 rounded-xl transition shadow flex items-center justify-center gap-2 cursor-pointer mt-2"
                   >
                     {isSubmitting ? (

@@ -25,3 +25,26 @@ body {
 .rtl-grid {
   direction: rtl;
 }
+
+@media print {
+  body {
+    background-color: #fff !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  .print-only {
+    display: block !important;
+  }
+  .print-container {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+  }
+  .print-break-inside-avoid {
+    break-inside: avoid;
+  }
+}
+

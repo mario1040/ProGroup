@@ -899,6 +899,14 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
     }
   }
 
+  // Enforce Signature
+  const requiresSignature = template ? template.requires_signature : false;
+  if (requiresSignature && updates.status === "completed") {
+    if (!merged.employee_signature_url) {
+      throw new Error("خطأ حماية: لا يمكن إغلاق وإكمال هذه المهمة بدون التوقيع الرقمي للموظف.");
+    }
+  }
+
   // Prevent lifting After photo before Before photo
   if (updates.photo_after_url && requiresBefore && !merged.photo_before_url) {
     throw new Error("خطأ حماية: لا يمكن رفع صورة الإثبات بعد العمل قبل رفع صورة الإثبات قبل العمل.");
