@@ -109,6 +109,35 @@ export default function App() {
   const notifiedIds = useRef<Set<string>>(new Set());
 
   useEffect(() => {
+    // Quick patch to ensure all tasks and templates have requires_photo_before = true
+    const patchDB = async () => {
+      try {
+        const { collection, getDocs, updateDoc } = await import('firebase/firestore');
+        const { db } = await import('./lib/firebase');
+        
+        const templatesSnap = await getDocs(collection(db, 'task_templates'));
+        templatesSnap.forEach((d) => {
+          if (d.data().requires_photo_before === false) {
+            updateDoc(d.ref, { requires_photo_before: true });
+          }
+        });
+
+        const instancesSnap = await getDocs(collection(db, 'task_instances'));
+        instancesSnap.forEach((d) => {
+          // Force requires_photo_before to true for all instances
+          if (d.data().requires_photo_before === false || d.data().requires_photo_before === undefined) {
+            updateDoc(d.ref, { requires_photo_before: true });
+          }
+        });
+        console.log("Database patched successfully for requires_photo_before");
+      } catch (err) {
+        console.error("Patch failed", err);
+      }
+    };
+    patchDB();
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
 
     const restoreSession = async () => {

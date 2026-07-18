@@ -161,9 +161,14 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
   const handleStartTask = async () => {
     if (!selectedTask) return;
     
-    const requiresPhotoBefore = selectedTask.requires_photo_before !== undefined
+    let requiresPhotoBefore = selectedTask.requires_photo_before !== undefined
       ? selectedTask.requires_photo_before
       : (selectedTask.template ? selectedTask.template.requires_photo_before : true);
+
+    // Force photo for operational tasks if it was somehow skipped
+    if (selectedTask.title.includes('تشغيل') || selectedTask.title.includes('شاشات') || selectedTask.title.includes('تكييف')) {
+      requiresPhotoBefore = true;
+    }
 
     if (requiresPhotoBefore) {
       // Go to take before photo
@@ -688,7 +693,7 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
 
                   {/* Core Action Footer inside Drawer */}
                   <div className="mt-6">
-                    {selectedTask.status === "pending" && (
+                    {selectedTask.status === "pending" && executingStep === 'details' && (
                       <button
                         type="button"
                         onClick={handleStartTask}
@@ -706,7 +711,7 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
                       </button>
                     )}
 
-                    {selectedTask.status === "in_progress" && (
+                    {selectedTask.status === "in_progress" && executingStep === 'details' && (
                       <button
                         type="button"
                         onClick={handleFinishTaskClick}
