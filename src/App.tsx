@@ -425,77 +425,79 @@ export default function App() {
         </div>
       ) : (
         <div className="min-h-screen flex flex-col">
-          <div className="fixed bottom-4 right-4 z-40">
-            <button
-              onClick={() => setShowNotifications((v) => !v)}
-              className="bg-slate-900 hover:bg-slate-800 text-white rounded-full p-3 shadow-2xl relative border border-slate-800 cursor-pointer flex items-center justify-center transition"
-            >
-              <Bell className="w-5 h-5" />
-              {unreadCount > 0 && (
-                <span className="absolute -top-1 -left-1 bg-rose-500 text-white text-[9px] font-extrabold w-5 h-5 rounded-full flex items-center justify-center animate-bounce border-2 border-slate-900">
-                  {unreadCount}
-                </span>
-              )}
-            </button>
+          {!(user.role === "cleaner" && cleanerView === "tasks") && (
+            <div className="fixed bottom-20 md:bottom-6 right-4 md:right-6 z-50">
+              <button
+                onClick={() => setShowNotifications((v) => !v)}
+                className="bg-slate-900 hover:bg-slate-800 text-white rounded-full p-3 shadow-2xl relative border border-slate-800 cursor-pointer flex items-center justify-center transition"
+              >
+                <Bell className="w-5 h-5" />
+                {unreadCount > 0 && (
+                  <span className="absolute -top-1 -left-1 bg-rose-500 text-white text-[9px] font-extrabold w-5 h-5 rounded-full flex items-center justify-center animate-bounce border-2 border-slate-900">
+                    {unreadCount}
+                  </span>
+                )}
+              </button>
 
-            {showNotifications && (
-              <div className="absolute bottom-14 right-0 w-80 bg-white border border-slate-200 rounded-2xl shadow-2xl p-4 flex flex-col gap-3 max-h-96 overflow-y-auto text-right">
-                <div className="flex justify-between items-center border-b border-slate-100 pb-2">
-                  <span className="text-xs font-bold text-slate-800">جرس تنبيهات التشغيل والمهام 🔔</span>
-                  <button
-                    onClick={() => setShowNotifications(false)}
-                    className="text-[10px] font-bold text-slate-400 hover:text-slate-600"
-                  >
-                    إغلاق
-                  </button>
-                </div>
+              {showNotifications && (
+                <div className="absolute bottom-14 right-0 w-[calc(100vw-2rem)] md:w-80 bg-white border border-slate-200 rounded-2xl shadow-2xl p-4 flex flex-col gap-3 max-h-96 overflow-y-auto text-right">
+                  <div className="flex justify-between items-center border-b border-slate-100 pb-2">
+                    <span className="text-xs font-bold text-slate-800">جرس تنبيهات التشغيل والمهام 🔔</span>
+                    <button
+                      onClick={() => setShowNotifications(false)}
+                      className="text-[10px] font-bold text-slate-400 hover:text-slate-600"
+                    >
+                      إغلاق
+                    </button>
+                  </div>
 
-                <div className="flex flex-col gap-2">
-                  {notifications.length === 0 ? (
-                    <span className="text-xs text-slate-400 text-center py-6 block font-medium">
-                      لا توجد إشعارات حالياً
-                    </span>
-                  ) : (
-                    notifications.map((notif) => (
-                      <div
-                        key={notif.id}
-                        onClick={() => handleMarkRead(notif.id)}
-                        className={`p-2.5 rounded-xl border text-xs cursor-pointer transition flex flex-col gap-1 ${
-                          notif.is_read
-                            ? "border-slate-100 bg-slate-50/50 text-slate-500"
-                            : "border-blue-100 bg-blue-50/30 text-slate-800 font-bold"
-                        }`}
-                      >
-                        <div className="flex justify-between items-center text-[9px]">
-                          <span className="text-blue-600">
-                            {notif.type === "rework_requested" ? "إعادة تنفيذ ⚠️" : "تحديث تشغيل"}
-                          </span>
-                          <span className="text-slate-400">
-                            {notif.created_at
-                              ? new Date(notif.created_at).toLocaleTimeString([], {
-                                  hour: "2-digit",
-                                  minute: "2-digit",
-                                })
-                              : ""}
-                          </span>
+                  <div className="flex flex-col gap-2">
+                    {notifications.length === 0 ? (
+                      <span className="text-xs text-slate-400 text-center py-6 block font-medium">
+                        لا توجد إشعارات حالياً
+                      </span>
+                    ) : (
+                      notifications.map((notif) => (
+                        <div
+                          key={notif.id}
+                          onClick={() => handleMarkRead(notif.id)}
+                          className={`p-2.5 rounded-xl border text-xs cursor-pointer transition flex flex-col gap-1 ${
+                            notif.is_read
+                              ? "border-slate-100 bg-slate-50/50 text-slate-500"
+                              : "border-blue-100 bg-blue-50/30 text-slate-800 font-bold"
+                          }`}
+                        >
+                          <div className="flex justify-between items-center text-[9px]">
+                            <span className="text-blue-600">
+                              {notif.type === "rework_requested" ? "إعادة تنفيذ ⚠️" : "تحديث تشغيل"}
+                            </span>
+                            <span className="text-slate-400">
+                              {notif.created_at
+                                ? new Date(notif.created_at).toLocaleTimeString([], {
+                                    hour: "2-digit",
+                                    minute: "2-digit",
+                                  })
+                                : ""}
+                            </span>
+                          </div>
+                          <h4 className="font-bold text-slate-800 text-[11px] mt-0.5">{notif.title}</h4>
+                          <p className="text-[10px] text-slate-500 leading-normal font-medium mt-0.5">
+                            {notif.body}
+                          </p>
+
+                          {!notif.is_read && (
+                            <span className="text-[8px] text-blue-500 text-left mt-1 block">
+                              اضغط للمسح والقراءة
+                            </span>
+                          )}
                         </div>
-                        <h4 className="font-bold text-slate-800 text-[11px] mt-0.5">{notif.title}</h4>
-                        <p className="text-[10px] text-slate-500 leading-normal font-medium mt-0.5">
-                          {notif.body}
-                        </p>
-
-                        {!notif.is_read && (
-                          <span className="text-[8px] text-blue-500 text-left mt-1 block">
-                            اضغط للمسح والقراءة
-                          </span>
-                        )}
-                      </div>
-                    ))
-                  )}
+                      ))
+                    )}
+                  </div>
                 </div>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
+          )}
 
           {user.role === "cleaner" ? (
             cleanerView === "tasks" ? (
@@ -503,6 +505,11 @@ export default function App() {
                 user={user}
                 onLogout={handleLogout}
                 onNavigateToKpis={() => setCleanerView("kpis")}
+                unreadCount={unreadCount}
+                showNotifications={showNotifications}
+                setShowNotifications={setShowNotifications}
+                notifications={notifications}
+                handleMarkRead={handleMarkRead}
               />
             ) : (
               <MyKpiPage user={user} onBack={() => setCleanerView("tasks")} />

@@ -206,11 +206,29 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
         getDeviceSwitches()
       ]);
 
-      setTasks(allTasks);
+      // Deduplicate task templates by title and zone
+      const seenTpl = new Set<string>();
+      const uniqueTemplates = allTemplates.filter(t => {
+        const key = `${(t.title || "").trim().toLowerCase()}_${t.zone_id || ""}`;
+        if (seenTpl.has(key)) return false;
+        seenTpl.add(key);
+        return true;
+      });
+
+      // Deduplicate task instances by title, zone, date, and time
+      const seenTask = new Set<string>();
+      const uniqueTasks = allTasks.filter(t => {
+        const key = `${(t.title || "").trim().toLowerCase()}_${t.zone_id || ""}_${t.due_date || ""}_${t.due_time || ""}`;
+        if (seenTask.has(key)) return false;
+        seenTask.add(key);
+        return true;
+      });
+
+      setTasks(uniqueTasks);
       setProfiles(allProfiles);
       setZones(allZones);
       setKpis(allKpis);
-      setTemplates(allTemplates);
+      setTemplates(uniqueTemplates);
       setOperationalTasks(allOps);
       setDeviceSwitches(allSwitches);
     } catch (err) {
@@ -2441,9 +2459,9 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                               <td className="p-3 font-bold text-blue-600">{tpl.task_code}</td>
                               <td className="p-3 max-w-xs">
                                 <div className="flex items-center gap-2">
-                                  {(tpl.reference_image_url || tpl.guide_image_url) && (
+                                  {(tpl.reference_image_url || tpl.guide_image_url || zone?.cover_image_url) && (
                                     <img
-                                      src={tpl.reference_image_url || tpl.guide_image_url}
+                                      src={tpl.reference_image_url || tpl.guide_image_url || zone?.cover_image_url}
                                       alt="SOP Guide"
                                       referrerPolicy="no-referrer"
                                       className="w-10 h-10 object-cover rounded-lg border border-slate-200 shrink-0 shadow-sm"

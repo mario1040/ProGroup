@@ -16,7 +16,8 @@ import {
   Loader2,
   Calendar,
   Sparkles,
-  X
+  X,
+  Bell
 } from "lucide-react";
 import { Profile, TaskInstance, Zone, TaskTemplate } from "../types";
 import { getTasks, listenTodayTasks, updateTask, getLocalDateString, deletePhoto, syncOfflineTasks } from "../lib/api";
@@ -80,9 +81,23 @@ interface TodayTasksPageProps {
   user: Profile;
   onLogout: () => void;
   onNavigateToKpis: () => void;
+  unreadCount: number;
+  showNotifications: boolean;
+  setShowNotifications: React.Dispatch<React.SetStateAction<boolean>>;
+  notifications: any[];
+  handleMarkRead: (id: string) => void;
 }
 
-export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: TodayTasksPageProps) {
+export default function TodayTasksPage({ 
+  user, 
+  onLogout, 
+  onNavigateToKpis,
+  unreadCount,
+  showNotifications,
+  setShowNotifications,
+  notifications,
+  handleMarkRead
+}: TodayTasksPageProps) {
   const [tasks, setTasks] = useState<(TaskInstance & { zone?: Zone; assignee?: Profile; template?: TaskTemplate })[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<string>("all");
@@ -178,12 +193,21 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
   useEffect(() => {
     setLoading(true);
     const unsubscribe = listenTodayTasks(user.id, (myTasks) => {
-      setTasks(myTasks);
+      // Deduplicate task instances by title, zone, date, and time
+      const seenTask = new Set<string>();
+      const uniqueTasks = myTasks.filter(t => {
+        const key = `${(t.title || "").trim().toLowerCase()}_${t.zone_id || ""}_${t.due_date || ""}_${t.due_time || ""}`;
+        if (seenTask.has(key)) return false;
+        seenTask.add(key);
+        return true;
+      });
+
+      setTasks(uniqueTasks);
       setLoading(false);
       
       setSelectedTask((prevSelected) => {
          if (!prevSelected) return null;
-         const updatedTask = myTasks.find(t => t.id === prevSelected.id);
+         const updatedTask = uniqueTasks.find(t => t.id === prevSelected.id);
          return updatedTask || null;
       });
     });
@@ -666,14 +690,14 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
                 </div>
 
                 <div className="flex items-center gap-2.5 shrink-0">
-                  {(task.reference_image_url || task.template?.reference_image_url || task.guide_image_url || task.template?.guide_image_url) && (
+                  {(task.reference_image_url || task.template?.reference_image_url || task.template?.guide_image_url || task.guide_image_url || task.zone?.cover_image_url) && (
                     <img
-                      src={task.reference_image_url || task.template?.reference_image_url || task.guide_image_url || task.template?.guide_image_url}
+                      src={task.reference_image_url || task.template?.reference_image_url || task.template?.guide_image_url || task.guide_image_url || task.zone?.cover_image_url}
                       alt="SOP Map Guide"
                       referrerPolicy="no-referrer"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setActiveLightboxImage(task.reference_image_url || task.template?.reference_image_url || task.guide_image_url || task.template?.guide_image_url || null);
+                        setActiveLightboxImage(task.reference_image_url || task.template?.reference_image_url || task.template?.guide_image_url || task.guide_image_url || task.zone?.cover_image_url || null);
                       }}
                       className="w-12 h-12 rounded-xl object-cover border border-slate-200 shadow-sm hover:scale-105 active:scale-95 transition-transform"
                     />
@@ -791,49 +815,65 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
                       </div>
                     </div>
 
-                    {/* Reference image display */}
-                    {(selectedTask.reference_image_url || selectedTask.template?.reference_image_url) && (
-                       <div className="flex flex-col gap-1.5 mt-2 border border-slate-100 rounded-xl overflow-hidden bg-slate-50/50 p-2">
-                        <div className="flex items-center gap-2 mb-1.5">
-                          <div className="bg-blue-50 text-blue-600 p-1 rounded-lg border border-blue-100">
-                            <Camera className="w-3.5 h-3.5" />
-                          </div>
-                          <div>
-                            <span className="text-xs font-bold text-slate-700 block">الصورة المرجعية لبند العمل:</span>
-                            <span className="text-[10px] text-slate-400 block">صورة توضيحية للموقع أو البند المحدد المطلوب تنظيفه</span>
-                          </div>
-                        </div>
-                        <img
-                          src={selectedTask.reference_image_url || selectedTask.template?.reference_image_url}
-                          alt={selectedTask.title}
-                          referrerPolicy="no-referrer"
-                          onClick={() => setActiveLightboxImage(selectedTask.reference_image_url || selectedTask.template?.reference_image_url || null)}
-                          className="w-full h-48 object-cover rounded-lg border border-slate-200 shadow-sm animate-fade-in cursor-pointer hover:scale-[1.02] active:scale-[0.99] transition-transform duration-300"
-                        />
-                      </div>
-                    )}
+                    {/* Image display logic aligning with thumbnail priority */}
+                    {(() => {
+                      const primaryImg = selectedTask.reference_image_url || selectedTask.template?.reference_image_url || selectedTask.template?.guide_image_url || selectedTask.guide_image_url || selectedTask.zone?.cover_image_url;
+                      const hasRefImg = !!(selectedTask.reference_image_url || selectedTask.template?.reference_image_url);
+                      const hasGuideImg = !!(selectedTask.guide_image_url || selectedTask.template?.guide_image_url);
+                      const secondaryImg = (hasRefImg && hasGuideImg) ? (selectedTask.template?.guide_image_url || selectedTask.guide_image_url) : null;
 
-                    {/* Guide image display */}
-                    {(selectedTask.template?.guide_image_url || selectedTask.guide_image_url) && (
-                       <div className="flex flex-col gap-1.5 mt-2 border border-slate-100 rounded-xl overflow-hidden bg-slate-50/50 p-2">
-                        <div className="flex items-center gap-2 mb-1.5">
-                          <div className="bg-indigo-50 text-indigo-600 p-1 rounded-lg border border-indigo-100">
-                            <Camera className="w-3.5 h-3.5" />
-                          </div>
-                          <div>
-                            <span className="text-xs font-bold text-slate-700 block">صورة الدليل الإرشادي (مكان البند):</span>
-                            <span className="text-[10px] text-slate-400 block">صورة توضيحية لتحديد موقع العمل بدقة</span>
-                          </div>
-                        </div>
-                        <img
-                          src={selectedTask.template?.guide_image_url || selectedTask.guide_image_url}
-                          alt={selectedTask.title}
-                          referrerPolicy="no-referrer"
-                          onClick={() => setActiveLightboxImage(selectedTask.template?.guide_image_url || selectedTask.guide_image_url || null)}
-                          className="w-full h-44 object-cover rounded-lg border border-slate-200 shadow-sm animate-fade-in cursor-pointer hover:scale-[1.02] active:scale-[0.99] transition-transform duration-300"
-                        />
-                      </div>
-                    )}
+                      return (
+                        <>
+                          {/* Primary image display */}
+                          {primaryImg && (
+                            <div className="flex flex-col gap-1.5 mt-2 border border-slate-100 rounded-xl overflow-hidden bg-slate-50/50 p-2">
+                              <div className="flex items-center gap-2 mb-1.5">
+                                <div className="bg-blue-50 text-blue-600 p-1 rounded-lg border border-blue-100">
+                                  <Camera className="w-3.5 h-3.5" />
+                                </div>
+                                <div>
+                                  <span className="text-xs font-bold text-slate-700 block">
+                                    {hasRefImg ? "الصورة المرجعية لبند العمل:" : "صورة الدليل الإرشادي والعمل:"}
+                                  </span>
+                                  <span className="text-[10px] text-slate-400 block">
+                                    {hasRefImg ? "صورة توضيحية للموقع أو البند المحدد المطلوب العمل عليه" : "صورة توضيحية لتحديد موقع العمل بدقة"}
+                                  </span>
+                                </div>
+                              </div>
+                              <img
+                                src={primaryImg}
+                                alt={selectedTask.title}
+                                referrerPolicy="no-referrer"
+                                onClick={() => setActiveLightboxImage(primaryImg || null)}
+                                className="w-full h-48 object-cover rounded-lg border border-slate-200 shadow-sm animate-fade-in cursor-pointer hover:scale-[1.02] active:scale-[0.99] transition-transform duration-300"
+                              />
+                            </div>
+                          )}
+
+                          {/* Secondary image display */}
+                          {secondaryImg && (
+                            <div className="flex flex-col gap-1.5 mt-2 border border-slate-100 rounded-xl overflow-hidden bg-slate-50/50 p-2">
+                              <div className="flex items-center gap-2 mb-1.5">
+                                <div className="bg-indigo-50 text-indigo-600 p-1 rounded-lg border border-indigo-100">
+                                  <Camera className="w-3.5 h-3.5" />
+                                </div>
+                                <div>
+                                  <span className="text-xs font-bold text-slate-700 block">صورة الدليل الإرشادي (مكان البند):</span>
+                                  <span className="text-[10px] text-slate-400 block">صورة توضيحية لتحديد موقع العمل بدقة</span>
+                                </div>
+                              </div>
+                              <img
+                                src={secondaryImg}
+                                alt={selectedTask.title}
+                                referrerPolicy="no-referrer"
+                                onClick={() => setActiveLightboxImage(secondaryImg || null)}
+                                className="w-full h-44 object-cover rounded-lg border border-slate-200 shadow-sm animate-fade-in cursor-pointer hover:scale-[1.02] active:scale-[0.99] transition-transform duration-300"
+                              />
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
 
                   {/* If rejected, show why */}
@@ -1010,6 +1050,81 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
                 {isOnlineState ? "متصل بالإنترنت" : "دون اتصال بالشبكة"}
               </span>
             </div>
+
+            {/* Notification Bell directly in Sync Queue Footer */}
+            <div className="relative">
+              <button
+                onClick={() => setShowNotifications((v) => !v)}
+                className="bg-slate-800 hover:bg-slate-700 text-slate-100 rounded-xl p-2 relative border border-slate-700 cursor-pointer flex items-center justify-center transition"
+                title="جرس الإشعارات"
+              >
+                <Bell className="w-4 h-4" />
+                {unreadCount > 0 && (
+                  <span className="absolute -top-1.5 -left-1.5 bg-rose-500 text-white text-[9px] font-bold w-4 h-4 rounded-full flex items-center justify-center animate-bounce">
+                    {unreadCount}
+                  </span>
+                )}
+              </button>
+
+              {showNotifications && (
+                <div className="absolute bottom-12 left-0 md:left-auto md:right-0 w-[calc(100vw-2rem)] max-w-[320px] bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-4 flex flex-col gap-3 max-h-96 overflow-y-auto text-right text-slate-100 z-50">
+                  <div className="flex justify-between items-center border-b border-slate-800 pb-2">
+                    <span className="text-xs font-bold text-slate-300">جرس تنبيهات التشغيل والمهام 🔔</span>
+                    <button
+                      onClick={() => setShowNotifications(false)}
+                      className="text-[10px] font-bold text-slate-400 hover:text-slate-200"
+                    >
+                      إغلاق
+                    </button>
+                  </div>
+
+                  <div className="flex flex-col gap-2 font-sans" dir="rtl">
+                    {notifications.length === 0 ? (
+                      <span className="text-xs text-slate-500 text-center py-6 block font-medium">
+                        لا توجد إشعارات حالياً
+                      </span>
+                    ) : (
+                      notifications.map((notif) => (
+                        <div
+                          key={notif.id}
+                          onClick={() => handleMarkRead(notif.id)}
+                          className={`p-2.5 rounded-xl border text-xs cursor-pointer transition flex flex-col gap-1 text-right ${
+                            notif.is_read
+                              ? "border-slate-800 bg-slate-950/40 text-slate-400"
+                              : "border-blue-900/60 bg-blue-950/40 text-slate-100 font-bold"
+                          }`}
+                        >
+                          <div className="flex justify-between items-center text-[9px]">
+                            <span className="text-blue-400">
+                              {notif.type === "rework_requested" ? "إعادة تنفيذ ⚠️" : "تحديث تشغيل"}
+                            </span>
+                            <span className="text-slate-500">
+                              {notif.created_at
+                                ? new Date(notif.created_at).toLocaleTimeString([], {
+                                    hour: "2-digit",
+                                    minute: "2-digit",
+                                  })
+                                : ""}
+                            </span>
+                          </div>
+                          <h4 className="font-bold text-slate-200 text-[11px] mt-0.5">{notif.title}</h4>
+                          <p className="text-[10px] text-slate-400 leading-normal font-medium mt-0.5">
+                            {notif.body}
+                          </p>
+
+                          {!notif.is_read && (
+                            <span className="text-[8px] text-blue-400 text-left mt-1 block">
+                              اضغط للمسح والقراءة
+                            </span>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
             {pendingCount > 0 && (
               <button
                 onClick={handleSyncClick}
