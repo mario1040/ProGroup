@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from "react";
+import { jsPDF } from "jspdf";
+import html2canvas from "html2canvas";
 import ProfessorLogo from "./ProfessorLogo";
 import { 
   CheckCircle, 
@@ -48,7 +50,9 @@ import {
   provisionEmployeeAuth,
   KpiSummary,
   getLocalDateString,
-  getTasksForRange
+  getTasksForRange,
+  uploadPhoto,
+  compressImage
 } from "../lib/api";
 import { Profile, Zone, TaskTemplate, TaskInstance, OperationalTask, DeviceSwitch } from "../types";
 import InventoryManager from "./InventoryManager";
@@ -146,6 +150,8 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   // SOP Template Form modal state
   const [isSopModalOpen, setIsSopModalOpen] = useState(false);
   const [selectedTemplate, setSelectedTemplate] = useState<Partial<TaskTemplate> | null>(null);
+  const [uploadingGuide, setUploadingGuide] = useState(false);
+  const [uploadingReference, setUploadingReference] = useState(false);
 
   // Quick zone detail view
   const [selectedZoneDetail, setSelectedZoneDetail] = useState<Zone | null>(null);
@@ -433,6 +439,106 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
     }
   };
 
+  // Upload guide image from files
+  const handleGuideImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith("image/")) {
+      showToast("يرجى اختيار ملف صورة صالح 🖼️", "error");
+      return;
+    }
+
+    try {
+      setUploadingGuide(true);
+      const reader = new FileReader();
+      reader.onloadend = async () => {
+        const base64String = reader.result as string;
+        try {
+          if (useBase64Storage) {
+            console.log("[AdminDashboard] useBase64Storage is active. Compressing and saving directly...");
+            const superCompressed = await compressImage(base64String, 400, 400, 0.45);
+            setSelectedTemplate(prev => prev ? { ...prev, guide_image_url: superCompressed } : null);
+            showToast("تم رفع وحفظ الصورة الإرشادية بنجاح (نمط التخزين السريع)! 📸✅", "success");
+          } else {
+            const pathId = selectedTemplate?.id || `temp_${Math.random().toString(36).substring(7)}`;
+            const storagePath = `templates/guide_${pathId}.jpg`;
+            try {
+              const uploadedUrl = await uploadPhoto(base64String, storagePath);
+              setSelectedTemplate(prev => prev ? { ...prev, guide_image_url: uploadedUrl } : null);
+              showToast("تم رفع الصورة الإرشادية بنجاح! 📸✅", "success");
+            } catch (uploadErr) {
+              console.warn("[AdminDashboard] Cloud Storage failed. Falling back to compressed Base64...", uploadErr);
+              const superCompressed = await compressImage(base64String, 400, 400, 0.45);
+              setSelectedTemplate(prev => prev ? { ...prev, guide_image_url: superCompressed } : null);
+              showToast("تم حفظ الصورة الإرشادية بنجاح (نمط التخزين البديل) 📸✅", "success");
+            }
+          }
+        } catch (err) {
+          console.error("Error processing guide image:", err);
+          showToast("فشل معالجة أو رفع الصورة الإرشادية", "error");
+        } finally {
+          setUploadingGuide(false);
+        }
+      };
+      reader.readAsDataURL(file);
+    } catch (err) {
+      console.error(err);
+      showToast("فشل معالجة ملف الصورة", "error");
+      setUploadingGuide(false);
+    }
+  };
+
+  // Upload reference image from files
+  const handleReferenceImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith("image/")) {
+      showToast("يرجى اختيار ملف صورة صالح 🖼️", "error");
+      return;
+    }
+
+    try {
+      setUploadingReference(true);
+      const reader = new FileReader();
+      reader.onloadend = async () => {
+        const base64String = reader.result as string;
+        try {
+          if (useBase64Storage) {
+            console.log("[AdminDashboard] useBase64Storage is active. Compressing and saving directly...");
+            const superCompressed = await compressImage(base64String, 400, 400, 0.45);
+            setSelectedTemplate(prev => prev ? { ...prev, reference_image_url: superCompressed } : null);
+            showToast("تم رفع وحفظ صورة بند العمل المرجعية بنجاح (نمط التخزين السريع)! 📸✅", "success");
+          } else {
+            const pathId = selectedTemplate?.id || `temp_${Math.random().toString(36).substring(7)}`;
+            const storagePath = `templates/ref_${pathId}.jpg`;
+            try {
+              const uploadedUrl = await uploadPhoto(base64String, storagePath);
+              setSelectedTemplate(prev => prev ? { ...prev, reference_image_url: uploadedUrl } : null);
+              showToast("تم رفع صورة بند العمل المرجعية بنجاح! 📸✅", "success");
+            } catch (uploadErr) {
+              console.warn("[AdminDashboard] Cloud Storage failed. Falling back to compressed Base64...", uploadErr);
+              const superCompressed = await compressImage(base64String, 400, 400, 0.45);
+              setSelectedTemplate(prev => prev ? { ...prev, reference_image_url: superCompressed } : null);
+              showToast("تم حفظ الصورة المرجعية بنجاح (نمط التخزين البديل) 📸✅", "success");
+            }
+          }
+        } catch (err) {
+          console.error("Error processing reference image:", err);
+          showToast("فشل معالجة أو رفع الصورة المرجعية", "error");
+        } finally {
+          setUploadingReference(false);
+        }
+      };
+      reader.readAsDataURL(file);
+    } catch (err) {
+      console.error(err);
+      showToast("فشل معالجة ملف الصورة المرجعية", "error");
+      setUploadingReference(false);
+    }
+  };
+
   // Save SOP template action
   const handleSaveSopTemplate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -608,12 +714,189 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
     }
   };
 
+  const oklchToRgba = (oklchStr: string): string => {
+    try {
+      const content = oklchStr.slice(6, -1).trim();
+      let parts: string[] = [];
+      let alpha = "1";
+      
+      if (content.includes("/")) {
+        const splitSlash = content.split("/");
+        alpha = splitSlash[1].trim();
+        parts = splitSlash[0].trim().split(/\s+/);
+      } else {
+        parts = content.split(/\s+/);
+      }
+      
+      if (parts.length < 3) return "rgba(120, 120, 120, 1)";
+      
+      const L_val = parts[0];
+      const C_val = parts[1];
+      const H_val = parts[2];
+      
+      const L = L_val.endsWith("%") ? parseFloat(L_val) / 100 : parseFloat(L_val);
+      const C = parseFloat(C_val);
+      const H = parseFloat(H_val);
+      
+      const A = alpha.endsWith("%") ? parseFloat(alpha) / 100 : parseFloat(alpha);
+      
+      const hRad = (H * Math.PI) / 180;
+      const okl_a = C * Math.cos(hRad);
+      const okl_b = C * Math.sin(hRad);
+      
+      const l_ = L + 0.3963377774 * okl_a + 0.2158037573 * okl_b;
+      const m_ = L - 0.1055613458 * okl_a - 0.0638541728 * okl_b;
+      const s_ = L - 0.0894841775 * okl_a - 1.2914855480 * okl_b;
+      
+      const l = l_ * l_ * l_;
+      const m = m_ * m_ * m_;
+      const s = s_ * s_ * s_;
+      
+      const rLinear = +4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s;
+      const gLinear = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s;
+      const bLinear = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s;
+      
+      const f = (val: number) => {
+        return val > 0.0031308 ? 1.055 * Math.pow(val, 1 / 2.4) - 0.055 : 12.92 * val;
+      };
+      
+      const rOut = Math.max(0, Math.min(255, Math.round(f(rLinear) * 255)));
+      const gOut = Math.max(0, Math.min(255, Math.round(f(gLinear) * 255)));
+      const bOut = Math.max(0, Math.min(255, Math.round(f(bLinear) * 255)));
+      
+      return `rgba(${rOut}, ${gOut}, ${bOut}, ${A})`;
+    } catch (err) {
+      console.error("Failed to parse oklch:", oklchStr, err);
+      return "rgba(120, 120, 120, 1)";
+    }
+  };
+
+  const convertOklchInCssText = (cssText: string): string => {
+    return cssText.replace(/oklch\([^)]+\)/g, (match) => oklchToRgba(match));
+  };
+
   const exportToPDF = async () => {
-    // Hide non-printable elements by relying on the print CSS classes
-    showToast("جاري تجهيز الطباعة / التصدير إلى PDF...", "success");
-    setTimeout(() => {
-      window.print();
-    }, 500);
+    showToast("جاري تجهيز وتوليد ملف الـ PDF... يرجى الانتظار ⏳", "success");
+    
+    try {
+      let elementToExport: HTMLElement | null = null;
+      let fileName = "report.pdf";
+
+      if (activeTab === "reports") {
+        elementToExport = document.getElementById("pdf-report-container");
+        fileName = `NarisOps_Report_${reportStartDate}_to_${reportEndDate}.pdf`;
+      } else if (activeTab === "tasks") {
+        elementToExport = document.getElementById("tasks-list-container");
+        fileName = `NarisOps_Daily_Tasks_${getLocalDateString()}.pdf`;
+      }
+
+      if (!elementToExport) {
+        elementToExport = document.getElementById("pdf-report-container") || 
+                          document.getElementById("tasks-list-container") || 
+                          document.querySelector("main") || 
+                          document.body;
+        fileName = `NarisOps_Export_${getLocalDateString()}.pdf`;
+      }
+
+      if (!elementToExport) {
+        throw new Error("لم يتم العثور على العنصر المراد تصديره");
+      }
+
+      // Pre-process and pre-fetch stylesheets to eliminate OKLCH crashing html2canvas
+      let processedStyles = "";
+      
+      // 1. Process inline style tags
+      document.querySelectorAll("style").forEach((style) => {
+        if (style.textContent) {
+          processedStyles += convertOklchInCssText(style.textContent) + "\n";
+        }
+      });
+
+      // 2. Process external stylesheets
+      const linkElements = document.querySelectorAll("link[rel='stylesheet']");
+      for (let i = 0; i < linkElements.length; i++) {
+        const link = linkElements[i] as HTMLLinkElement;
+        try {
+          const response = await fetch(link.href);
+          if (response.ok) {
+            const rawCss = await response.text();
+            processedStyles += convertOklchInCssText(rawCss) + "\n";
+          }
+        } catch (e) {
+          console.warn("[exportToPDF] Failed to pre-fetch stylesheet:", link.href, e);
+        }
+      }
+
+      // Capture element as canvas using html2canvas
+      const canvas = await html2canvas(elementToExport, {
+        scale: 2, // High resolution crisp PDF
+        useCORS: true, // Bypass cross-origin restrictions for images (like photos)
+        logging: false,
+        backgroundColor: "#ffffff",
+        windowWidth: elementToExport.scrollWidth || 1200,
+        onclone: (clonedDoc) => {
+          // Remove all existing style and link tags in the cloned document
+          clonedDoc.querySelectorAll("style, link[rel='stylesheet']").forEach((el) => {
+            el.remove();
+          });
+
+          // Inject our pre-processed style tag containing converted rgba colors instead of oklch
+          const newStyle = clonedDoc.createElement("style");
+          newStyle.textContent = processedStyles;
+          clonedDoc.head.appendChild(newStyle);
+
+          // Hide all non-printable elements in the clone
+          const noPrintElements = clonedDoc.querySelectorAll(".no-print");
+          noPrintElements.forEach((el: any) => {
+            el.style.display = "none";
+          });
+
+          // Convert inline style attribute oklch occurrences as well
+          clonedDoc.querySelectorAll("[style]").forEach((el: any) => {
+            const styleAttr = el.getAttribute("style");
+            if (styleAttr && styleAttr.includes("oklch")) {
+              el.setAttribute("style", convertOklchInCssText(styleAttr));
+            }
+          });
+        }
+      });
+
+      const imgData = canvas.toDataURL("image/jpeg", 0.95);
+      
+      const pdf = new jsPDF({
+        orientation: "portrait",
+        unit: "mm",
+        format: "a4",
+      });
+
+      const imgWidth = 210; // A4 page width in mm
+      const pageHeight = 297; // A4 page height in mm
+      const imgHeight = (canvas.height * imgWidth) / canvas.width;
+      let heightLeft = imgHeight;
+      let position = 0;
+
+      // Add the first page
+      pdf.addImage(imgData, "JPEG", 0, position, imgWidth, imgHeight);
+      heightLeft -= pageHeight;
+
+      // Append more pages if the content extends beyond one A4 page
+      while (heightLeft > 0) {
+        position = heightLeft - imgHeight;
+        pdf.addPage();
+        pdf.addImage(imgData, "JPEG", 0, position, imgWidth, imgHeight);
+        heightLeft -= pageHeight;
+      }
+
+      pdf.save(fileName);
+      showToast("تم تحميل وتصدير ملف الـ PDF بنجاح! 📄✅", "success");
+    } catch (err: any) {
+      console.error("[exportToPDF] Error generating PDF:", err);
+      showToast("فشل تصدير PDF التلقائي. جاري تشغيل طباعة المتصفح كبديل...", "error");
+      // Fallback to standard print dialog
+      setTimeout(() => {
+        window.print();
+      }, 500);
+    }
   };
 
   const PIE_COLORS = ["#4f46e5", "#10b981", "#3b82f6", "#f59e0b", "#ec4899", "#8b5cf6", "#14b8a6"];
@@ -1371,7 +1654,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
 
               {/* TAB 2: TASKS BOARD */}
               {activeTab === 'tasks' && (
-                <div className="flex flex-col gap-4">
+                <div id="tasks-list-container" className="flex flex-col gap-4 tasks-list-print-container">
                   
                   {/* Top Bar with actions and switches */}
                   <div className="bg-white border border-slate-200 p-4 rounded-2xl shadow-sm flex flex-col lg:flex-row justify-between items-center gap-4 no-print">
@@ -2157,10 +2440,22 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                             <tr key={tpl.id} className="hover:bg-slate-50/50">
                               <td className="p-3 font-bold text-blue-600">{tpl.task_code}</td>
                               <td className="p-3 max-w-xs">
-                                <span className="font-bold text-slate-800 block">{tpl.title}</span>
-                                <span className="text-[10px] text-slate-400 block mt-0.5 font-medium leading-relaxed">
-                                  الغرفة: <span className="text-slate-600 font-bold">{zone?.name || "عام"}</span>
-                                </span>
+                                <div className="flex items-center gap-2">
+                                  {(tpl.reference_image_url || tpl.guide_image_url) && (
+                                    <img
+                                      src={tpl.reference_image_url || tpl.guide_image_url}
+                                      alt="SOP Guide"
+                                      referrerPolicy="no-referrer"
+                                      className="w-10 h-10 object-cover rounded-lg border border-slate-200 shrink-0 shadow-sm"
+                                    />
+                                  )}
+                                  <div>
+                                    <span className="font-bold text-slate-800 block">{tpl.title}</span>
+                                    <span className="text-[10px] text-slate-400 block mt-0.5 font-medium leading-relaxed">
+                                      الغرفة: <span className="text-slate-600 font-bold">{zone?.name || "عام"}</span>
+                                    </span>
+                                  </div>
+                                </div>
                               </td>
                               <td className="p-3">
                                 <span className="bg-slate-100 py-0.5 px-2 rounded-full text-slate-700 text-[10px] font-bold">
@@ -3268,6 +3563,116 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                   onChange={(e) => setSelectedTemplate({...selectedTemplate, tools_required: e.target.value})}
                   className="p-2 border border-slate-200 rounded-lg outline-none"
                 />
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-bold text-slate-700">الصورة التوضيحية لموقع/بند العمل (صورة الدليل الإرشادي):</label>
+                <div className="flex flex-col gap-2">
+                  <div className="flex gap-2 items-center">
+                    <input
+                      type="text"
+                      placeholder="ضع رابط صورة توضيحية من الإنترنت، أو اضغط لتحميل ملف مباشرة..."
+                      value={selectedTemplate.guide_image_url || ""}
+                      onChange={(e) => setSelectedTemplate({...selectedTemplate, guide_image_url: e.target.value})}
+                      className="p-2.5 border border-slate-200 rounded-lg outline-none text-xs flex-1 bg-white"
+                    />
+                    
+                    <label className={`flex items-center gap-1.5 px-3 py-2.5 rounded-lg border cursor-pointer transition text-xs font-bold shrink-0 ${
+                      uploadingGuide 
+                        ? 'bg-slate-50 border-slate-200 text-slate-400 cursor-not-allowed' 
+                        : 'bg-indigo-50 border-indigo-200 text-indigo-600 hover:bg-indigo-100/75'
+                    }`}>
+                      <Camera className="w-4 h-4" />
+                      {uploadingGuide ? "جاري الرفع..." : "إدراج/رفع صورة"}
+                      <input
+                        type="file"
+                        accept="image/*"
+                        disabled={uploadingGuide}
+                        onChange={handleGuideImageUpload}
+                        className="hidden"
+                      />
+                    </label>
+                  </div>
+
+                  {selectedTemplate.guide_image_url && (
+                    <div className="relative mt-1 border border-slate-200 rounded-xl overflow-hidden bg-slate-50 p-1.5 flex items-center justify-between gap-3 animate-fade-in">
+                      <div className="flex items-center gap-2">
+                        <img
+                          src={selectedTemplate.guide_image_url}
+                          alt="SOP Preview"
+                          referrerPolicy="no-referrer"
+                          className="w-12 h-12 object-cover rounded-lg border border-slate-100 shadow-sm"
+                        />
+                        <span className="text-[11px] text-slate-500 truncate max-w-xs font-mono leading-none">
+                          {selectedTemplate.guide_image_url.substring(0, 45)}...
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedTemplate({...selectedTemplate, guide_image_url: ""})}
+                        className="p-1 hover:bg-red-50 text-red-500 hover:text-red-600 rounded-lg transition"
+                        title="إزالة الصورة"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-bold text-slate-700">الصورة المرجعية التفصيلية للمهمة (Reference Image):</label>
+                <div className="flex flex-col gap-2">
+                  <div className="flex gap-2 items-center">
+                    <input
+                      type="text"
+                      placeholder="رابط صورة مرجعية أو قم بتحميل ملف لتحديد مكان التنظيف للعامل بدقة..."
+                      value={selectedTemplate.reference_image_url || ""}
+                      onChange={(e) => setSelectedTemplate({...selectedTemplate, reference_image_url: e.target.value})}
+                      className="p-2.5 border border-slate-200 rounded-lg outline-none text-xs flex-1 bg-white"
+                    />
+                    
+                    <label className={`flex items-center gap-1.5 px-3 py-2.5 rounded-lg border cursor-pointer transition text-xs font-bold shrink-0 ${
+                      uploadingReference 
+                        ? 'bg-slate-50 border-slate-200 text-slate-400 cursor-not-allowed' 
+                        : 'bg-blue-50 border-blue-200 text-blue-600 hover:bg-blue-100/75'
+                    }`}>
+                      <Camera className="w-4 h-4" />
+                      {uploadingReference ? "جاري الرفع..." : "إدراج/رفع صورة"}
+                      <input
+                        type="file"
+                        accept="image/*"
+                        disabled={uploadingReference}
+                        onChange={handleReferenceImageUpload}
+                        className="hidden"
+                      />
+                    </label>
+                  </div>
+
+                  {selectedTemplate.reference_image_url && (
+                    <div className="relative mt-1 border border-slate-200 rounded-xl overflow-hidden bg-slate-50 p-1.5 flex items-center justify-between gap-3 animate-fade-in">
+                      <div className="flex items-center gap-2">
+                        <img
+                          src={selectedTemplate.reference_image_url}
+                          alt="Reference Preview"
+                          referrerPolicy="no-referrer"
+                          className="w-12 h-12 object-cover rounded-lg border border-slate-100 shadow-sm"
+                        />
+                        <span className="text-[11px] text-slate-500 truncate max-w-xs font-mono leading-none">
+                          {selectedTemplate.reference_image_url.substring(0, 45)}...
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedTemplate({...selectedTemplate, reference_image_url: ""})}
+                        className="p-1 hover:bg-red-50 text-red-500 hover:text-red-600 rounded-lg transition"
+                        title="إزالة الصورة"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* Toggle Switches */}

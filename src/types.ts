@@ -54,6 +54,8 @@ export interface TaskTemplate {
   auto_escalate_if_late: boolean;
   default_assignee_id?: string;
   is_active: boolean;
+  guide_image_url?: string; // photo guiding the cleaner on exact location/instructions
+  reference_image_url?: string; // reference image for cleaner view
   created_at?: string;
   updated_at?: string;
 }
@@ -94,6 +96,8 @@ export interface TaskInstance {
   started_at?: string;
   completed_at?: string;
   delay_minutes?: number;
+  guide_image_url?: string; // copied from template for direct access
+  reference_image_url?: string; // reference image for cleaner view
   created_at?: string;
   updated_at?: string;
 }

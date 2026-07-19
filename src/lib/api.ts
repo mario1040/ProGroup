@@ -35,6 +35,14 @@ import {
 } from "firebase/auth";
 import { initializeApp, deleteApp } from "firebase/app";
 import { getSeededDB } from "../db_default";
+import { 
+  isOnline, 
+  saveCachedTasks, 
+  getCachedTasks, 
+  addPendingUpdate, 
+  getPendingUpdates, 
+  removePendingUpdate 
+} from "./offlineManager";
 
 // --- Clean Undefined Interceptor (Mandatory to prevent Firestore crash) ---
 function cleanUndefined<T extends object>(obj: T): T {
@@ -639,6 +647,8 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
           due_time: tpl.scheduled_time || "09:00",
           status: "pending",
           supervisor_approved: false,
+          guide_image_url: tpl.guide_image_url || "",
+          reference_image_url: tpl.reference_image_url || "",
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
         };
@@ -693,6 +703,25 @@ export function listenTodayTasks(
   callback: (tasks: (TaskInstance & { zone?: Zone; assignee?: Profile; template?: TaskTemplate })[]) => void
 ): () => void {
   const todayStr = getLocalDateString();
+  const cacheKey = userId || "all";
+  
+  // 1. Immediately feed cached tasks to UI for rapid, offline-first loading
+  try {
+    const cached = getCachedTasks(cacheKey);
+    if (cached && cached.length > 0) {
+      const pending = getPendingUpdates();
+      const merged = cached.map(task => {
+        const match = pending.find(p => p.taskId === task.id);
+        if (match) {
+          return { ...task, ...match.updates };
+        }
+        return task;
+      });
+      callback(merged);
+    }
+  } catch (err) {
+    console.error("[Offline Engine] Failed to load cached tasks on start", err);
+  }
   
   // Fire off getTasks in background to generate any missing recurring tasks
   getTasks(todayStr).catch(console.error);
@@ -742,7 +771,20 @@ export function listenTodayTasks(
          return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
       });
 
-      callback(enrichedTasks);
+      // 2. Merge pending local updates that haven't synchronized to the server yet
+      const pending = getPendingUpdates();
+      const synchronizedTasks = enrichedTasks.map(task => {
+        const match = pending.find(p => p.taskId === task.id);
+        if (match) {
+          return { ...task, ...match.updates };
+        }
+        return task;
+      });
+
+      // 3. Save to localStorage cache
+      saveCachedTasks(cacheKey, synchronizedTasks);
+
+      callback(synchronizedTasks);
     } catch (error) {
       console.error("Error processing real-time tasks:", error);
     }
@@ -810,6 +852,7 @@ export async function createTask(task: Partial<TaskInstance>): Promise<TaskInsta
   const newInstance: TaskInstance = {
     id,
     zone_id: task.zone_id || "z1",
+    template_id: task.template_id || null,
     assigned_to: task.assigned_to || "p2",
     assigned_by: task.assigned_by || "p1",
     task_type: task.task_type || "one_time",
@@ -827,6 +870,8 @@ export async function createTask(task: Partial<TaskInstance>): Promise<TaskInsta
     employee_signature_url: task.employee_signature_url || null,
     supervisor_notes: task.supervisor_notes || null,
     quality_grade: task.quality_grade || null,
+    guide_image_url: task.guide_image_url || null,
+    reference_image_url: task.reference_image_url || null,
     created_at: task.created_at || new Date().toISOString(),
     updated_at: task.updated_at || new Date().toISOString()
   };
@@ -849,103 +894,239 @@ export async function createTask(task: Partial<TaskInstance>): Promise<TaskInsta
   return newInstance;
 }
 
-export async function updateTask(id: string, updates: Partial<TaskInstance>): Promise<TaskInstance> {
-  await ensureSeeded();
-  const docRef = doc(db, "task_instances", id);
-  let snap;
-  try {
-    snap = await getDoc(docRef);
-  } catch (error) {
-    handleFirestoreError(error, OperationType.GET, `task_instances/${id}`);
-  }
-  if (!snap.exists()) {
-    throw new Error("المهمة المطلوبة غير موجودة في قاعدة البيانات");
-  }
+function handleOfflineUpdate(id: string, updates: Partial<TaskInstance>): TaskInstance {
+  console.log(`[Offline Engine] Saving local update for task: ${id}`, updates);
   
-  const currentTask = snap.data() as TaskInstance;
+  // Try to find the task in local cache
+  let cachedTask: any = null;
+  let cachedUserId: string = "";
   
-  // 1. Prevent duplicate completion
-  if (currentTask.status === "completed" && updates.status === "completed") {
-    throw new Error("تنبيه: تم إكمال هذه المهمة بالفعل مسبقاً ولا يمكن إعادة تسليمها.");
-  }
-
-  let template: TaskTemplate | undefined;
-  if (currentTask.template_id) {
-    try {
-      const tplSnap = await getDoc(doc(db, "task_templates", currentTask.template_id));
-      if (tplSnap.exists()) {
-        template = tplSnap.data() as TaskTemplate;
+  if (typeof localStorage !== "undefined") {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith("naris_cached_tasks_")) {
+        const userId = key.replace("naris_cached_tasks_", "");
+        const tasks = getCachedTasks(userId);
+        const found = tasks.find(t => t.id === id);
+        if (found) {
+          cachedTask = found;
+          cachedUserId = userId;
+          break;
+        }
       }
-    } catch (error) {
-      console.warn("Could not retrieve template", error);
     }
   }
+
+  if (!cachedTask) {
+    cachedTask = { id, status: 'pending', created_at: new Date().toISOString() };
+  }
+
+  const merged = { ...cachedTask, ...updates, updated_at: new Date().toISOString() };
   
-  const merged = { ...currentTask, ...updates, updated_at: new Date().toISOString() };
-
-  // 2. Enforce "before photo" requirement
-  const requiresBefore = template ? template.requires_photo_before : true;
-  if (requiresBefore && (updates.status === "in_progress" || updates.status === "completed")) {
-    if (!merged.photo_before_url) {
-      throw new Error("خطأ حماية: لا يمكن بدء أو إكمال هذه المهمة بدون التقاط ورفع صورة إثبات ما قبل البدء (Before Photo).");
-    }
-  }
-
-  // 3. Enforce "after photo" requirement
-  const requiresAfter = template ? template.requires_photo_after : true;
-  if (requiresAfter && updates.status === "completed") {
-    if (!merged.photo_after_url) {
-      throw new Error("خطأ حماية: لا يمكن إغلاق وإكمال هذه المهمة بدون التقاط ورفع صورة إثبات جودة العمل (After Photo).");
-    }
-  }
-
-  // Prevent lifting After photo before Before photo
-  if (updates.photo_after_url && requiresBefore && !merged.photo_before_url) {
-    throw new Error("خطأ حماية: لا يمكن رفع صورة الإثبات بعد العمل قبل رفع صورة الإثبات قبل العمل.");
-  }
-
-  // 4. Validate rework tasks
-  if (merged.task_type === "rework" && !merged.parent_instance_id) {
-    throw new Error("خطأ حماية: لا يمكن إنشاء أو تحديث مهمة إعادة عمل (Rework) بدون الإشارة إلى المهمة الأصلية (Parent Reference).");
-  }
-
-  if (updates.photo_before_url && !currentTask.photo_before_url) {
-    merged.photo_before_taken_at = updates.photo_before_taken_at || new Date().toISOString();
-    merged.photo_before_uploaded_at = updates.photo_before_uploaded_at || new Date().toISOString();
-  }
-
-  if (updates.status === "in_progress" && !currentTask.started_at) {
+  if (updates.status === "in_progress" && !cachedTask.started_at) {
     merged.started_at = new Date().toISOString();
   }
   
-  if (updates.status === "completed" && !currentTask.completed_at) {
+  if (updates.status === "completed" && !cachedTask.completed_at) {
     merged.completed_at = new Date().toISOString();
     if (!merged.photo_after_taken_at) {
       merged.photo_after_taken_at = updates.photo_after_taken_at || new Date().toISOString();
     }
     merged.photo_after_uploaded_at = updates.photo_after_uploaded_at || new Date().toISOString();
+  }
+
+  // Save the pending update
+  addPendingUpdate(id, updates);
+
+  // Update cached tasks in localStorage
+  if (cachedUserId) {
+    const tasks = getCachedTasks(cachedUserId);
+    const updatedTasks = tasks.map(t => t.id === id ? merged : t);
+    saveCachedTasks(cachedUserId, updatedTasks);
+  } else {
+    const tasks = getCachedTasks("all");
+    const updatedTasks = tasks.map(t => t.id === id ? merged : t);
+    saveCachedTasks("all", updatedTasks);
+  }
+
+  return merged;
+}
+
+export async function syncOfflineTasks(): Promise<number> {
+  const pending = getPendingUpdates();
+  if (pending.length === 0) return 0;
+
+  console.log(`[Offline Sync] Synchronizing ${pending.length} pending updates...`);
+  let successCount = 0;
+
+  for (const item of pending) {
+    try {
+      const docRef = doc(db, "task_instances", item.taskId);
+      const snap = await getDoc(docRef);
+      if (snap.exists()) {
+        const currentTask = snap.data() as TaskInstance;
+        const merged = { ...currentTask, ...item.updates, updated_at: new Date().toISOString() };
+        
+        if (item.updates.status === "in_progress" && !currentTask.started_at) {
+          merged.started_at = merged.started_at || new Date().toISOString();
+        }
+        if (item.updates.status === "completed" && !currentTask.completed_at) {
+          merged.completed_at = merged.completed_at || new Date().toISOString();
+          if (!merged.photo_after_taken_at) {
+            merged.photo_after_taken_at = item.updates.photo_after_taken_at || new Date().toISOString();
+          }
+          merged.photo_after_uploaded_at = item.updates.photo_after_uploaded_at || new Date().toISOString();
+        }
+
+        await firebaseSetDoc(docRef, cleanUndefined(merged));
+        console.log(`[Offline Sync] Successfully synced task ${item.taskId}`);
+        removePendingUpdate(item.taskId);
+        successCount++;
+      } else {
+        console.warn(`[Offline Sync] Task ${item.taskId} not found in Firestore during sync, removing from queue.`);
+        removePendingUpdate(item.taskId);
+      }
+    } catch (err) {
+      console.error(`[Offline Sync] Failed to sync task ${item.taskId}:`, err);
+      // If network fails, break out of the loop to try again later
+      break;
+    }
+  }
+
+  return successCount;
+}
+
+// Background auto-sync listener setup
+if (typeof window !== "undefined") {
+  window.addEventListener('online', () => {
+    console.log("[Offline Engine] Network online detected. Triggering sync...");
+    syncOfflineTasks().catch(console.error);
+  });
+  
+  // Every 15 seconds try to sync if online
+  setInterval(() => {
+    if (isOnline()) {
+      syncOfflineTasks().catch(console.error);
+    }
+  }, 15000);
+}
+
+export async function updateTask(id: string, updates: Partial<TaskInstance>): Promise<TaskInstance> {
+  if (!isOnline()) {
+    return handleOfflineUpdate(id, updates);
+  }
+
+  try {
+    await ensureSeeded();
+    const docRef = doc(db, "task_instances", id);
+    let snap;
+    try {
+      snap = await getDoc(docRef);
+    } catch (error) {
+      console.warn("[Offline Engine] getDoc failed. Falling back to local update.", error);
+      return handleOfflineUpdate(id, updates);
+    }
     
-    if (currentTask.due_time && currentTask.due_date) {
+    if (!snap.exists()) {
+      throw new Error("المهمة المطلوبة غير موجودة في قاعدة البيانات");
+    }
+    
+    const currentTask = snap.data() as TaskInstance;
+    
+    // 1. Prevent duplicate completion
+    if (currentTask.status === "completed" && updates.status === "completed") {
+      throw new Error("تنبيه: تم إكمال هذه المهمة بالفعل مسبقاً ولا يمكن إعادة تسليمها.");
+    }
+
+    let template: TaskTemplate | undefined;
+    if (currentTask.template_id) {
       try {
-        const dueDateTime = new Date(`${currentTask.due_date}T${currentTask.due_time}:00`);
-        const completedTime = new Date(merged.completed_at);
-        const diffMs = completedTime.getTime() - dueDateTime.getTime();
-        merged.delay_minutes = diffMs > 0 ? Math.floor(diffMs / 60000) : 0;
-      } catch (e) {
-        console.error("Error parsing date for delay calc", e);
+        const tplSnap = await getDoc(doc(db, "task_templates", currentTask.template_id));
+        if (tplSnap.exists()) {
+          template = tplSnap.data() as TaskTemplate;
+        }
+      } catch (error) {
+        console.warn("Could not retrieve template", error);
       }
     }
     
-    const requiresApproval = template ? template.requires_supervisor_approval : true;
-    if (!requiresApproval) {
-      merged.supervisor_approved = true;
-      merged.supervisor_approved_at = new Date().toISOString();
-      merged.quality_grade = "A";
+    const merged = { ...currentTask, ...updates, updated_at: new Date().toISOString() };
+
+    // 2. Enforce "before photo" requirement
+    const requiresBefore = template ? template.requires_photo_before : true;
+    if (requiresBefore && (updates.status === "in_progress" || updates.status === "completed")) {
+      if (!merged.photo_before_url) {
+        throw new Error("خطأ حماية: لا يمكن بدء أو إكمال هذه المهمة بدون التقاط ورفع صورة إثبات ما قبل البدء (Before Photo).");
+      }
     }
+
+    // 3. Enforce "after photo" requirement
+    const requiresAfter = template ? template.requires_photo_after : true;
+    if (requiresAfter && updates.status === "completed") {
+      if (!merged.photo_after_url) {
+        throw new Error("خطأ حماية: لا يمكن إغلاق وإكمال هذه المهمة بدون التقاط ورفع صورة إثبات جودة العمل (After Photo).");
+      }
+    }
+
+    // Prevent lifting After photo before Before photo
+    if (updates.photo_after_url && requiresBefore && !merged.photo_before_url) {
+      throw new Error("خطأ حماية: لا يمكن رفع صورة الإثبات بعد العمل قبل رفع صورة الإثبات قبل العمل.");
+    }
+
+    // 4. Validate rework tasks
+    if (merged.task_type === "rework" && !merged.parent_instance_id) {
+      throw new Error("خطأ حماية: لا يمكن إنشاء أو تحديث مهمة إعادة عمل (Rework) بدون الإشارة إلى المهمة الأصلية (Parent Reference).");
+    }
+
+    if (updates.photo_before_url && !currentTask.photo_before_url) {
+      merged.photo_before_taken_at = updates.photo_before_taken_at || new Date().toISOString();
+      merged.photo_before_uploaded_at = updates.photo_before_uploaded_at || new Date().toISOString();
+    }
+
+    if (updates.status === "in_progress" && !currentTask.started_at) {
+      merged.started_at = new Date().toISOString();
+    }
+    
+    if (updates.status === "completed" && !currentTask.completed_at) {
+      merged.completed_at = new Date().toISOString();
+      if (!merged.photo_after_taken_at) {
+        merged.photo_after_taken_at = updates.photo_after_taken_at || new Date().toISOString();
+      }
+      merged.photo_after_uploaded_at = updates.photo_after_uploaded_at || new Date().toISOString();
+      
+      if (currentTask.due_time && currentTask.due_date) {
+        try {
+          const dueDateTime = new Date(`${currentTask.due_date}T${currentTask.due_time}:00`);
+          const completedTime = new Date(merged.completed_at);
+          const diffMs = completedTime.getTime() - dueDateTime.getTime();
+          merged.delay_minutes = diffMs > 0 ? Math.floor(diffMs / 60000) : 0;
+        } catch (e) {
+          console.error("Error parsing date for delay calc", e);
+        }
+      }
+      
+      const requiresApproval = template ? template.requires_supervisor_approval : true;
+      if (!requiresApproval) {
+        merged.supervisor_approved = true;
+        merged.supervisor_approved_at = new Date().toISOString();
+        merged.quality_grade = "A";
+      }
+    }
+    
+    try {
+      await setDoc(docRef, merged);
+    } catch (error) {
+      console.warn("[Offline Engine] setDoc failed. Falling back to local update.", error);
+      return handleOfflineUpdate(id, updates);
+    }
+    return merged;
+  } catch (error: any) {
+    if (error.message && (error.message.includes("خطأ حماية") || error.message.includes("تنبيه"))) {
+      throw error;
+    }
+    console.warn("[Offline Engine] General failure. Falling back to local update.", error);
+    return handleOfflineUpdate(id, updates);
   }
-  
-  await setDoc(docRef, merged);
-  return merged;
 }
 
 export async function approveTask(id: string, approval: { supervisor_id: string; quality_grade: 'A' | 'B' | 'C'; supervisor_notes?: string }): Promise<TaskInstance> {

@@ -15,10 +15,12 @@ import {
   Send,
   Loader2,
   Calendar,
-  Sparkles
+  Sparkles,
+  X
 } from "lucide-react";
 import { Profile, TaskInstance, Zone, TaskTemplate } from "../types";
-import { getTasks, listenTodayTasks, updateTask, getLocalDateString, deletePhoto } from "../lib/api";
+import { getTasks, listenTodayTasks, updateTask, getLocalDateString, deletePhoto, syncOfflineTasks } from "../lib/api";
+import { isOnline, getPendingUpdates } from "../lib/offlineManager";
 import PhotoCapture from "./PhotoCapture";
 import ProfessorLogo from "./ProfessorLogo";
 
@@ -86,6 +88,11 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
   const [activeTab, setActiveTab] = useState<string>("all");
   const [selectedTask, setSelectedTask] = useState<(TaskInstance & { zone?: Zone; assignee?: Profile; template?: TaskTemplate }) | null>(null);
   
+  // Offline & Synchronization state
+  const [isOnlineState, setIsOnlineState] = useState<boolean>(isOnline());
+  const [pendingCount, setPendingCount] = useState<number>(0);
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  
   // Executing state
   const [executingStep, setExecutingStep] = useState<'details' | 'before_photo' | 'after_photo' | 'signature_and_notes'>('details');
   const [photoBefore, setPhotoBefore] = useState<string | null>(null);
@@ -94,6 +101,7 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
   const [notes, setNotes] = useState<string>("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'warning' } | null>(null);
+  const [activeLightboxImage, setActiveLightboxImage] = useState<string | null>(null);
 
   // Canvas ref for signature
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -103,6 +111,68 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
   const showToast = (message: string, type: 'success' | 'error' | 'warning') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 4000);
+  };
+
+  useEffect(() => {
+    // Initial fetch of pending count
+    setPendingCount(getPendingUpdates().length);
+
+    const handleOnline = () => {
+      setIsOnlineState(true);
+      // Automatically sync when connection is restored
+      setIsSyncing(true);
+      syncOfflineTasks()
+        .then((count) => {
+          if (count > 0) {
+            showToast(`تمت مزامنة ${count} مهام بنجاح! 🎉`, "success");
+          }
+        })
+        .catch(err => {
+          console.error("Auto sync failed:", err);
+        })
+        .finally(() => {
+          setIsSyncing(false);
+          setPendingCount(getPendingUpdates().length);
+        });
+    };
+
+    const handleOffline = () => {
+      setIsOnlineState(false);
+    };
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    // Periodically update pending count and online state
+    const interval = setInterval(() => {
+      setPendingCount(getPendingUpdates().length);
+      setIsOnlineState(isOnline());
+    }, 5000);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+      clearInterval(interval);
+    };
+  }, []);
+
+  const handleSyncClick = async () => {
+    if (isSyncing || !isOnlineState) return;
+    try {
+      setIsSyncing(true);
+      const count = await syncOfflineTasks();
+      if (count > 0) {
+        showToast(`تمت مزامنة ${count} مهام بنجاح! 🎉`, "success");
+      } else {
+        showToast("جميع المهام مزامنة ومحدثة بالكامل 👍", "success");
+      }
+    } catch (err) {
+      console.error(err);
+      showToast("حدث خطأ أثناء المزامنة، يرجى المحاولة لاحقاً", "error");
+    } finally {
+      setIsSyncing(false);
+      setPendingCount(getPendingUpdates().length);
+    }
   };
 
   useEffect(() => {
@@ -387,7 +457,7 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 pb-20 font-sans">
+    <div className="min-h-screen bg-slate-50 pb-28 font-sans">
       {/* Toast Alert */}
       {toast && (
         <div className={`fixed top-4 left-4 right-4 md:left-auto md:w-96 z-50 p-4 rounded-xl shadow-lg border transition-all duration-300 transform translate-y-0 flex items-center gap-3 ${
@@ -453,6 +523,36 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
               </span>
               <span className="text-[10px] text-slate-400 block mt-0.5">بانتظار العمل</span>
             </div>
+          </div>
+
+          {/* Offline / Online Status Bar */}
+          <div className="mt-4 flex items-center justify-between bg-slate-800 border border-slate-700/50 py-2 px-3 rounded-xl text-xs">
+            <div className="flex items-center gap-2">
+              {isOnlineState ? (
+                <>
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+                  <span className="font-semibold text-slate-200">متصل بالإنترنت</span>
+                </>
+              ) : (
+                <>
+                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse" />
+                  <span className="font-semibold text-amber-300">وضع العمل دون اتصال 🌐</span>
+                </>
+              )}
+            </div>
+            
+            {pendingCount > 0 && (
+              <div className="flex items-center gap-2">
+                <span className="text-slate-400">({pendingCount} بانتظار المزامنة)</span>
+                <button
+                  onClick={handleSyncClick}
+                  disabled={isSyncing || !isOnlineState}
+                  className={`bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-700 text-white font-bold py-1 px-2.5 rounded-lg flex items-center gap-1 cursor-pointer transition text-[10px] ${isSyncing ? "animate-pulse" : ""}`}
+                >
+                  {isSyncing ? "مزامنة..." : "مزامنة الآن"}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -565,7 +665,21 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
                   </div>
                 </div>
 
-                <ChevronLeft className="w-5 h-5 text-slate-400" />
+                <div className="flex items-center gap-2.5 shrink-0">
+                  {(task.reference_image_url || task.template?.reference_image_url || task.guide_image_url || task.template?.guide_image_url) && (
+                    <img
+                      src={task.reference_image_url || task.template?.reference_image_url || task.guide_image_url || task.template?.guide_image_url}
+                      alt="SOP Map Guide"
+                      referrerPolicy="no-referrer"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveLightboxImage(task.reference_image_url || task.template?.reference_image_url || task.guide_image_url || task.template?.guide_image_url || null);
+                      }}
+                      className="w-12 h-12 rounded-xl object-cover border border-slate-200 shadow-sm hover:scale-105 active:scale-95 transition-transform"
+                    />
+                  )}
+                  <ChevronLeft className="w-5 h-5 text-slate-400" />
+                </div>
               </div>
             ))}
           </div>
@@ -676,6 +790,50 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
                         </p>
                       </div>
                     </div>
+
+                    {/* Reference image display */}
+                    {(selectedTask.reference_image_url || selectedTask.template?.reference_image_url) && (
+                       <div className="flex flex-col gap-1.5 mt-2 border border-slate-100 rounded-xl overflow-hidden bg-slate-50/50 p-2">
+                        <div className="flex items-center gap-2 mb-1.5">
+                          <div className="bg-blue-50 text-blue-600 p-1 rounded-lg border border-blue-100">
+                            <Camera className="w-3.5 h-3.5" />
+                          </div>
+                          <div>
+                            <span className="text-xs font-bold text-slate-700 block">الصورة المرجعية لبند العمل:</span>
+                            <span className="text-[10px] text-slate-400 block">صورة توضيحية للموقع أو البند المحدد المطلوب تنظيفه</span>
+                          </div>
+                        </div>
+                        <img
+                          src={selectedTask.reference_image_url || selectedTask.template?.reference_image_url}
+                          alt={selectedTask.title}
+                          referrerPolicy="no-referrer"
+                          onClick={() => setActiveLightboxImage(selectedTask.reference_image_url || selectedTask.template?.reference_image_url || null)}
+                          className="w-full h-48 object-cover rounded-lg border border-slate-200 shadow-sm animate-fade-in cursor-pointer hover:scale-[1.02] active:scale-[0.99] transition-transform duration-300"
+                        />
+                      </div>
+                    )}
+
+                    {/* Guide image display */}
+                    {(selectedTask.template?.guide_image_url || selectedTask.guide_image_url) && (
+                       <div className="flex flex-col gap-1.5 mt-2 border border-slate-100 rounded-xl overflow-hidden bg-slate-50/50 p-2">
+                        <div className="flex items-center gap-2 mb-1.5">
+                          <div className="bg-indigo-50 text-indigo-600 p-1 rounded-lg border border-indigo-100">
+                            <Camera className="w-3.5 h-3.5" />
+                          </div>
+                          <div>
+                            <span className="text-xs font-bold text-slate-700 block">صورة الدليل الإرشادي (مكان البند):</span>
+                            <span className="text-[10px] text-slate-400 block">صورة توضيحية لتحديد موقع العمل بدقة</span>
+                          </div>
+                        </div>
+                        <img
+                          src={selectedTask.template?.guide_image_url || selectedTask.guide_image_url}
+                          alt={selectedTask.title}
+                          referrerPolicy="no-referrer"
+                          onClick={() => setActiveLightboxImage(selectedTask.template?.guide_image_url || selectedTask.guide_image_url || null)}
+                          className="w-full h-44 object-cover rounded-lg border border-slate-200 shadow-sm animate-fade-in cursor-pointer hover:scale-[1.02] active:scale-[0.99] transition-transform duration-300"
+                        />
+                      </div>
+                    )}
                   </div>
 
                   {/* If rejected, show why */}
@@ -819,6 +977,88 @@ export default function TodayTasksPage({ user, onLogout, onNavigateToKpis }: Tod
               )}
 
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Visual 'Sync Queue' Indicator Footer */}
+      <div className="fixed bottom-0 left-0 right-0 z-40 bg-slate-900/95 backdrop-blur-md border-t border-slate-800 text-slate-100 py-3 px-4 shadow-2xl">
+        <div className="max-w-md mx-auto flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className={`p-2 rounded-xl shrink-0 transition-colors ${pendingCount > 0 ? 'bg-amber-500/10 text-amber-400' : 'bg-emerald-500/10 text-emerald-400'}`}>
+              <CheckCircle2 className={`w-5 h-5 ${pendingCount > 0 ? 'animate-pulse' : ''}`} />
+            </div>
+            <div>
+              <div className="font-bold flex items-center gap-2 text-slate-100 text-xs">
+                <span>طابور المزامنة</span>
+                <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border ${pendingCount > 0 ? 'bg-amber-500/20 text-amber-400 border-amber-500/30' : 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'}`}>
+                  {pendingCount} معلقة
+                </span>
+              </div>
+              <p className="text-[10px] text-slate-400 mt-1 leading-normal">
+                {pendingCount > 0 
+                  ? "إجراءات مكتملة بانتظار الاتصال لحفظها في السحابة" 
+                  : "جميع المهام محدثة بالكامل ومزامنة مع الخادم"}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3 shrink-0">
+            <div className="hidden sm:flex flex-col items-end text-right">
+              <span className="text-[9px] text-slate-500">الاتصال بالشبكة</span>
+              <span className={`text-[10px] font-extrabold mt-0.5 ${isOnlineState ? 'text-emerald-400' : 'text-amber-400'}`}>
+                {isOnlineState ? "متصل بالإنترنت" : "دون اتصال بالشبكة"}
+              </span>
+            </div>
+            {pendingCount > 0 && (
+              <button
+                onClick={handleSyncClick}
+                disabled={isSyncing || !isOnlineState}
+                className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-800 disabled:text-slate-500 disabled:border-slate-800/80 text-white font-bold py-1.5 px-3 rounded-xl flex items-center gap-1.5 cursor-pointer transition text-xs shadow-md shadow-indigo-600/15"
+              >
+                {isSyncing ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>مزامنة...</span>
+                  </>
+                ) : (
+                  <>
+                    <Send className="w-3.5 h-3.5 rotate-180" />
+                    <span>مزامنة الآن</span>
+                  </>
+                )}
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Full Screen Image Lightbox */}
+      {activeLightboxImage && (
+        <div 
+          className="fixed inset-0 z-[100] bg-black/90 backdrop-blur-md flex flex-col items-center justify-center p-4 animate-fade-in"
+          onClick={() => setActiveLightboxImage(null)}
+        >
+          <div className="absolute top-4 right-4 flex items-center gap-2">
+            <span className="text-white/60 text-xs font-semibold bg-white/10 px-3 py-1.5 rounded-full backdrop-blur-sm">اضغط في أي مكان للإغلاق</span>
+            <button
+              onClick={() => setActiveLightboxImage(null)}
+              className="bg-white/15 hover:bg-white/25 text-white p-2.5 rounded-full transition-all border border-white/10 shadow-lg cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+          
+          <div 
+            className="relative max-w-full max-h-[85vh] overflow-hidden rounded-2xl border border-white/10 shadow-2xl bg-slate-950/40"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <img
+              src={activeLightboxImage}
+              alt="SOP Fullscreen Preview"
+              referrerPolicy="no-referrer"
+              className="max-w-full max-h-[80vh] object-contain rounded-xl select-none"
+            />
           </div>
         </div>
       )}
