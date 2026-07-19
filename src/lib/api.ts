@@ -87,6 +87,73 @@ export function clearSeedingPromise() {
   seedingPromise = null;
 }
 
+let deduplicationPromise: Promise<void> | null = null;
+
+export async function deduplicateDatabase(): Promise<void> {
+  if (deduplicationPromise) {
+    return deduplicationPromise;
+  }
+
+  deduplicationPromise = (async () => {
+    console.log("[Firestore Client] Running deduplication for task_templates and task_instances...");
+    try {
+      // 1. Deduplicate task_templates
+      const templatesCol = collection(db, "task_templates");
+      const templatesSnap = await getDocs(templatesCol);
+      const seenTemplates = new Map<string, string>(); // Key: title + "_" + zone_id, Value: kept_template_id
+      
+      for (const docSnap of templatesSnap.docs) {
+        const data = docSnap.data();
+        const title = (data.title || "").trim();
+        const zoneId = data.zone_id || "";
+        const key = `${title}_${zoneId}`;
+        
+        if (seenTemplates.has(key)) {
+          // This is a duplicate template! Delete it.
+          console.log(`[Deduplicator] Deleting duplicate task_template: ${data.title} (${docSnap.id})`);
+          try {
+            await deleteDoc(doc(db, "task_templates", docSnap.id));
+          } catch (e) {
+            console.error(`[Deduplicator] Failed to delete duplicate template ${docSnap.id}`, e);
+          }
+        } else {
+          seenTemplates.set(key, docSnap.id);
+        }
+      }
+
+      // 2. Deduplicate task_instances
+      const instancesCol = collection(db, "task_instances");
+      const instancesSnap = await getDocs(instancesCol);
+      const seenInstances = new Set<string>(); // Key: title + "_" + zone_id + "_" + due_date
+      
+      for (const docSnap of instancesSnap.docs) {
+        const data = docSnap.data();
+        const title = (data.title || "").trim();
+        const zoneId = data.zone_id || "";
+        const dueDate = data.due_date || "";
+        const key = `${title}_${zoneId}_${dueDate}`;
+        
+        if (seenInstances.has(key)) {
+          // This is a duplicate task instance! Delete it.
+          console.log(`[Deduplicator] Deleting duplicate task_instance: ${data.title} for ${dueDate} (${docSnap.id})`);
+          try {
+            await deleteDoc(doc(db, "task_instances", docSnap.id));
+          } catch (e) {
+            console.error(`[Deduplicator] Failed to delete duplicate instance ${docSnap.id}`, e);
+          }
+        } else {
+          seenInstances.add(key);
+        }
+      }
+      console.log("[Firestore Client] Deduplication completed successfully.");
+    } catch (err) {
+      console.error("[Firestore Client] Deduplication failed:", err);
+    }
+  })();
+
+  return deduplicationPromise;
+}
+
 /**
  * Ensures Firestore is properly seeded with initial data if it's completely empty.
  */
@@ -113,6 +180,7 @@ async function ensureSeeded(): Promise<void> {
       }
 
       if (!usersSnap.empty) {
+        await deduplicateDatabase();
         return;
       }
       
