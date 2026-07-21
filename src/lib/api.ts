@@ -8,16 +8,16 @@ import {
   firebaseConfig
 } from "./firebase";
 import { 
-  doc, 
-  getDoc, 
-  getDocs, 
+  doc as firebaseDoc, 
+  getDoc as firebaseGetDoc, 
+  getDocs as firebaseGetDocs, 
   setDoc as firebaseSetDoc, 
-  deleteDoc, 
+  deleteDoc as firebaseDeleteDoc, 
   updateDoc as firebaseUpdateDoc,
-  collection, 
-  query, 
-  where,
-  onSnapshot
+  collection as firebaseCollection, 
+  query as firebaseQuery, 
+  where as firebaseWhere,
+  onSnapshot as firebaseOnSnapshot
 } from "firebase/firestore";
 import { 
   ref as storageRef, 
@@ -61,23 +61,415 @@ function cleanUndefined<T extends object>(obj: T): T {
   return result as T;
 }
 
-async function setDoc(docRef: any, data: any, options?: any) {
-  const cleaned = cleanUndefined(data);
-  const path = docRef.path;
+// --- Local Fallback Database Engine ---
+let localDBInitialized = false;
+let useLocalFallback = localStorage.getItem("use_local_fallback") === "true";
+
+let localDB: {
+  users: Record<string, any>;
+  locations: Record<string, any>;
+  zones: Record<string, any>;
+  task_templates: Record<string, any>;
+  task_instances: Record<string, any>;
+  operational_tasks: Record<string, any>;
+  notifications: Record<string, any>;
+  device_switches: Record<string, any>;
+  kpi_snapshots: Record<string, any>;
+} = {
+  users: {},
+  locations: {},
+  zones: {},
+  task_templates: {},
+  task_instances: {},
+  operational_tasks: {},
+  notifications: {},
+  device_switches: {},
+  kpi_snapshots: {}
+};
+
+function initLocalDB() {
+  if (localDBInitialized) return;
+  
   try {
-    return await firebaseSetDoc(docRef, cleaned, options);
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
+    const stored = localStorage.getItem("narisops_local_db");
+    if (stored) {
+      localDB = JSON.parse(stored);
+      // Ensure all collections exist
+      const keys: (keyof typeof localDB)[] = ["users", "locations", "zones", "task_templates", "task_instances", "operational_tasks", "notifications", "device_switches", "kpi_snapshots"];
+      keys.forEach(k => {
+        if (!localDB[k]) localDB[k] = {};
+      });
+      localDBInitialized = true;
+      console.log("[Local DB] Loaded existing database from localStorage");
+      return;
+    }
+  } catch (e) {
+    console.warn("[Local DB] Failed to load from localStorage, using memory", e);
+  }
+
+  console.log("[Local DB] No local database found. Seeding initial local database...");
+  const seeded = getSeededDB();
+  
+  seeded.profiles.forEach(p => { localDB.users[p.id] = p; });
+  seeded.locations.forEach(l => { localDB.locations[l.id] = l; });
+  seeded.zones.forEach(z => { localDB.zones[z.id] = z; });
+  seeded.task_templates.forEach(t => { localDB.task_templates[t.id] = t; });
+  seeded.task_instances.forEach(ti => { localDB.task_instances[ti.id] = ti; });
+  seeded.operational_tasks.forEach(ot => { localDB.operational_tasks[ot.id] = ot; });
+  seeded.notifications.forEach(n => { localDB.notifications[n.id] = n; });
+  seeded.device_switches.forEach(sw => { localDB.device_switches[sw.id] = sw; });
+  seeded.kpi_snapshots.forEach(k => { localDB.kpi_snapshots[k.id] = k; });
+
+  saveLocalDB();
+  localDBInitialized = true;
+}
+
+function saveLocalDB() {
+  try {
+    localStorage.setItem("narisops_local_db", JSON.stringify(localDB));
+  } catch (e) {
+    console.error("[Local DB] Failed to save to localStorage", e);
   }
 }
 
-async function updateDoc(docRef: any, data: any) {
-  const cleaned = cleanUndefined(data);
-  const path = docRef.path;
+function triggerLocalFallback(error: any) {
+  if (!useLocalFallback) {
+    console.warn("[Local Fallback Triggered] Switching database operations to local storage due to Firestore failure:", error);
+    useLocalFallback = true;
+    try {
+      localStorage.setItem("use_local_fallback", "true");
+    } catch (e) {}
+  }
+}
+
+const snapshotListeners = new Set<{
+  query: any;
+  callback: (snap: any) => void;
+  errorCallback?: (err: any) => void;
+}>();
+
+function triggerSnapshotListeners(collectionName: string) {
+  for (const listener of snapshotListeners) {
+    const colName = listener.query.__collection_path;
+    if (colName === collectionName) {
+      const docs = Object.values(localDB[colName as keyof typeof localDB] || {});
+      const filtered = localFilter(docs, listener.query.__constraints || []);
+      const fakeSnap = {
+        empty: filtered.length === 0,
+        docs: filtered.map(item => ({
+          id: item.id,
+          data: () => item
+        })),
+        forEach: (cb: any) => {
+          filtered.forEach((item) => {
+            cb({
+              id: item.id,
+              data: () => item
+            });
+          });
+        }
+      };
+      listener.callback(fakeSnap as any);
+    }
+  }
+}
+
+function localFilter(items: any[], constraints: any[]): any[] {
+  let filtered = [...items];
+  for (const c of constraints) {
+    if (c && c.__isWhere) {
+      const { field, op, value } = c.metadata;
+      filtered = filtered.filter(item => {
+        if (!item) return false;
+        const itemVal = item[field];
+        if (op === "==") {
+          return itemVal === value;
+        } else if (op === "!=") {
+          return itemVal !== value;
+        } else if (op === ">") {
+          return itemVal > value;
+        } else if (op === "<") {
+          return itemVal < value;
+        } else if (op === ">=") {
+          return itemVal >= value;
+        } else if (op === "<=") {
+          return itemVal <= value;
+        } else if (op === "array-contains") {
+          return Array.isArray(itemVal) && itemVal.includes(value);
+        }
+        return true;
+      });
+    }
+  }
+  return filtered;
+}
+
+// --- Custom Wrapped Firestore API Layer ---
+
+export function collection(dbInstance: any, path: string): any {
+  const colRef = firebaseCollection(dbInstance, path) as any;
+  colRef.__collection_path = path;
+  return colRef;
+}
+
+export function query(colRef: any, ...constraints: any[]): any {
+  const queryRef = firebaseQuery(colRef, ...constraints) as any;
+  queryRef.__collection_path = colRef.__collection_path || colRef.path || "";
+  queryRef.__constraints = constraints;
+  return queryRef;
+}
+
+export function where(field: string, op: string, value: any): any {
+  const realConstraint = firebaseWhere(field, op as any, value);
+  return {
+    realConstraint,
+    metadata: { field, op, value },
+    __isWhere: true
+  };
+}
+
+export function doc(...args: any[]): any {
+  const [first, second, third] = args;
+  let colPath = "";
+  let docId = "";
+  if (typeof first === "string") {
+    colPath = first;
+    docId = second;
+  } else if (first && first.__collection_path) {
+    colPath = first.__collection_path;
+    docId = second;
+  } else {
+    colPath = second;
+    docId = third;
+  }
+  
+  const realDocRef = firebaseDoc(args[0], args[1], ...args.slice(2)) as any;
+  realDocRef.__isDocRef = true;
+  realDocRef.__collection_path = colPath;
+  realDocRef.__doc_id = docId;
+  realDocRef.path = colPath + "/" + docId;
+  realDocRef.id = docId;
+  return realDocRef;
+}
+
+export async function getDoc(docRef: any): Promise<any> {
+  if (useLocalFallback) {
+    initLocalDB();
+    const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
+    const docId = docRef.__doc_id || docRef.id || "";
+    const data = localDB[colName as keyof typeof localDB]?.[docId];
+    return {
+      exists: () => !!data,
+      data: () => data,
+      id: docId
+    };
+  }
   try {
-    return await firebaseUpdateDoc(docRef, cleaned);
-  } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, path);
+    const snap = await firebaseGetDoc(docRef);
+    return snap;
+  } catch (err: any) {
+    triggerLocalFallback(err);
+    initLocalDB();
+    const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
+    const docId = docRef.__doc_id || docRef.id || "";
+    const data = localDB[colName as keyof typeof localDB]?.[docId];
+    return {
+      exists: () => !!data,
+      data: () => data,
+      id: docId
+    };
+  }
+}
+
+export async function getDocs(q: any): Promise<any> {
+  if (useLocalFallback) {
+    initLocalDB();
+    const colName = q.__collection_path || (typeof q.path === "string" ? q.path : "");
+    const docs = Object.values(localDB[colName as keyof typeof localDB] || {});
+    const filtered = localFilter(docs, q.__constraints || []);
+    return {
+      empty: filtered.length === 0,
+      size: filtered.length,
+      docs: filtered.map(item => ({
+        id: item.id,
+        data: () => item
+      })),
+      forEach: (cb: any) => {
+        filtered.forEach(item => {
+          cb({
+            id: item.id,
+            data: () => item
+          });
+        });
+      }
+    };
+  }
+  try {
+    const snap = await firebaseGetDocs(q);
+    return snap;
+  } catch (err: any) {
+    triggerLocalFallback(err);
+    initLocalDB();
+    const colName = q.__collection_path || (typeof q.path === "string" ? q.path : "");
+    const docs = Object.values(localDB[colName as keyof typeof localDB] || {});
+    const filtered = localFilter(docs, q.__constraints || []);
+    return {
+      empty: filtered.length === 0,
+      size: filtered.length,
+      docs: filtered.map(item => ({
+        id: item.id,
+        data: () => item
+      })),
+      forEach: (cb: any) => {
+        filtered.forEach(item => {
+          cb({
+            id: item.id,
+            data: () => item
+          });
+        });
+      }
+    };
+  }
+}
+
+export async function setDoc(docRef: any, data: any, options?: any) {
+  const cleaned = cleanUndefined(data);
+  if (useLocalFallback) {
+    initLocalDB();
+    const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
+    const docId = docRef.__doc_id || docRef.id || "";
+    if (options?.merge && localDB[colName as keyof typeof localDB]?.[docId]) {
+      localDB[colName as keyof typeof localDB][docId] = {
+        ...localDB[colName as keyof typeof localDB][docId],
+        ...cleaned
+      };
+    } else {
+      localDB[colName as keyof typeof localDB][docId] = cleaned;
+    }
+    saveLocalDB();
+    triggerSnapshotListeners(colName);
+    return;
+  }
+  try {
+    await firebaseSetDoc(docRef, cleaned, options);
+  } catch (err: any) {
+    triggerLocalFallback(err);
+    initLocalDB();
+    const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
+    const docId = docRef.__doc_id || docRef.id || "";
+    if (options?.merge && localDB[colName as keyof typeof localDB]?.[docId]) {
+      localDB[colName as keyof typeof localDB][docId] = {
+        ...localDB[colName as keyof typeof localDB][docId],
+        ...cleaned
+      };
+    } else {
+      localDB[colName as keyof typeof localDB][docId] = cleaned;
+    }
+    saveLocalDB();
+    triggerSnapshotListeners(colName);
+  }
+}
+
+export async function updateDoc(docRef: any, data: any) {
+  const cleaned = cleanUndefined(data);
+  if (useLocalFallback) {
+    initLocalDB();
+    const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
+    const docId = docRef.__doc_id || docRef.id || "";
+    localDB[colName as keyof typeof localDB][docId] = {
+      ...(localDB[colName as keyof typeof localDB][docId] || {}),
+      ...cleaned
+    };
+    saveLocalDB();
+    triggerSnapshotListeners(colName);
+    return;
+  }
+  try {
+    await firebaseUpdateDoc(docRef, cleaned);
+  } catch (err: any) {
+    triggerLocalFallback(err);
+    initLocalDB();
+    const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
+    const docId = docRef.__doc_id || docRef.id || "";
+    localDB[colName as keyof typeof localDB][docId] = {
+      ...(localDB[colName as keyof typeof localDB][docId] || {}),
+      ...cleaned
+    };
+    saveLocalDB();
+    triggerSnapshotListeners(colName);
+  }
+}
+
+export async function deleteDoc(docRef: any) {
+  if (useLocalFallback) {
+    initLocalDB();
+    const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
+    const docId = docRef.__doc_id || docRef.id || "";
+    delete localDB[colName as keyof typeof localDB]?.[docId];
+    saveLocalDB();
+    triggerSnapshotListeners(colName);
+    return;
+  }
+  try {
+    await firebaseDeleteDoc(docRef);
+  } catch (err: any) {
+    triggerLocalFallback(err);
+    initLocalDB();
+    const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
+    const docId = docRef.__doc_id || docRef.id || "";
+    delete localDB[colName as keyof typeof localDB]?.[docId];
+    saveLocalDB();
+    triggerSnapshotListeners(colName);
+  }
+}
+
+export function onSnapshot(q: any, callback: any, errorCallback?: any): any {
+  if (useLocalFallback) {
+    initLocalDB();
+    const listenerObj = { query: q, callback, errorCallback };
+    snapshotListeners.add(listenerObj);
+    
+    const colName = q.__collection_path;
+    const docs = Object.values(localDB[colName as keyof typeof localDB] || {});
+    const filtered = localFilter(docs, q.__constraints || []);
+    const fakeSnap = {
+      empty: filtered.length === 0,
+      size: filtered.length,
+      docs: filtered.map(item => ({
+        id: item.id,
+        data: () => item
+      })),
+      forEach: (cb: any) => {
+        filtered.forEach((item) => {
+          cb({
+            id: item.id,
+            data: () => item
+          });
+        });
+      }
+    };
+    setTimeout(() => {
+      callback(fakeSnap);
+    }, 0);
+
+    return () => {
+      snapshotListeners.delete(listenerObj);
+    };
+  } else {
+    try {
+      const realUnsubscribe = firebaseOnSnapshot(q, callback, (err) => {
+        if (err.message && (err.message.toLowerCase().includes("quota") || err.message.toLowerCase().includes("permission") || err.message.toLowerCase().includes("exceeded"))) {
+          triggerLocalFallback(err);
+          const localUnsub = onSnapshot(q, callback, errorCallback);
+          return localUnsub;
+        }
+        if (errorCallback) errorCallback(err);
+      });
+      return realUnsubscribe;
+    } catch (err: any) {
+      triggerLocalFallback(err);
+      return onSnapshot(q, callback, errorCallback);
+    }
   }
 }
 
@@ -254,10 +646,38 @@ export function getLocalDateString() {
   return localISOTime.split("T")[0];
 }
 
-function getArabicDayName() {
+export function getArabicDayName(dateStr?: string) {
   const days = ["الأحد", "الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
-  const dayIndex = new Date().getDay();
-  return days[dayIndex];
+  if (!dateStr) {
+    const dayIndex = new Date().getDay();
+    return days[dayIndex];
+  }
+  const parts = dateStr.split("-");
+  if (parts.length === 3) {
+    const year = parseInt(parts[0], 10);
+    const month = parseInt(parts[1], 10) - 1; // 0-indexed
+    const day = parseInt(parts[2], 10);
+    const date = new Date(year, month, day);
+    return days[date.getDay()];
+  }
+  const date = new Date(dateStr);
+  return days[date.getDay()];
+}
+
+export function getDaysDiff(dateStr1: string, dateStr2: string) {
+  const parseParts = (str: string) => {
+    const p = str.split("-");
+    if (p.length === 3) {
+      return { y: parseInt(p[0], 10), m: parseInt(p[1], 10) - 1, d: parseInt(p[2], 10) };
+    }
+    const date = new Date(str);
+    return { y: date.getFullYear(), m: date.getMonth(), d: date.getDate() };
+  };
+  const d1 = parseParts(dateStr1);
+  const d2 = parseParts(dateStr2);
+  const utc1 = Date.UTC(d1.y, d1.m, d1.d);
+  const utc2 = Date.UTC(d2.y, d2.m, d2.d);
+  return Math.floor(Math.abs(utc2 - utc1) / (1000 * 60 * 60 * 24));
 }
 
 // --- API Operations ---
@@ -683,14 +1103,22 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
   
   // Generate missing recurring tasks for active templates that run today per-template
   const templates = await getTemplates();
-  const todayDayNameAr = getArabicDayName();
+  const todayDayNameAr = getArabicDayName(todayStr);
   let generatedAny = false;
   
   for (const tpl of templates) {
     if (!tpl.is_active) continue;
     
-    const runsToday = tpl.frequency === "يومي" || 
-                      (tpl.recurrence_days && tpl.recurrence_days.includes(todayDayNameAr));
+    let runsToday = false;
+    if (tpl.frequency === "يومي") {
+      runsToday = true;
+    } else if (tpl.frequency === "يوم ويوم" || tpl.frequency === "يوم و يوم") {
+      const createdDateStr = tpl.created_at ? tpl.created_at.split("T")[0] : "2026-07-01";
+      const diffDays = getDaysDiff(createdDateStr, todayStr);
+      runsToday = (diffDays % 2 === 0);
+    } else if (tpl.frequency === "أسبوعي") {
+      runsToday = !!(tpl.recurrence_days && tpl.recurrence_days.includes(todayDayNameAr));
+    }
     
     if (runsToday) {
       // Check if an instance of this specific recurring template already exists for today

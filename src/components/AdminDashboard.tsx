@@ -565,6 +565,11 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       return;
     }
 
+    if (selectedTemplate.frequency === "أسبوعي" && (!selectedTemplate.recurrence_days || selectedTemplate.recurrence_days.length === 0)) {
+      showToast("يرجى تحديد يوم واحد على الأقل للتكرار الأسبوعي 📅", "warning");
+      return;
+    }
+
     try {
       setLoading(true);
       await saveTemplate(selectedTemplate);
@@ -2481,7 +2486,14 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                                 </span>
                               </td>
                               <td className="p-3">
-                                <span className="block font-bold text-slate-800">{tpl.frequency}</span>
+                                <span className="block font-bold text-slate-800">
+                                  {tpl.frequency}
+                                  {tpl.frequency === "أسبوعي" && tpl.recurrence_days && tpl.recurrence_days.length > 0 && (
+                                    <span className="text-[10px] text-indigo-600 font-extrabold block mt-0.5 leading-normal">
+                                      ({tpl.recurrence_days.join("، ")})
+                                    </span>
+                                  )}
+                                </span>
                                 <span className="text-[10px] text-slate-400 block font-medium">ساعة: {tpl.scheduled_time || "08:00"}</span>
                               </td>
                               <td className="p-3 max-w-xs text-slate-500 font-semibold leading-relaxed text-[11px]">{tpl.tools_required || "لا توجد أدوات خاصة"}</td>
@@ -3563,14 +3575,73 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                   <label>التكرار:</label>
                   <select
                     value={selectedTemplate.frequency || "يومي"}
-                    onChange={(e) => setSelectedTemplate({...selectedTemplate, frequency: e.target.value})}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      const updated: any = { ...selectedTemplate, frequency: val };
+                      if (val === "أسبوعي" && (!selectedTemplate.recurrence_days || selectedTemplate.recurrence_days.length === 0)) {
+                        // Default to the current day or empty list
+                        updated.recurrence_days = [];
+                      }
+                      setSelectedTemplate(updated);
+                    }}
                     className="p-2 border border-slate-200 rounded-lg bg-white"
                   >
                     <option value="يومي">يومي</option>
-                    <option value="أسبوعي">أسبوعي</option>
+                    <option value="يوم ويوم">يوم ويوم (يوم بعد يوم)</option>
+                    <option value="أسبوعي">أسبوعي (أيام محددة)</option>
                   </select>
                 </div>
               </div>
+
+              {selectedTemplate.frequency === "أسبوعي" && (
+                <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200/60 flex flex-col gap-2.5 animate-fade-in">
+                  <label className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                    📅 حدد أيام التكرار في الأسبوع:
+                  </label>
+                  <div className="grid grid-cols-4 sm:grid-cols-7 gap-1.5">
+                    {["السبت", "الأحد", "الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة"].map((day) => {
+                      const isChecked = (selectedTemplate.recurrence_days || []).includes(day);
+                      return (
+                        <button
+                          type="button"
+                          key={day}
+                          onClick={() => {
+                            const currentDays = selectedTemplate.recurrence_days || [];
+                            const updatedDays = currentDays.includes(day)
+                              ? currentDays.filter((d: string) => d !== day)
+                              : [...currentDays, day];
+                            setSelectedTemplate({
+                              ...selectedTemplate,
+                              recurrence_days: updatedDays
+                            });
+                          }}
+                          className={`py-2 px-1 rounded-lg border text-[11px] font-extrabold text-center transition-all cursor-pointer ${
+                            isChecked
+                              ? "bg-slate-900 border-slate-900 text-white shadow-sm scale-[1.03]"
+                              : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50 hover:border-slate-300"
+                          }`}
+                        >
+                          {day}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {/* Informational helper text detailing the repetition count */}
+                  {(selectedTemplate.recurrence_days || []).length > 0 && (
+                    <div className="text-[10px] text-slate-500 font-bold bg-white/80 py-1 px-2.5 rounded-lg border border-slate-100 self-start">
+                      💡 التكرار المعتمد: <span className="text-blue-600">
+                        {(selectedTemplate.recurrence_days || []).length === 1 
+                          ? "مرة واحدة في الأسبوع" 
+                          : (selectedTemplate.recurrence_days || []).length === 2 
+                          ? "مرتين أسبوعياً (مرتين في الأسبوع)" 
+                          : (selectedTemplate.recurrence_days || []).length === 3
+                          ? "ثلاث مرات أسبوعياً (ثلاث مرات في الأسبوع)"
+                          : `${(selectedTemplate.recurrence_days || []).length} مرات في الأسبوع`}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div className="flex flex-col gap-1">
                 <label>أدوات التنظيف المطلوبة والمواد المحددة:</label>
