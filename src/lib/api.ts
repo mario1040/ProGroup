@@ -63,6 +63,19 @@ function cleanUndefined<T extends object>(obj: T): T {
 
 // --- Local Fallback Database Engine ---
 let localDBInitialized = false;
+
+// Automatically reset local fallback if switching to a new Firebase project ID
+const currentProjectId = "cleaner-app-1d3ca";
+try {
+  const lastUsedProjectId = localStorage.getItem("last_used_project_id");
+  if (lastUsedProjectId !== currentProjectId) {
+    localStorage.setItem("last_used_project_id", currentProjectId);
+    localStorage.removeItem("use_local_fallback");
+  }
+} catch (e) {
+  console.warn("localStorage is not accessible:", e);
+}
+
 let useLocalFallback = localStorage.getItem("use_local_fallback") === "true";
 
 let localDB: {
@@ -208,14 +221,22 @@ function localFilter(items: any[], constraints: any[]): any[] {
 
 export function collection(dbInstance: any, path: string): any {
   const colRef = firebaseCollection(dbInstance, path) as any;
-  colRef.__collection_path = path;
+  try {
+    colRef.__collection_path = path;
+  } catch (e) {
+    console.warn("Could not set __collection_path on colRef", e);
+  }
   return colRef;
 }
 
 export function query(colRef: any, ...constraints: any[]): any {
   const queryRef = firebaseQuery(colRef, ...constraints) as any;
-  queryRef.__collection_path = colRef.__collection_path || colRef.path || "";
-  queryRef.__constraints = constraints;
+  try {
+    queryRef.__collection_path = colRef.__collection_path || colRef.path || "";
+    queryRef.__constraints = constraints;
+  } catch (e) {
+    console.warn("Could not set custom properties on queryRef", e);
+  }
   return queryRef;
 }
 
@@ -244,11 +265,13 @@ export function doc(...args: any[]): any {
   }
   
   const realDocRef = firebaseDoc(args[0], args[1], ...args.slice(2)) as any;
-  realDocRef.__isDocRef = true;
-  realDocRef.__collection_path = colPath;
-  realDocRef.__doc_id = docId;
-  realDocRef.path = colPath + "/" + docId;
-  realDocRef.id = docId;
+  try {
+    realDocRef.__isDocRef = true;
+    realDocRef.__collection_path = colPath;
+    realDocRef.__doc_id = docId;
+  } catch (e) {
+    console.warn("Could not set custom properties on realDocRef", e);
+  }
   return realDocRef;
 }
 
@@ -1838,7 +1861,123 @@ export async function getKpis(): Promise<KpiSummary[]> {
   });
 }
 
+export async function cleanAndRenewNotifications(): Promise<void> {
+  await ensureSeeded();
+  const todayStr = getLocalDateString();
+  const cutoffDate = new Date();
+  // Cutoff is 1.5 days ago (36 hours)
+  cutoffDate.setHours(cutoffDate.getHours() - 36);
+  const cutoffIso = cutoffDate.toISOString();
+
+  try {
+    console.log("[Notification Engine] Running clean and renew notifications routine...");
+    
+    // 1. Delete notifications older than 36 hours (1.5 days)
+    if (useLocalFallback) {
+      initLocalDB();
+      const notifs = { ...localDB.notifications };
+      let updated = false;
+      for (const [id, n] of Object.entries(notifs)) {
+        if (n && n.created_at && n.created_at < cutoffIso) {
+          delete localDB.notifications[id];
+          updated = true;
+        }
+      }
+      if (updated) {
+        saveLocalDB();
+      }
+    } else {
+      const notifsSnap = await firebaseGetDocs(firebaseCollection(db, "notifications"));
+      for (const d of notifsSnap.docs) {
+        const data = d.data();
+        if (data && data.created_at && data.created_at < cutoffIso) {
+          try {
+            await firebaseDeleteDoc(firebaseDoc(db, "notifications", d.id));
+          } catch (e) {
+            console.warn(`Failed to delete notification ${d.id}`, e);
+          }
+        }
+      }
+    }
+
+    // 2. Fetch today's tasks
+    let todayTasks: TaskInstance[] = [];
+    if (useLocalFallback) {
+      const docs = Object.values(localDB.task_instances || {});
+      todayTasks = docs.filter((item: any) => item.due_date === todayStr);
+    } else {
+      try {
+        const instancesSnap = await firebaseGetDocs(
+          firebaseQuery(firebaseCollection(db, "task_instances"), firebaseWhere("due_date", "==", todayStr))
+        );
+        instancesSnap.forEach((docSnap) => {
+          todayTasks.push(docSnap.data() as TaskInstance);
+        });
+      } catch (err) {
+        console.warn("Failed to query today's tasks for notifications renewal:", err);
+      }
+    }
+
+    // 3. Fetch existing notifications
+    let existingNotifs: any[] = [];
+    if (useLocalFallback) {
+      existingNotifs = Object.values(localDB.notifications || {});
+    } else {
+      try {
+        const snap = await firebaseGetDocs(firebaseCollection(db, "notifications"));
+        snap.forEach(d => {
+          existingNotifs.push({ id: d.id, ...d.data() });
+        });
+      } catch (err) {
+        console.warn("Failed to get current notifications:", err);
+      }
+    }
+
+    // 4. Create notification for today's tasks if none exists
+    for (const task of todayTasks) {
+      if (!task || !task.assigned_to) continue;
+
+      const hasNotif = existingNotifs.some(n => n.related_task_instance_id === task.id);
+      if (!hasNotif) {
+        const notifId = "n_" + randomHex(8);
+        const notif = {
+          id: notifId,
+          recipient_id: task.assigned_to,
+          type: "task_assigned",
+          title: "مهمة اليوم المجددة 📋",
+          body: `مهمة اليوم المحدّثة: "${task.title}" مسندة إليك اليوم قبل الساعة ${task.due_time || "09:00"}.`,
+          related_task_instance_id: task.id,
+          is_read: false,
+          created_at: new Date().toISOString()
+        };
+        
+        if (useLocalFallback) {
+          localDB.notifications[notifId] = notif;
+          saveLocalDB();
+        } else {
+          try {
+            await firebaseSetDoc(firebaseDoc(db, "notifications", notifId), notif);
+          } catch (e) {
+            console.warn(`Failed to save notification ${notifId}`, e);
+          }
+        }
+        console.log(`[Notification Engine] Renewed notification for task ${task.id}`);
+      }
+    }
+
+    if (useLocalFallback) {
+      triggerSnapshotListeners("notifications");
+    }
+
+  } catch (error) {
+    console.error("Error in cleanAndRenewNotifications:", error);
+  }
+}
+
 export function listenNotifications(recipientId: string | undefined, callback: (notifications: Notification[]) => void): () => void {
+  // Run background clean and renew
+  cleanAndRenewNotifications().catch((e) => console.error("Error in background notification sync:", e));
+
   let q;
   if (recipientId) {
     q = query(collection(db, "notifications"), where("recipient_id", "==", recipientId));
@@ -1860,6 +1999,8 @@ export function listenNotifications(recipientId: string | undefined, callback: (
 
 export async function getNotifications(recipientId?: string): Promise<Notification[]> {
   await ensureSeeded();
+  await cleanAndRenewNotifications().catch((e) => console.error("Error syncing notifications:", e));
+
   let q;
   try {
     if (recipientId) {

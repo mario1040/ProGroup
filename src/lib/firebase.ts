@@ -5,13 +5,13 @@ import { getStorage } from "firebase/storage";
 
 // Hardcoded static configuration as a robust fallback to ensure zero runtime file system or download dependencies
 export const firebaseConfig = {
-  projectId: "vigilant-welder-0n50x",
-  appId: "1:972833537556:web:f3ca0894063702f88d7101",
-  apiKey: "AIzaSyCc3MP4cpQ-wmW9v-ovRPW3bNJ3MwGdYFY",
-  authDomain: "vigilant-welder-0n50x.firebaseapp.com",
+  projectId: "cleaner-app-1d3ca",
+  appId: "1:532847956008:web:d7525bc221853ed0cea51d",
+  apiKey: "AIzaSyBxFRjVLssowts5qzpmpepifr6CabymWuY",
+  authDomain: "cleaner-app-1d3ca.firebaseapp.com",
   firestoreDatabaseId: "ai-studio-narisops-9f622daa-687a-45a2-a871-9a4fc3b9a3d8",
-  storageBucket: "vigilant-welder-0n50x.firebasestorage.app",
-  messagingSenderId: "972833537556",
+  storageBucket: "cleaner-app-1d3ca.firebasestorage.app",
+  messagingSenderId: "532847956008",
   measurementId: ""
 };
 
