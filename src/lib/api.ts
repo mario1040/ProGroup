@@ -1,4 +1,4 @@
-import { Profile, Zone, TaskTemplate, TaskInstance, Notification, OperationalTask, DeviceSwitch } from "../types";
+import { Profile, Zone, TaskTemplate, TaskInstance, OperationalTask, DeviceSwitch } from "../types";
 import { 
   db, 
   auth, 
@@ -78,6 +78,21 @@ try {
 
 let useLocalFallback = localStorage.getItem("use_local_fallback") === "true";
 
+// --- Memory Cache for Metadata to Reduce Firestore Reads ---
+let cachedProfiles: Profile[] | null = null;
+let cachedTemplates: TaskTemplate[] | null = null;
+let cachedZones: Zone[] | null = null;
+let cachedOperationalTasks: any[] | null = null;
+let cachedDeviceSwitches: DeviceSwitch[] | null = null;
+
+export function invalidateMetadataCaches() {
+  cachedProfiles = null;
+  cachedTemplates = null;
+  cachedZones = null;
+  cachedOperationalTasks = null;
+  cachedDeviceSwitches = null;
+}
+
 let localDB: {
   users: Record<string, any>;
   locations: Record<string, any>;
@@ -152,7 +167,21 @@ function triggerLocalFallback(error: any) {
     try {
       localStorage.setItem("use_local_fallback", "true");
     } catch (e) {}
+    // Dispatch custom event to notify React components to update their UI immediately
+    window.dispatchEvent(new Event("local_fallback_changed"));
   }
+}
+
+export function isUsingLocalFallback(): boolean {
+  return useLocalFallback;
+}
+
+export function setLocalFallback(value: boolean) {
+  useLocalFallback = value;
+  try {
+    localStorage.setItem("use_local_fallback", value ? "true" : "false");
+  } catch (e) {}
+  window.dispatchEvent(new Event("local_fallback_changed"));
 }
 
 const snapshotListeners = new Set<{
@@ -573,6 +602,9 @@ export async function deduplicateDatabase(): Promise<void> {
  * Ensures Firestore is properly seeded with initial data if it's completely empty.
  */
 async function ensureSeeded(): Promise<void> {
+  if (useLocalFallback) {
+    return;
+  }
   if (seedingPromise) {
     return seedingPromise;
   }
@@ -653,8 +685,8 @@ async function ensureSeeded(): Promise<void> {
       
       console.log("[Firestore Client] Seeding completed successfully.");
     } catch (err) {
-      console.error("[Firestore Client] Seeding failed:", err);
-      handleFirestoreError(err, OperationType.WRITE, pathForCheck);
+      console.error("[Firestore Client] Seeding failed, falling back to local database:", err);
+      triggerLocalFallback(err);
     }
   })();
   
@@ -792,6 +824,7 @@ export async function logoutUser(): Promise<void> {
 
 export async function getProfiles(): Promise<Profile[]> {
   await ensureSeeded();
+  if (cachedProfiles) return cachedProfiles;
   let snap;
   try {
     snap = await getDocs(collection(db, "users"));
@@ -802,6 +835,7 @@ export async function getProfiles(): Promise<Profile[]> {
   snap.forEach((docSnap) => {
     profiles.push(docSnap.data() as Profile);
   });
+  cachedProfiles = profiles;
   return profiles;
 }
 
@@ -1013,25 +1047,34 @@ export async function initializeAdminAuth(): Promise<string> {
   return defaultPassword;
 }
 
-export async function getZones(): Promise<(Zone & { responsible_employee?: Profile })[]> {
+export async function getRawZones(): Promise<Zone[]> {
   await ensureSeeded();
+  if (cachedZones) return cachedZones;
   let zonesSnap;
   try {
     zonesSnap = await getDocs(collection(db, "zones"));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, "zones");
   }
+  const zones: Zone[] = [];
+  zonesSnap.forEach((docSnap) => {
+    zones.push(docSnap.data() as Zone);
+  });
+  cachedZones = zones;
+  return zones;
+}
+
+export async function getZones(): Promise<(Zone & { responsible_employee?: Profile })[]> {
+  const zones = await getRawZones();
   const profiles = await getProfiles();
   
-  const zones: (Zone & { responsible_employee?: Profile })[] = [];
-  zonesSnap.forEach((docSnap) => {
-    const zone = docSnap.data() as Zone;
+  const enrichedZones = zones.map((zone) => {
     const emp = profiles.find((p) => p.id === zone.responsible_employee_id);
-    zones.push({ ...zone, responsible_employee: emp });
+    return { ...zone, responsible_employee: emp };
   });
   
-  zones.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
-  return zones;
+  enrichedZones.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+  return enrichedZones;
 }
 
 export async function saveZone(zone: Partial<Zone>): Promise<Zone> {
@@ -1055,11 +1098,13 @@ export async function saveZone(zone: Partial<Zone>): Promise<Zone> {
     finalZone = { ...existing, ...zone };
   }
   await setDoc(doc(db, "zones", finalZone.id), finalZone);
+  cachedZones = null; // Invalidate cache
   return finalZone as Zone;
 }
 
 export async function getTemplates(): Promise<TaskTemplate[]> {
   await ensureSeeded();
+  if (cachedTemplates) return cachedTemplates;
   let snap;
   try {
     snap = await getDocs(collection(db, "task_templates"));
@@ -1070,6 +1115,7 @@ export async function getTemplates(): Promise<TaskTemplate[]> {
   snap.forEach((docSnap) => {
     templates.push(docSnap.data() as TaskTemplate);
   });
+  cachedTemplates = templates;
   return templates;
 }
 
@@ -1174,19 +1220,6 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
         
         await setDoc(doc(db, "task_instances", id), newInstance);
         instances.push(newInstance);
-        
-        const notifId = "n_" + randomHex(8);
-        const notif = {
-          id: notifId,
-          recipient_id: newInstance.assigned_to,
-          type: "task_assigned",
-          title: "مهمة مجدولة جديدة 📋",
-          body: `تم إسناد مهمة "${tpl.title}" إليك لتنفيذها اليوم قبل الساعة ${tpl.scheduled_time}`,
-          related_task_instance_id: id,
-          is_read: false,
-          created_at: new Date().toISOString()
-        };
-        await setDoc(doc(db, "notifications", notifId), notif);
       }
     }
   }
@@ -1396,20 +1429,6 @@ export async function createTask(task: Partial<TaskInstance>): Promise<TaskInsta
   };
   
   await setDoc(doc(db, "task_instances", id), newInstance);
-  
-  const notifId = "n_" + randomHex(8);
-  const notif = {
-    id: notifId,
-    recipient_id: newInstance.assigned_to,
-    type: "task_assigned",
-    title: "تكليف بمهمة جديدة 📌",
-    body: `تم تكليفك بمهمة فورية: "${newInstance.title}" للتسليم اليوم.`,
-    related_task_instance_id: id,
-    is_read: false,
-    created_at: new Date().toISOString()
-  };
-  await setDoc(doc(db, "notifications", notifId), notif);
-  
   return newInstance;
 }
 
@@ -1677,20 +1696,6 @@ export async function approveTask(id: string, approval: { supervisor_id: string;
   task.updated_at = new Date().toISOString();
   
   await setDoc(docRef, task);
-  
-  const notifId = "n_" + randomHex(8);
-  const notif = {
-    id: notifId,
-    recipient_id: task.assigned_to,
-    type: "task_approved",
-    title: "اعتماد المهمة بنجاح 🎉",
-    body: `تم اعتماد مهمتك "${task.title}" بتقدير (${approval.quality_grade || "A"}) من قبل المشرف.`,
-    related_task_instance_id: id,
-    is_read: false,
-    created_at: new Date().toISOString()
-  };
-  await setDoc(doc(db, "notifications", notifId), notif);
-  
   return task;
 }
 
@@ -1743,20 +1748,6 @@ export async function rejectTask(id: string, rejection: { supervisor_id: string;
   };
   
   await setDoc(doc(db, "task_instances", reworkId), reworkTask);
-  
-  const notifId = "n_" + randomHex(8);
-  const notif = {
-    id: notifId,
-    recipient_id: originalTask.assigned_to,
-    type: "rework_requested",
-    title: "إعادة تنفيذ مهمة مطلوبة ⚠️",
-    body: `تم رفض مهمتك "${originalTask.title}". السبب: ${rejection.supervisor_notes}. يرجى إعادتها فوراً.`,
-    related_task_instance_id: reworkId,
-    is_read: false,
-    created_at: new Date().toISOString()
-  };
-  await setDoc(doc(db, "notifications", notifId), notif);
-  
   return { original: originalTask, rework: reworkTask };
 }
 
@@ -1861,179 +1852,9 @@ export async function getKpis(): Promise<KpiSummary[]> {
   });
 }
 
-export async function cleanAndRenewNotifications(): Promise<void> {
-  await ensureSeeded();
-  const todayStr = getLocalDateString();
-  const cutoffDate = new Date();
-  // Cutoff is 1.5 days ago (36 hours)
-  cutoffDate.setHours(cutoffDate.getHours() - 36);
-  const cutoffIso = cutoffDate.toISOString();
-
-  try {
-    console.log("[Notification Engine] Running clean and renew notifications routine...");
-    
-    // 1. Delete notifications older than 36 hours (1.5 days)
-    if (useLocalFallback) {
-      initLocalDB();
-      const notifs = { ...localDB.notifications };
-      let updated = false;
-      for (const [id, n] of Object.entries(notifs)) {
-        if (n && n.created_at && n.created_at < cutoffIso) {
-          delete localDB.notifications[id];
-          updated = true;
-        }
-      }
-      if (updated) {
-        saveLocalDB();
-      }
-    } else {
-      const notifsSnap = await firebaseGetDocs(firebaseCollection(db, "notifications"));
-      for (const d of notifsSnap.docs) {
-        const data = d.data();
-        if (data && data.created_at && data.created_at < cutoffIso) {
-          try {
-            await firebaseDeleteDoc(firebaseDoc(db, "notifications", d.id));
-          } catch (e) {
-            console.warn(`Failed to delete notification ${d.id}`, e);
-          }
-        }
-      }
-    }
-
-    // 2. Fetch today's tasks
-    let todayTasks: TaskInstance[] = [];
-    if (useLocalFallback) {
-      const docs = Object.values(localDB.task_instances || {});
-      todayTasks = docs.filter((item: any) => item.due_date === todayStr);
-    } else {
-      try {
-        const instancesSnap = await firebaseGetDocs(
-          firebaseQuery(firebaseCollection(db, "task_instances"), firebaseWhere("due_date", "==", todayStr))
-        );
-        instancesSnap.forEach((docSnap) => {
-          todayTasks.push(docSnap.data() as TaskInstance);
-        });
-      } catch (err) {
-        console.warn("Failed to query today's tasks for notifications renewal:", err);
-      }
-    }
-
-    // 3. Fetch existing notifications
-    let existingNotifs: any[] = [];
-    if (useLocalFallback) {
-      existingNotifs = Object.values(localDB.notifications || {});
-    } else {
-      try {
-        const snap = await firebaseGetDocs(firebaseCollection(db, "notifications"));
-        snap.forEach(d => {
-          existingNotifs.push({ id: d.id, ...d.data() });
-        });
-      } catch (err) {
-        console.warn("Failed to get current notifications:", err);
-      }
-    }
-
-    // 4. Create notification for today's tasks if none exists
-    for (const task of todayTasks) {
-      if (!task || !task.assigned_to) continue;
-
-      const hasNotif = existingNotifs.some(n => n.related_task_instance_id === task.id);
-      if (!hasNotif) {
-        const notifId = "n_" + randomHex(8);
-        const notif = {
-          id: notifId,
-          recipient_id: task.assigned_to,
-          type: "task_assigned",
-          title: "مهمة اليوم المجددة 📋",
-          body: `مهمة اليوم المحدّثة: "${task.title}" مسندة إليك اليوم قبل الساعة ${task.due_time || "09:00"}.`,
-          related_task_instance_id: task.id,
-          is_read: false,
-          created_at: new Date().toISOString()
-        };
-        
-        if (useLocalFallback) {
-          localDB.notifications[notifId] = notif;
-          saveLocalDB();
-        } else {
-          try {
-            await firebaseSetDoc(firebaseDoc(db, "notifications", notifId), notif);
-          } catch (e) {
-            console.warn(`Failed to save notification ${notifId}`, e);
-          }
-        }
-        console.log(`[Notification Engine] Renewed notification for task ${task.id}`);
-      }
-    }
-
-    if (useLocalFallback) {
-      triggerSnapshotListeners("notifications");
-    }
-
-  } catch (error) {
-    console.error("Error in cleanAndRenewNotifications:", error);
-  }
-}
-
-export function listenNotifications(recipientId: string | undefined, callback: (notifications: Notification[]) => void): () => void {
-  // Run background clean and renew
-  cleanAndRenewNotifications().catch((e) => console.error("Error in background notification sync:", e));
-
-  let q;
-  if (recipientId) {
-    q = query(collection(db, "notifications"), where("recipient_id", "==", recipientId));
-  } else {
-    q = query(collection(db, "notifications"));
-  }
-
-  const unsubscribe = onSnapshot(q, (snap) => {
-    const list = snap.docs.map(d => ({ id: d.id, ...d.data() } as Notification));
-    // Sort locally because composite index might not exist
-    list.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-    callback(list);
-  }, (error) => {
-    console.error("Error listening to notifications:", error);
-  });
-
-  return unsubscribe;
-}
-
-export async function getNotifications(recipientId?: string): Promise<Notification[]> {
-  await ensureSeeded();
-  await cleanAndRenewNotifications().catch((e) => console.error("Error syncing notifications:", e));
-
-  let q;
-  try {
-    if (recipientId) {
-      q = query(collection(db, "notifications"), where("recipient_id", "==", recipientId));
-    } else {
-      q = query(collection(db, "notifications"));
-    }
-  } catch (error) {
-    handleFirestoreError(error, OperationType.LIST, "notifications");
-  }
-
-  let snap;
-  try {
-    snap = await getDocs(q);
-  } catch (error) {
-    handleFirestoreError(error, OperationType.LIST, "notifications");
-  }
-  const notifications: Notification[] = [];
-  snap.forEach((docSnap) => {
-    notifications.push(docSnap.data() as Notification);
-  });
-  
-  notifications.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-  return notifications;
-}
-
-export async function markNotificationAsRead(id: string): Promise<void> {
-  await ensureSeeded();
-  await updateDoc(doc(db, "notifications", id), { is_read: true });
-}
-
 export async function getOperationalTasks(): Promise<(OperationalTask & { responsible_employee?: Profile })[]> {
   await ensureSeeded();
+  if (cachedOperationalTasks) return cachedOperationalTasks;
   let opSnap;
   try {
     opSnap = await getDocs(collection(db, "operational_tasks"));
@@ -2048,11 +1869,13 @@ export async function getOperationalTasks(): Promise<(OperationalTask & { respon
     const emp = profiles.find((p) => p.id === ot.responsible_employee_id);
     tasks.push({ ...ot, responsible_employee: emp });
   });
+  cachedOperationalTasks = tasks;
   return tasks;
 }
 
 export async function getDeviceSwitches(): Promise<DeviceSwitch[]> {
   await ensureSeeded();
+  if (cachedDeviceSwitches) return cachedDeviceSwitches;
   let snap;
   try {
     snap = await getDocs(collection(db, "device_switches"));
@@ -2063,6 +1886,7 @@ export async function getDeviceSwitches(): Promise<DeviceSwitch[]> {
   snap.forEach((docSnap) => {
     switches.push(docSnap.data() as DeviceSwitch);
   });
+  cachedDeviceSwitches = switches;
   return switches;
 }
 
@@ -2248,8 +2072,7 @@ export async function validateDatabase(): Promise<DatabaseValidationReport> {
     { name: "zones", label: "المناطق والأقسام (zones)" },
     { name: "task_templates", label: "القوالب المعيارية (task_templates)" },
     { name: "task_instances", label: "مهام العمل والتشغيل (task_instances)" },
-    { name: "operational_tasks", label: "المهام التشغيلية (operational_tasks)" },
-    { name: "notifications", label: "التنبيهات والإشعارات (notifications)" }
+    { name: "operational_tasks", label: "المهام التشغيلية (operational_tasks)" }
   ];
 
   for (const col of collectionsToCheck) {
@@ -2392,21 +2215,7 @@ export async function validateDatabase(): Promise<DatabaseValidationReport> {
             docHasError = true;
           }
         } 
-        
-        else if (col.name === "notifications") {
-          if (!data.recipient_id) {
-            detail.errors.push(`إشعار [${id}]: معرف المستلم 'recipient_id' مفقود.`);
-            docHasError = true;
-          }
-          if (!data.title) {
-            detail.errors.push(`إشعار [${id}]: العنوان 'title' مفقود.`);
-            docHasError = true;
-          }
-          if (data.is_read === undefined) {
-            detail.errors.push(`إشعار [${id}]: حقل القراءة 'is_read' مفقود.`);
-            docHasError = true;
-          }
-        }
+
 
         if (docHasError) {
           detail.failedDocs++;

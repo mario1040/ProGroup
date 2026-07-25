@@ -16,8 +16,7 @@ import {
   Loader2,
   Calendar,
   Sparkles,
-  X,
-  Bell
+  X
 } from "lucide-react";
 import { Profile, TaskInstance, Zone, TaskTemplate } from "../types";
 import { getTasks, listenTodayTasks, updateTask, getLocalDateString, deletePhoto, syncOfflineTasks } from "../lib/api";
@@ -81,22 +80,12 @@ interface TodayTasksPageProps {
   user: Profile;
   onLogout: () => void;
   onNavigateToKpis: () => void;
-  unreadCount: number;
-  showNotifications: boolean;
-  setShowNotifications: React.Dispatch<React.SetStateAction<boolean>>;
-  notifications: any[];
-  handleMarkRead: (id: string) => void;
 }
 
 export default function TodayTasksPage({ 
   user, 
   onLogout, 
-  onNavigateToKpis,
-  unreadCount,
-  showNotifications,
-  setShowNotifications,
-  notifications,
-  handleMarkRead
+  onNavigateToKpis
 }: TodayTasksPageProps) {
   const [tasks, setTasks] = useState<(TaskInstance & { zone?: Zone; assignee?: Profile; template?: TaskTemplate })[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1051,79 +1040,7 @@ export default function TodayTasksPage({
               </span>
             </div>
 
-            {/* Notification Bell directly in Sync Queue Footer */}
-            <div className="relative">
-              <button
-                onClick={() => setShowNotifications((v) => !v)}
-                className="bg-slate-800 hover:bg-slate-700 text-slate-100 rounded-xl p-2 relative border border-slate-700 cursor-pointer flex items-center justify-center transition"
-                title="جرس الإشعارات"
-              >
-                <Bell className="w-4 h-4" />
-                {unreadCount > 0 && (
-                  <span className="absolute -top-1.5 -left-1.5 bg-rose-500 text-white text-[9px] font-bold w-4 h-4 rounded-full flex items-center justify-center animate-bounce">
-                    {unreadCount}
-                  </span>
-                )}
-              </button>
 
-              {showNotifications && (
-                <div className="absolute bottom-12 left-0 md:left-auto md:right-0 w-[calc(100vw-2rem)] max-w-[320px] bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-4 flex flex-col gap-3 max-h-96 overflow-y-auto text-right text-slate-100 z-50">
-                  <div className="flex justify-between items-center border-b border-slate-800 pb-2">
-                    <span className="text-xs font-bold text-slate-300">جرس تنبيهات التشغيل والمهام 🔔</span>
-                    <button
-                      onClick={() => setShowNotifications(false)}
-                      className="text-[10px] font-bold text-slate-400 hover:text-slate-200"
-                    >
-                      إغلاق
-                    </button>
-                  </div>
-
-                  <div className="flex flex-col gap-2 font-sans" dir="rtl">
-                    {notifications.length === 0 ? (
-                      <span className="text-xs text-slate-500 text-center py-6 block font-medium">
-                        لا توجد إشعارات حالياً
-                      </span>
-                    ) : (
-                      notifications.map((notif) => (
-                        <div
-                          key={notif.id}
-                          onClick={() => handleMarkRead(notif.id)}
-                          className={`p-2.5 rounded-xl border text-xs cursor-pointer transition flex flex-col gap-1 text-right ${
-                            notif.is_read
-                              ? "border-slate-800 bg-slate-950/40 text-slate-400"
-                              : "border-blue-900/60 bg-blue-950/40 text-slate-100 font-bold"
-                          }`}
-                        >
-                          <div className="flex justify-between items-center text-[9px]">
-                            <span className="text-blue-400">
-                              {notif.type === "rework_requested" ? "إعادة تنفيذ ⚠️" : "تحديث تشغيل"}
-                            </span>
-                            <span className="text-slate-500">
-                              {notif.created_at
-                                ? new Date(notif.created_at).toLocaleTimeString([], {
-                                    hour: "2-digit",
-                                    minute: "2-digit",
-                                  })
-                                : ""}
-                            </span>
-                          </div>
-                          <h4 className="font-bold text-slate-200 text-[11px] mt-0.5">{notif.title}</h4>
-                          <p className="text-[10px] text-slate-400 leading-normal font-medium mt-0.5">
-                            {notif.body}
-                          </p>
-
-                          {!notif.is_read && (
-                            <span className="text-[8px] text-blue-400 text-left mt-1 block">
-                              اضغط للمسح والقراءة
-                            </span>
-                          )}
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
 
             {pendingCount > 0 && (
               <button

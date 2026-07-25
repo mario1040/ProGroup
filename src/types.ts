@@ -130,17 +130,6 @@ export interface KpiSnapshot {
   computed_at?: string;
 }
 
-export interface Notification {
-  id: string;
-  recipient_id: string;
-  type: 'task_assigned' | 'task_due_soon' | 'task_late' | 'task_approved' | 'task_rejected' | 'rework_requested';
-  title: string;
-  body?: string;
-  related_task_instance_id?: string;
-  is_read: boolean;
-  created_at?: string;
-}
-
 export interface DeviceSwitch {
   id: string;
   code: string;

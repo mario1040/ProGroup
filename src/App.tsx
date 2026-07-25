@@ -1,7 +1,6 @@
-import React, { useEffect, useMemo, useState, useRef } from "react";
+import React, { useEffect, useState } from "react";
 import {
   AlertTriangle,
-  Bell,
   CheckCircle,
   Info,
   LayoutDashboard,
@@ -12,12 +11,11 @@ import {
 } from "lucide-react";
 import {
   getCurrentUserProfile,
-  listenNotifications,
+  isUsingLocalFallback,
   loginUser,
   logoutUser,
-  markNotificationAsRead,
 } from "./lib/api";
-import type { Notification, Profile } from "./types";
+import type { Profile } from "./types";
 import TodayTasksPage from "./components/TodayTasksPage";
 import MyKpiPage from "./components/MyKpiPage";
 import AdminDashboard from "./components/AdminDashboard";
@@ -66,34 +64,6 @@ function parseStoredSession(raw: string | null): SessionSummary | null {
   }
 }
 
-const playNotificationSound = () => {
-  try {
-    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-    if (!AudioContextClass) return;
-    
-    const audioCtx = new AudioContextClass();
-    const oscillator = audioCtx.createOscillator();
-    const gainNode = audioCtx.createGain();
-    
-    // Very quick, gentle notification "ping" sound
-    oscillator.type = 'sine';
-    oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); 
-    oscillator.frequency.exponentialRampToValueAtTime(1760, audioCtx.currentTime + 0.05);
-    
-    gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
-    gainNode.gain.linearRampToValueAtTime(0.2, audioCtx.currentTime + 0.02);
-    gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
-    
-    oscillator.connect(gainNode);
-    gainNode.connect(audioCtx.destination);
-    
-    oscillator.start(audioCtx.currentTime);
-    oscillator.stop(audioCtx.currentTime + 0.2);
-  } catch (e) {
-    console.error("Audio playback failed", e);
-  }
-};
-
 export default function App() {
   const [user, setUser] = useState<Profile | null>(null);
   const [username, setUsername] = useState("");
@@ -104,37 +74,16 @@ export default function App() {
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   const [cleanerView, setCleanerView] = useState<"tasks" | "kpis">("tasks");
-  const [notifications, setNotifications] = useState<Notification[]>([]);
-  const [showNotifications, setShowNotifications] = useState(false);
-  const notifiedIds = useRef<Set<string>>(new Set());
+  const [offlineMode, setOfflineMode] = useState(isUsingLocalFallback());
 
   useEffect(() => {
-    // Quick patch to ensure all tasks and templates have requires_photo_before = true
-    const patchDB = async () => {
-      try {
-        const { collection, getDocs, updateDoc } = await import('firebase/firestore');
-        const { db } = await import('./lib/firebase');
-        
-        const templatesSnap = await getDocs(collection(db, 'task_templates'));
-        templatesSnap.forEach((d) => {
-          if (d.data().requires_photo_before === false) {
-            updateDoc(d.ref, { requires_photo_before: true });
-          }
-        });
-
-        const instancesSnap = await getDocs(collection(db, 'task_instances'));
-        instancesSnap.forEach((d) => {
-          // Force requires_photo_before to true for all instances
-          if (d.data().requires_photo_before === false || d.data().requires_photo_before === undefined) {
-            updateDoc(d.ref, { requires_photo_before: true });
-          }
-        });
-        console.log("Database patched successfully for requires_photo_before");
-      } catch (err) {
-        console.error("Patch failed", err);
-      }
+    const handleFallbackChange = () => {
+      setOfflineMode(isUsingLocalFallback());
     };
-    patchDB();
+    window.addEventListener("local_fallback_changed", handleFallbackChange);
+    return () => {
+      window.removeEventListener("local_fallback_changed", handleFallbackChange);
+    };
   }, []);
 
   useEffect(() => {
@@ -181,82 +130,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!user) {
-      setNotifications([]);
-      setShowNotifications(false);
-      notifiedIds.current.clear();
-      return;
-    }
-
-    if ("Notification" in window && Notification.permission === "default") {
-      Notification.requestPermission();
-    }
-
-    const recipientId = user.role === "cleaner" ? user.id : undefined;
-    const unsubscribe = listenNotifications(recipientId, (list) => {
-      setNotifications(list);
-
-      let playedSound = false;
-
-      if ("Notification" in window && Notification.permission === "granted") {
-        list.forEach((notif) => {
-          if (!notif.is_read && !notifiedIds.current.has(notif.id)) {
-            notifiedIds.current.add(notif.id);
-            // Only alert for recent notifications (last 2 minutes)
-            const isRecent = notif.created_at && (new Date().getTime() - new Date(notif.created_at).getTime() < 120000);
-            if (isRecent) {
-              if (!playedSound) {
-                playNotificationSound();
-                playedSound = true;
-              }
-              
-              if ('serviceWorker' in navigator) {
-                navigator.serviceWorker.ready.then(registration => {
-                  registration.showNotification(notif.title, {
-                    body: notif.body,
-                    icon: '/icon.png',
-                    badge: '/icon.png',
-                    // @ts-ignore
-                    vibrate: [100, 50, 100],
-                  });
-                });
-              } else {
-                new Notification(notif.title, {
-                  body: notif.body,
-                  icon: '/icon.png',
-                });
-              }
-            }
-          }
-        });
-      } else {
-        // Fallback: still play sound even if system notifications are denied
-        list.forEach((notif) => {
-          if (!notif.is_read && !notifiedIds.current.has(notif.id)) {
-            notifiedIds.current.add(notif.id);
-            const isRecent = notif.created_at && (new Date().getTime() - new Date(notif.created_at).getTime() < 120000);
-            if (isRecent && !playedSound) {
-              playNotificationSound();
-              playedSound = true;
-            }
-          }
-        });
-      }
-    });
-
-    return () => unsubscribe();
-  }, [user]);
-
-  useEffect(() => {
     if (!successMessage) return;
     const timer = window.setTimeout(() => setSuccessMessage(null), 2500);
     return () => window.clearTimeout(timer);
   }, [successMessage]);
-
-  const unreadCount = useMemo(
-    () => notifications.filter((n) => !n.is_read).length,
-    [notifications]
-  );
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -300,22 +177,9 @@ export default function App() {
       setUsername("");
       setPassword("");
       setCleanerView("tasks");
-      setNotifications([]);
-      setShowNotifications(false);
       localStorage.removeItem(SESSION_KEY);
       localStorage.removeItem(LEGACY_SESSION_KEY);
       setLoading(false);
-    }
-  };
-
-  const handleMarkRead = async (id: string) => {
-    try {
-      await markNotificationAsRead(id);
-      setNotifications((prev) =>
-        prev.map((n) => (n.id === id ? { ...n, is_read: true } : n))
-      );
-    } catch (e) {
-      console.error(e);
     }
   };
 
@@ -331,7 +195,25 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 font-sans antialiased rtl-grid text-right">
+    <div className="min-h-screen bg-slate-50 font-sans antialiased rtl-grid text-right flex flex-col">
+      {offlineMode && (
+        <div className="bg-amber-500 text-slate-900 px-4 py-2.5 text-xs md:text-sm font-bold flex items-center justify-between shadow-md border-b border-amber-600 gap-4 z-50">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-slate-950 shrink-0 animate-pulse" />
+            <span>
+              <strong>تنبيه الاستخدام:</strong> تم تجاوز حصة الاستخدام المجانية لـ Cloud Firestore. يعمل تطبيق <strong>Naris Ops</strong> الآن بالكامل في <strong>الوضع المحلي الآمن (Offline Fallback Mode)</strong>. جميع بياناتك ومهماتك وصورك يتم حفظها محلياً على جهازك ولن تفقد أي تقدم.
+            </span>
+          </div>
+          <button
+            onClick={() => {
+              window.location.reload();
+            }}
+            className="bg-slate-900 hover:bg-slate-800 text-white px-2.5 py-1 rounded-lg text-[10px] md:text-xs transition font-bold shrink-0 cursor-pointer"
+          >
+            تحديث الاتصال
+          </button>
+        </div>
+      )}
       {!user ? (
         <div className="min-h-screen flex flex-col items-center justify-center bg-slate-900 px-4 py-12 relative overflow-hidden">
           <div className="absolute w-96 h-96 bg-indigo-600/10 rounded-full blur-3xl -top-12 -right-12" />
@@ -425,91 +307,12 @@ export default function App() {
         </div>
       ) : (
         <div className="min-h-screen flex flex-col">
-          {!(user.role === "cleaner" && cleanerView === "tasks") && (
-            <div className="fixed bottom-20 md:bottom-6 right-4 md:right-6 z-50">
-              <button
-                onClick={() => setShowNotifications((v) => !v)}
-                className="bg-slate-900 hover:bg-slate-800 text-white rounded-full p-3 shadow-2xl relative border border-slate-800 cursor-pointer flex items-center justify-center transition"
-              >
-                <Bell className="w-5 h-5" />
-                {unreadCount > 0 && (
-                  <span className="absolute -top-1 -left-1 bg-rose-500 text-white text-[9px] font-extrabold w-5 h-5 rounded-full flex items-center justify-center animate-bounce border-2 border-slate-900">
-                    {unreadCount}
-                  </span>
-                )}
-              </button>
-
-              {showNotifications && (
-                <div className="absolute bottom-14 right-0 w-[calc(100vw-2rem)] md:w-80 bg-white border border-slate-200 rounded-2xl shadow-2xl p-4 flex flex-col gap-3 max-h-96 overflow-y-auto text-right">
-                  <div className="flex justify-between items-center border-b border-slate-100 pb-2">
-                    <span className="text-xs font-bold text-slate-800">جرس تنبيهات التشغيل والمهام 🔔</span>
-                    <button
-                      onClick={() => setShowNotifications(false)}
-                      className="text-[10px] font-bold text-slate-400 hover:text-slate-600"
-                    >
-                      إغلاق
-                    </button>
-                  </div>
-
-                  <div className="flex flex-col gap-2">
-                    {notifications.length === 0 ? (
-                      <span className="text-xs text-slate-400 text-center py-6 block font-medium">
-                        لا توجد إشعارات حالياً
-                      </span>
-                    ) : (
-                      notifications.map((notif) => (
-                        <div
-                          key={notif.id}
-                          onClick={() => handleMarkRead(notif.id)}
-                          className={`p-2.5 rounded-xl border text-xs cursor-pointer transition flex flex-col gap-1 ${
-                            notif.is_read
-                              ? "border-slate-100 bg-slate-50/50 text-slate-500"
-                              : "border-blue-100 bg-blue-50/30 text-slate-800 font-bold"
-                          }`}
-                        >
-                          <div className="flex justify-between items-center text-[9px]">
-                            <span className="text-blue-600">
-                              {notif.type === "rework_requested" ? "إعادة تنفيذ ⚠️" : "تحديث تشغيل"}
-                            </span>
-                            <span className="text-slate-400">
-                              {notif.created_at
-                                ? new Date(notif.created_at).toLocaleTimeString([], {
-                                    hour: "2-digit",
-                                    minute: "2-digit",
-                                  })
-                                : ""}
-                            </span>
-                          </div>
-                          <h4 className="font-bold text-slate-800 text-[11px] mt-0.5">{notif.title}</h4>
-                          <p className="text-[10px] text-slate-500 leading-normal font-medium mt-0.5">
-                            {notif.body}
-                          </p>
-
-                          {!notif.is_read && (
-                            <span className="text-[8px] text-blue-500 text-left mt-1 block">
-                              اضغط للمسح والقراءة
-                            </span>
-                          )}
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
           {user.role === "cleaner" ? (
             cleanerView === "tasks" ? (
               <TodayTasksPage
                 user={user}
                 onLogout={handleLogout}
                 onNavigateToKpis={() => setCleanerView("kpis")}
-                unreadCount={unreadCount}
-                showNotifications={showNotifications}
-                setShowNotifications={setShowNotifications}
-                notifications={notifications}
-                handleMarkRead={handleMarkRead}
               />
             ) : (
               <MyKpiPage user={user} onBack={() => setCleanerView("tasks")} />

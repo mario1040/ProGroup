@@ -1674,18 +1674,7 @@ export function getSeededDB() {
         "supervisor_rating": 4.7
       }
     ],
-    "notifications": [
-      {
-        "id": "n1",
-        "recipient_id": "p2",
-        "type": "task_assigned",
-        "title": "مهام SOP الموحدة مسندة إليك",
-        "body": "تم تكليفك بجدول النظافة والتشغيل الموحد الجديد وفق لائحة الشركة مقر النرجس.",
-        "related_task_instance_id": "",
-        "is_read": false,
-        "created_at": "2026-07-12T01:00:00Z"
-      }
-    ],
+    "notifications": [],
     "device_switches": [
       // 1. لوحة الريسبشن والاستقبال (SWREC)
       { "id": "sw_rec_1", "code": "SWREC 001", "label": "إضاءات سقف مكاتب المهندسين", "zone_id": "z_reception", "panel_location": "لوحة الريسبشن والاستقبال (SWREC)" },
