@@ -152,6 +152,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   const [selectedTemplate, setSelectedTemplate] = useState<Partial<TaskTemplate> | null>(null);
   const [uploadingGuide, setUploadingGuide] = useState(false);
   const [uploadingReference, setUploadingReference] = useState(false);
+  const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
 
   // Quick zone detail view
   const [selectedZoneDetail, setSelectedZoneDetail] = useState<Zone | null>(null);
@@ -242,6 +243,12 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   useEffect(() => {
     loadAllData();
   }, [selectedDate, activeTab]);
+
+  useEffect(() => {
+    if (!isSopModalOpen) {
+      setIsConfirmingDelete(false);
+    }
+  }, [isSopModalOpen, selectedTemplate]);
 
   // Statistics Computations
   const statsCompleted = tasks.filter(t => t.status === "completed").length;
@@ -580,6 +587,25 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
     } catch (err) {
       console.error(err);
       showToast("فشل حفظ البند المعياري", "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteSopTemplate = async () => {
+    if (!selectedTemplate?.id) return;
+
+    try {
+      setLoading(true);
+      await deleteTemplate(selectedTemplate.id);
+      showToast("تم حذف بند معيار SOP الموحد بنجاح 🗑️", "success");
+      setIsSopModalOpen(false);
+      setSelectedTemplate(null);
+      setIsConfirmingDelete(false);
+      loadAllData();
+    } catch (err) {
+      console.error(err);
+      showToast("فشل حذف البند المعياري", "error");
     } finally {
       setLoading(false);
     }
@@ -3797,12 +3823,56 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                 </label>
               </div>
 
-              <button
-                type="submit"
-                className="bg-slate-900 hover:bg-slate-800 text-white font-bold py-3 rounded-xl cursor-pointer transition shadow mt-3"
-              >
-                حفظ معيار الجودة بالدليل الموحد ✅
-              </button>
+              {isConfirmingDelete ? (
+                <div className="bg-rose-50 border border-rose-100 rounded-xl p-3.5 flex flex-col gap-2.5 mt-3 transition-all animate-pulse">
+                  <div className="flex gap-2 text-right" dir="rtl">
+                    <span className="text-rose-600 text-base">⚠️</span>
+                    <div className="flex-1">
+                      <h4 className="text-xs font-bold text-rose-800">تأكيد حذف البند المعياري</h4>
+                      <p className="text-[10px] text-rose-600/90 font-semibold mt-0.5 leading-relaxed">
+                        هل أنت متأكد من رغبتك في حذف هذا البند المعياري (SOP) نهائياً من قاعدة البيانات؟ لا يمكن استرجاع البيانات بعد الحذف.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex gap-2 justify-end">
+                    <button
+                      type="button"
+                      onClick={() => setIsConfirmingDelete(false)}
+                      className="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-bold rounded-lg cursor-pointer transition shadow-sm"
+                    >
+                      إلغاء
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleDeleteSopTemplate}
+                      className="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white text-[10px] font-bold rounded-lg cursor-pointer transition shadow-sm flex items-center gap-1"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      تأكيد الحذف النهائي 🗑️
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex gap-2.5 mt-3">
+                  {selectedTemplate.id && (
+                    <button
+                      type="button"
+                      onClick={() => setIsConfirmingDelete(true)}
+                      className="bg-rose-600 hover:bg-rose-700 text-white font-bold py-3 px-5 rounded-xl cursor-pointer transition shadow flex items-center justify-center gap-1.5 shrink-0 text-xs"
+                      title="حذف هذا البند المعياري نهائياً"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      حذف البند 🗑️
+                    </button>
+                  )}
+                  <button
+                    type="submit"
+                    className="flex-1 bg-slate-900 hover:bg-slate-800 text-white font-bold py-3 rounded-xl cursor-pointer transition shadow flex items-center justify-center gap-1.5 text-xs"
+                  >
+                    حفظ معيار الجودة بالدليل الموحد ✅
+                  </button>
+                </div>
+              )}
             </form>
           </div>
         </div>
