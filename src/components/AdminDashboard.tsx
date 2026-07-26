@@ -1081,6 +1081,40 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
         </div>
       )}
 
+      {/* Full screen Resetting / Syncing Loading Overlay */}
+      {isResettingDb && (
+        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md z-[9999] flex flex-col items-center justify-center text-white p-6 transition-all duration-500">
+          <div className="bg-slate-900 border border-slate-800 p-8 rounded-2xl shadow-2xl max-w-lg w-full text-center flex flex-col items-center gap-5">
+            {/* Elegant spinning rings loader */}
+            <div className="relative w-20 h-20 flex items-center justify-center">
+              <div className="absolute inset-0 rounded-full border-4 border-slate-800" />
+              <div className="absolute inset-0 rounded-full border-4 border-t-indigo-500 border-r-indigo-500 animate-spin" />
+              <div className="text-2xl">🔄</div>
+            </div>
+            
+            <div className="space-y-2">
+              <h3 className="text-lg font-black text-white tracking-wide">جاري فحص وإعادة تهيئة الداتابيز بالكامل...</h3>
+              <p className="text-xs text-indigo-400 font-bold">يرجى الانتظار وعدم إغلاق هذه الصفحة ⚠️</p>
+            </div>
+            
+            <p className="text-xs text-slate-400 leading-relaxed max-w-sm">
+              نقوم الآن بمسح الجداول بالكامل من السيرفر، وإعادة بناء الهياكل وتوليد بنود المهام والمقاييس المعيارية الرسمية (SOP) من البداية لضمان تطابقها بنسبة 100% مع لوائح التشغيل وتفادي أي تعارض في البيانات.
+            </p>
+            
+            <div className="w-full space-y-2.5 mt-2">
+              <div className="flex justify-between items-center text-[10px] text-slate-500 font-bold px-1">
+                <span>تحديث الفهارس</span>
+                <span className="text-indigo-400">جاري الإجراء...</span>
+                <span>توليد المهام</span>
+              </div>
+              <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden relative">
+                <div className="bg-indigo-500 h-full w-4/5 rounded-full animate-pulse transition-all duration-1000" style={{ width: '85%' }} />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Admin Top Navigation Header */}
       <header className="bg-slate-900 text-white shadow-lg border-b border-slate-800 px-6 py-3.5 flex flex-col md:flex-row justify-between items-center gap-4 sticky top-0 z-40 no-print">
         <div className="flex items-center gap-3">
