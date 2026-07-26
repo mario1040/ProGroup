@@ -68,12 +68,36 @@ let localDBInitialized = false;
 const currentProjectId = firebaseConfig.projectId;
 try {
   const lastUsedProjectId = localStorage.getItem("last_used_project_id");
-  if (lastUsedProjectId !== currentProjectId) {
+  if (lastUsedProjectId && lastUsedProjectId !== currentProjectId) {
+    console.log("[Project Change Detected] Resetting local caches, database and forcing sign-out...");
     localStorage.setItem("last_used_project_id", currentProjectId);
     localStorage.removeItem("use_local_fallback");
+    localStorage.removeItem("narisops_local_db");
+    localStorage.removeItem("naris_ops_session");
+    localStorage.removeItem("naris_ops_user");
+    localStorage.removeItem("naris_pending_updates");
+    localStorage.removeItem("naris_schema_version");
+    localStorage.removeItem("naris_inventory_data");
+    localStorage.removeItem("use_base64_storage");
+    
+    // Clear other keys
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && (key.startsWith("naris_") || key.startsWith("narisops_"))) {
+        keysToRemove.push(key);
+      }
+    }
+    keysToRemove.forEach(k => localStorage.removeItem(k));
+    
+    setTimeout(() => {
+      window.dispatchEvent(new Event("project_changed_sign_out"));
+    }, 100);
+  } else if (!lastUsedProjectId) {
+    localStorage.setItem("last_used_project_id", currentProjectId);
   }
 } catch (e) {
-  console.warn("localStorage is not accessible:", e);
+  console.warn("localStorage is not accessible during project check:", e);
 }
 
 let useLocalFallback = localStorage.getItem("use_local_fallback") === "true";
@@ -91,6 +115,51 @@ export function invalidateMetadataCaches() {
   cachedZones = null;
   cachedOperationalTasks = null;
   cachedDeviceSwitches = null;
+}
+
+export function forceClearAllCaches() {
+  try {
+    localStorage.removeItem("naris_ops_session");
+    localStorage.removeItem("naris_ops_user");
+    localStorage.removeItem("narisops_local_db");
+    localStorage.removeItem("use_local_fallback");
+    localStorage.removeItem("naris_pending_updates");
+    localStorage.removeItem("naris_schema_version");
+    localStorage.removeItem("naris_inventory_data");
+    localStorage.removeItem("use_base64_storage");
+    
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && (key.startsWith("naris_") || key.startsWith("narisops_"))) {
+        keysToRemove.push(key);
+      }
+    }
+    keysToRemove.forEach(k => localStorage.removeItem(k));
+    
+    invalidateMetadataCaches();
+    
+    // Reset local DB in memory
+    localDB.users = {};
+    localDB.locations = {};
+    localDB.zones = {};
+    localDB.task_templates = {};
+    localDB.task_instances = {};
+    localDB.operational_tasks = {};
+    localDB.notifications = {};
+    localDB.device_switches = {};
+    localDB.kpi_snapshots = {};
+    
+    localDBInitialized = false;
+    useLocalFallback = false;
+    
+    window.dispatchEvent(new Event("local_fallback_changed"));
+    window.dispatchEvent(new Event("project_changed_sign_out"));
+    
+    console.log("[Cache Cleared] Successfully wiped out all cached data and forced logout.");
+  } catch (err) {
+    console.error("Error forcing complete clearing of caches:", err);
+  }
 }
 
 let localDB: {
@@ -600,6 +669,109 @@ export async function deduplicateDatabase(): Promise<void> {
 }
 
 /**
+ * Migrates local storage database to the remote Firestore database, clearing any defaults first to prevent duplicates.
+ */
+export async function syncLocalDatabaseToFirestore(): Promise<void> {
+  let localDbData: any = null;
+  try {
+    const stored = localStorage.getItem("narisops_local_db");
+    if (stored) {
+      localDbData = JSON.parse(stored);
+    }
+  } catch (e) {
+    console.warn("[Sync Engine] Failed to parse local database:", e);
+    throw new Error("فشل قراءة قاعدة البيانات المحلية من المستعرض.");
+  }
+
+  const hasCustomLocalData = localDbData && (
+    (localDbData.task_templates && Object.keys(localDbData.task_templates).length > 0) || 
+    (localDbData.task_instances && Object.keys(localDbData.task_instances).length > 0)
+  );
+
+  if (!hasCustomLocalData) {
+    throw new Error("لا توجد بيانات مهام أو بنود مخزنة محلياً على هذا الجهاز لنقلها.");
+  }
+
+  console.log(`[Sync Engine] Initializing database migration to project: ${currentProjectId}`);
+  
+  const colNames = [
+    "locations",
+    "zones",
+    "task_templates",
+    "task_instances",
+    "operational_tasks",
+    "notifications",
+    "device_switches",
+    "kpi_snapshots"
+  ];
+
+  // 1. Clear existing documents in Firestore to prevent duplicates
+  for (const colName of colNames) {
+    try {
+      const colSnap = await getDocs(collection(db, colName));
+      for (const docSnap of colSnap.docs) {
+        await deleteDoc(doc(db, colName, docSnap.id));
+      }
+      console.log(`[Sync Engine] Cleared Firestore collection: ${colName}`);
+    } catch (e) {
+      console.warn(`[Sync Engine] Failed to clear collection ${colName}:`, e);
+    }
+  }
+
+  // 2. Clear users
+  try {
+    const usersSnap = await getDocs(collection(db, "users"));
+    for (const docSnap of usersSnap.docs) {
+      await deleteDoc(doc(db, "users", docSnap.id));
+    }
+  } catch (e) {
+    console.warn("[Sync Engine] Failed to clear users:", e);
+  }
+
+  // 3. Seed users
+  const seeded = getSeededDB();
+  const usersMap: Record<string, any> = {};
+  for (const p of seeded.profiles) {
+    usersMap[p.id] = p;
+  }
+  if (localDbData.users) {
+    for (const uid of Object.keys(localDbData.users)) {
+      usersMap[uid] = localDbData.users[uid];
+    }
+  }
+  for (const pId of Object.keys(usersMap)) {
+    const profileToSeed = {
+      ...usersMap[pId],
+      password: await normalizePasswordRecord(usersMap[pId].password, usersMap[pId].username === "admin" ? "admin123" : "123456")
+    };
+    await setDoc(doc(db, "users", pId), profileToSeed);
+  }
+
+  // 4. Upload each other collection
+  for (const colName of colNames) {
+    const localItems = localDbData[colName] || {};
+    const localKeys = Object.keys(localItems);
+    
+    if (localKeys.length > 0) {
+      console.log(`[Sync Engine] Uploading ${localKeys.length} items from local database for collection: ${colName}`);
+      for (const key of localKeys) {
+        await setDoc(doc(db, colName, key), localItems[key]);
+      }
+    } else {
+      const defaultList = (seeded as any)[colName] || [];
+      console.log(`[Sync Engine] Local collection ${colName} is empty. Seeding default ${defaultList.length} items.`);
+      for (const item of defaultList) {
+        await setDoc(doc(db, colName, item.id), item);
+      }
+    }
+  }
+
+  localStorage.setItem("naris_local_db_synced_to_firestore", currentProjectId);
+  invalidateMetadataCaches();
+  console.log("[Sync Engine] Synchronization completed successfully.");
+}
+
+/**
  * Ensures Firestore is properly seeded with initial data if it's completely empty.
  */
 async function ensureSeeded(): Promise<void> {
@@ -611,8 +783,30 @@ async function ensureSeeded(): Promise<void> {
   }
   
   seedingPromise = (async () => {
-    const pathForCheck = "users";
     try {
+      // 1. Check if we need to do automatic migration/sync of local database first
+      let localDbData: any = null;
+      try {
+        const stored = localStorage.getItem("narisops_local_db");
+        if (stored) {
+          localDbData = JSON.parse(stored);
+        }
+      } catch (e) {
+        console.warn("[Firestore Client] Failed to parse local database during sync check:", e);
+      }
+
+      const hasCustomLocalData = localDbData && (
+        (localDbData.task_templates && Object.keys(localDbData.task_templates).length > 0) || 
+        (localDbData.task_instances && Object.keys(localDbData.task_instances).length > 0)
+      );
+
+      const syncFlag = localStorage.getItem("naris_local_db_synced_to_firestore");
+      if (hasCustomLocalData && syncFlag !== currentProjectId) {
+        console.log(`[Sync Engine] Automatic synchronization detected. Migrating local database to ${currentProjectId}...`);
+        await syncLocalDatabaseToFirestore();
+        return;
+      }
+
       // Check if users collection already has data
       const usersCol = collection(db, "users");
       let usersSnap;
@@ -634,28 +828,12 @@ async function ensureSeeded(): Promise<void> {
       
       console.log("[Firestore Client] Firestore is empty. Checking for local database to seed...");
       
-      let localDbData: any = null;
-      try {
-        const stored = localStorage.getItem("narisops_local_db");
-        if (stored) {
-          localDbData = JSON.parse(stored);
-        }
-      } catch (e) {
-        console.warn("[Firestore Client] Failed to parse local database during seed check:", e);
-      }
-
-      const hasCustomLocalData = localDbData && (
-        (localDbData.task_templates && Object.keys(localDbData.task_templates).length > 0) || 
-        (localDbData.task_instances && Object.keys(localDbData.task_instances).length > 0)
-      );
-
-      const seeded = getSeededDB();
-
       if (hasCustomLocalData) {
         console.log("[Firestore Client] Seeding from friend's local database to prevent duplication or loss of offline additions!");
         
         // 1. Seed users (profiles)
         // Combine seeded default users with any custom local users
+        const seeded = getSeededDB();
         const usersMap: Record<string, any> = {};
         for (const p of seeded.profiles) {
           usersMap[p.id] = p;
@@ -703,6 +881,7 @@ async function ensureSeeded(): Promise<void> {
 
       } else {
         console.log("[Firestore Client] No local database found. Seeding initial default data across collections...");
+        const seeded = getSeededDB();
         
         // 1. Seed users (profiles)
         for (const p of seeded.profiles) {
@@ -715,42 +894,42 @@ async function ensureSeeded(): Promise<void> {
         
         // 2. Seed locations
         for (const l of seeded.locations) {
-          await setDoc(doc(db, "locations", l.id), l);
+          await setDoc(doc(db, l.id), l);
         }
         
         // 3. Seed zones
         for (const z of seeded.zones) {
-          await setDoc(doc(db, "zones", z.id), z);
+          await setDoc(doc(db, z.id), z);
         }
         
         // 4. Seed task_templates
         for (const t of seeded.task_templates) {
-          await setDoc(doc(db, "task_templates", t.id), t);
+          await setDoc(doc(db, t.id), t);
         }
         
         // 5. Seed task_instances
         for (const ti of seeded.task_instances) {
-          await setDoc(doc(db, "task_instances", ti.id), ti);
+          await setDoc(doc(db, ti.id), ti);
         }
         
         // 6. Seed operational_tasks
         for (const ot of seeded.operational_tasks) {
-          await setDoc(doc(db, "operational_tasks", ot.id), ot);
+          await setDoc(doc(db, ot.id), ot);
         }
         
         // 7. Seed notifications
         for (const n of seeded.notifications) {
-          await setDoc(doc(db, "notifications", n.id), n);
+          await setDoc(doc(db, n.id), n);
         }
         
         // 8. Seed device_switches
         for (const sw of seeded.device_switches) {
-          await setDoc(doc(db, "device_switches", sw.id), sw);
+          await setDoc(doc(db, sw.id), sw);
         }
         
         // 9. Seed kpi_snapshots
         for (const k of seeded.kpi_snapshots) {
-          await setDoc(doc(db, "kpi_snapshots", k.id), k);
+          await setDoc(doc(db, k.id), k);
         }
       }
       

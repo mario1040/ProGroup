@@ -21,6 +21,7 @@ import TodayTasksPage from "./components/TodayTasksPage";
 import MyKpiPage from "./components/MyKpiPage";
 import AdminDashboard from "./components/AdminDashboard";
 import ProfessorLogo from "./components/ProfessorLogo";
+import FirebaseDiagnosticTool from "./components/FirebaseDiagnosticTool";
 
 type SessionSummary = {
   id: string;
@@ -81,9 +82,15 @@ export default function App() {
     const handleFallbackChange = () => {
       setOfflineMode(isUsingLocalFallback());
     };
+    const handleProjectChangedSignOut = () => {
+      setUser(null);
+      setOfflineMode(false);
+    };
     window.addEventListener("local_fallback_changed", handleFallbackChange);
+    window.addEventListener("project_changed_sign_out", handleProjectChangedSignOut);
     return () => {
       window.removeEventListener("local_fallback_changed", handleFallbackChange);
+      window.removeEventListener("project_changed_sign_out", handleProjectChangedSignOut);
     };
   }, []);
 
@@ -324,6 +331,7 @@ export default function App() {
           )}
         </div>
       )}
+      <FirebaseDiagnosticTool />
     </div>
   );
 }
