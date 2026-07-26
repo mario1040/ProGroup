@@ -259,7 +259,8 @@ export function collection(dbInstance: any, path: string): any {
 }
 
 export function query(colRef: any, ...constraints: any[]): any {
-  const queryRef = firebaseQuery(colRef, ...constraints) as any;
+  const realConstraints = constraints.map(c => (c && c.__isWhere) ? c.realConstraint : c);
+  const queryRef = firebaseQuery(colRef, ...realConstraints) as any;
   try {
     queryRef.__collection_path = colRef.__collection_path || colRef.path || "";
     queryRef.__constraints = constraints;
