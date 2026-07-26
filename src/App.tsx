@@ -14,6 +14,7 @@ import {
   isUsingLocalFallback,
   loginUser,
   logoutUser,
+  setLocalFallback,
 } from "./lib/api";
 import type { Profile } from "./types";
 import TodayTasksPage from "./components/TodayTasksPage";
@@ -206,11 +207,12 @@ export default function App() {
           </div>
           <button
             onClick={() => {
+              setLocalFallback(false);
               window.location.reload();
             }}
             className="bg-slate-900 hover:bg-slate-800 text-white px-2.5 py-1 rounded-lg text-[10px] md:text-xs transition font-bold shrink-0 cursor-pointer"
           >
-            تحديث الاتصال
+            تحديث ومحاولة الاتصال بالخادم
           </button>
         </div>
       )}
