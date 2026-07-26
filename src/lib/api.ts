@@ -196,6 +196,35 @@ function initLocalDB() {
       keys.forEach(k => {
         if (!localDB[k]) localDB[k] = {};
       });
+
+      // Clear out the 59 old default templates and their instances if they are present in localStorage to prevent them syncing back
+      let localTemplatesChanged = false;
+      const tKeys = Object.keys(localDB.task_templates);
+      for (const tk of tKeys) {
+        if (tk.startsWith("t_sop_")) {
+          delete localDB.task_templates[tk];
+          localTemplatesChanged = true;
+        }
+      }
+      
+      const tiKeys = Object.keys(localDB.task_instances);
+      for (const tik of tiKeys) {
+        const ti = localDB.task_instances[tik];
+        if (tik.startsWith("ti_") || (ti && ti.template_id && ti.template_id.startsWith("t_sop_"))) {
+          delete localDB.task_instances[tik];
+          localTemplatesChanged = true;
+        }
+      }
+      
+      if (localTemplatesChanged) {
+        console.log("[Local DB] Auto-purged old default t_sop_ templates and instances from localStorage.");
+        try {
+          localStorage.setItem("narisops_local_db", JSON.stringify(localDB));
+        } catch (e) {
+          console.error("[Local DB] Failed to save updated localDB after auto-purge", e);
+        }
+      }
+
       localDBInitialized = true;
       console.log("[Local DB] Loaded existing database from localStorage");
       return;
@@ -456,19 +485,28 @@ export async function getDocs(q: any): Promise<any> {
 
 export async function setDoc(docRef: any, data: any, options?: any) {
   const cleaned = cleanUndefined(data);
-  if (useLocalFallback) {
+  const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
+  const docId = docRef.__doc_id || docRef.id || "";
+
+  // Always keep local database up to date to prevent syncing old or deleted data back
+  try {
     initLocalDB();
-    const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
-    const docId = docRef.__doc_id || docRef.id || "";
-    if (options?.merge && localDB[colName as keyof typeof localDB]?.[docId]) {
-      localDB[colName as keyof typeof localDB][docId] = {
-        ...localDB[colName as keyof typeof localDB][docId],
-        ...cleaned
-      };
-    } else {
-      localDB[colName as keyof typeof localDB][docId] = cleaned;
+    if (colName && docId) {
+      if (options?.merge && localDB[colName as keyof typeof localDB]?.[docId]) {
+        localDB[colName as keyof typeof localDB][docId] = {
+          ...localDB[colName as keyof typeof localDB][docId],
+          ...cleaned
+        };
+      } else {
+        localDB[colName as keyof typeof localDB][docId] = cleaned;
+      }
+      saveLocalDB();
     }
-    saveLocalDB();
+  } catch (e) {
+    console.warn("[Local DB] Failed to sync setDoc to local storage:", e);
+  }
+
+  if (useLocalFallback) {
     triggerSnapshotListeners(colName);
     return;
   }
@@ -476,33 +514,30 @@ export async function setDoc(docRef: any, data: any, options?: any) {
     await firebaseSetDoc(docRef, cleaned, options);
   } catch (err: any) {
     triggerLocalFallback(err);
-    initLocalDB();
-    const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
-    const docId = docRef.__doc_id || docRef.id || "";
-    if (options?.merge && localDB[colName as keyof typeof localDB]?.[docId]) {
-      localDB[colName as keyof typeof localDB][docId] = {
-        ...localDB[colName as keyof typeof localDB][docId],
-        ...cleaned
-      };
-    } else {
-      localDB[colName as keyof typeof localDB][docId] = cleaned;
-    }
-    saveLocalDB();
     triggerSnapshotListeners(colName);
   }
 }
 
 export async function updateDoc(docRef: any, data: any) {
   const cleaned = cleanUndefined(data);
-  if (useLocalFallback) {
+  const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
+  const docId = docRef.__doc_id || docRef.id || "";
+
+  // Always keep local database up to date to prevent syncing old or deleted data back
+  try {
     initLocalDB();
-    const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
-    const docId = docRef.__doc_id || docRef.id || "";
-    localDB[colName as keyof typeof localDB][docId] = {
-      ...(localDB[colName as keyof typeof localDB][docId] || {}),
-      ...cleaned
-    };
-    saveLocalDB();
+    if (colName && docId) {
+      localDB[colName as keyof typeof localDB][docId] = {
+        ...(localDB[colName as keyof typeof localDB][docId] || {}),
+        ...cleaned
+      };
+      saveLocalDB();
+    }
+  } catch (e) {
+    console.warn("[Local DB] Failed to sync updateDoc to local storage:", e);
+  }
+
+  if (useLocalFallback) {
     triggerSnapshotListeners(colName);
     return;
   }
@@ -510,25 +545,28 @@ export async function updateDoc(docRef: any, data: any) {
     await firebaseUpdateDoc(docRef, cleaned);
   } catch (err: any) {
     triggerLocalFallback(err);
-    initLocalDB();
-    const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
-    const docId = docRef.__doc_id || docRef.id || "";
-    localDB[colName as keyof typeof localDB][docId] = {
-      ...(localDB[colName as keyof typeof localDB][docId] || {}),
-      ...cleaned
-    };
-    saveLocalDB();
     triggerSnapshotListeners(colName);
   }
 }
 
 export async function deleteDoc(docRef: any) {
-  if (useLocalFallback) {
+  const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
+  const docId = docRef.__doc_id || docRef.id || "";
+
+  // Always keep local database up to date to prevent syncing old or deleted data back
+  try {
     initLocalDB();
-    const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
-    const docId = docRef.__doc_id || docRef.id || "";
-    delete localDB[colName as keyof typeof localDB]?.[docId];
-    saveLocalDB();
+    if (colName && docId) {
+      if (localDB[colName as keyof typeof localDB]) {
+        delete localDB[colName as keyof typeof localDB][docId];
+      }
+      saveLocalDB();
+    }
+  } catch (e) {
+    console.warn("[Local DB] Failed to sync deleteDoc to local storage:", e);
+  }
+
+  if (useLocalFallback) {
     triggerSnapshotListeners(colName);
     return;
   }
@@ -536,11 +574,6 @@ export async function deleteDoc(docRef: any) {
     await firebaseDeleteDoc(docRef);
   } catch (err: any) {
     triggerLocalFallback(err);
-    initLocalDB();
-    const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
-    const docId = docRef.__doc_id || docRef.id || "";
-    delete localDB[colName as keyof typeof localDB]?.[docId];
-    saveLocalDB();
     triggerSnapshotListeners(colName);
   }
 }
@@ -894,42 +927,42 @@ async function ensureSeeded(): Promise<void> {
         
         // 2. Seed locations
         for (const l of seeded.locations) {
-          await setDoc(doc(db, l.id), l);
+          await setDoc(doc(db, "locations", l.id), l);
         }
         
         // 3. Seed zones
         for (const z of seeded.zones) {
-          await setDoc(doc(db, z.id), z);
+          await setDoc(doc(db, "zones", z.id), z);
         }
         
         // 4. Seed task_templates
         for (const t of seeded.task_templates) {
-          await setDoc(doc(db, t.id), t);
+          await setDoc(doc(db, "task_templates", t.id), t);
         }
         
         // 5. Seed task_instances
         for (const ti of seeded.task_instances) {
-          await setDoc(doc(db, ti.id), ti);
+          await setDoc(doc(db, "task_instances", ti.id), ti);
         }
         
         // 6. Seed operational_tasks
         for (const ot of seeded.operational_tasks) {
-          await setDoc(doc(db, ot.id), ot);
+          await setDoc(doc(db, "operational_tasks", ot.id), ot);
         }
         
         // 7. Seed notifications
         for (const n of seeded.notifications) {
-          await setDoc(doc(db, n.id), n);
+          await setDoc(doc(db, "notifications", n.id), n);
         }
         
         // 8. Seed device_switches
         for (const sw of seeded.device_switches) {
-          await setDoc(doc(db, sw.id), sw);
+          await setDoc(doc(db, "device_switches", sw.id), sw);
         }
         
         // 9. Seed kpi_snapshots
         for (const k of seeded.kpi_snapshots) {
-          await setDoc(doc(db, k.id), k);
+          await setDoc(doc(db, "kpi_snapshots", k.id), k);
         }
       }
       
@@ -1249,6 +1282,7 @@ export async function saveProfile(profile: Partial<Profile>): Promise<{ profile:
   }
 
   await setDoc(doc(db, "users", finalProfile.id), finalProfile);
+  invalidateMetadataCaches();
   return { profile: finalProfile as Profile, generatedPassword };
 }
 
@@ -1348,7 +1382,7 @@ export async function saveZone(zone: Partial<Zone>): Promise<Zone> {
     finalZone = { ...existing, ...zone };
   }
   await setDoc(doc(db, "zones", finalZone.id), finalZone);
-  cachedZones = null; // Invalidate cache
+  invalidateMetadataCaches();
   return finalZone as Zone;
 }
 
@@ -1390,15 +1424,43 @@ export async function saveTemplate(template: Partial<TaskTemplate>): Promise<Tas
     finalTemplate = { ...existing, ...template, updated_at: new Date().toISOString() };
   }
   await setDoc(doc(db, "task_templates", finalTemplate.id), finalTemplate);
+  invalidateMetadataCaches();
   return finalTemplate as TaskTemplate;
 }
 
 export async function deleteTemplate(id: string): Promise<void> {
+  if (!id || typeof id !== "string" || id.trim() === "") {
+    console.error("[Firestore Client] deleteTemplate: Invalid or empty ID provided:", id);
+    throw new Error("معرف البند المعياري (ID) غير صالح أو مفقود.");
+  }
+  
   await ensureSeeded();
   try {
+    // 1. Delete all corresponding task instances of this template to prevent orphan tasks
+    if (useLocalFallback) {
+      console.log(`[Local DB] Deleting corresponding task instances for template_id: ${id}`);
+      const keys = Object.keys(localDB.task_instances);
+      for (const k of keys) {
+        if (localDB.task_instances[k].template_id === id) {
+          delete localDB.task_instances[k];
+        }
+      }
+      saveLocalDB();
+    } else {
+      console.log(`[Firestore Client] Deleting task instances for template_id: ${id}...`);
+      const q = query(collection(db, "task_instances"), where("template_id", "==", id));
+      const snap = await getDocs(q);
+      for (const d of snap.docs) {
+        await deleteDoc(doc(db, "task_instances", d.id));
+      }
+    }
+
+    // 2. Delete the template itself
     await deleteDoc(doc(db, "task_templates", id));
+    invalidateMetadataCaches();
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `task_templates/${id}`);
+    throw error;
   }
 }
 
@@ -1464,6 +1526,11 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
           supervisor_approved: false,
           guide_image_url: tpl.guide_image_url || "",
           reference_image_url: tpl.reference_image_url || "",
+          requires_photo_before: tpl.requires_photo_before ?? true,
+          requires_photo_after: tpl.requires_photo_after ?? true,
+          requires_supervisor_approval: tpl.requires_supervisor_approval ?? true,
+          requires_gps: tpl.requires_gps ?? false,
+          requires_signature: tpl.requires_signature ?? false,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
         };
@@ -2250,6 +2317,53 @@ export async function deletePhoto(path: string): Promise<void> {
 }
 
 export async function resetDatabase(): Promise<void> {
+  console.log("[Reset Database] Clearing local database and cache in localStorage...");
+  
+  // 1. Clear all data-related keys in localStorage to prevent syncing old or deleted data back
+  if (typeof localStorage !== "undefined") {
+    localStorage.removeItem("narisops_local_db");
+    localStorage.removeItem("naris_local_db_synced_to_firestore");
+    localStorage.removeItem("naris_pending_updates");
+    localStorage.removeItem("naris_schema_version");
+    localStorage.removeItem("naris_inventory_data");
+    localStorage.removeItem("use_base64_storage");
+    
+    // Clear any task cache keys
+    try {
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && (key.startsWith("naris_cached_tasks_") || key.startsWith("narisops_cached_") || key.startsWith("naris_ops_"))) {
+          keysToRemove.push(key);
+        }
+      }
+      keysToRemove.forEach((k) => localStorage.removeItem(k));
+    } catch (e) {
+      console.warn("[Reset Database] Failed to clear cached task keys:", e);
+    }
+  }
+
+  // Reset the in-memory localDB
+  localDB = {
+    users: {},
+    locations: {},
+    zones: {},
+    task_templates: {},
+    task_instances: {},
+    operational_tasks: {},
+    notifications: {},
+    device_switches: {},
+    kpi_snapshots: {}
+  };
+  localDBInitialized = false;
+
+  if (useLocalFallback) {
+    initLocalDB();
+    invalidateMetadataCaches();
+    console.log("[Local DB] Local database cleared and re-seeded successfully.");
+    return;
+  }
+
   const collectionsToClear = [
     "users",
     "locations",
@@ -2268,7 +2382,7 @@ export async function resetDatabase(): Promise<void> {
       const colRef = collection(db, colName);
       const snapshot = await getDocs(colRef);
       for (const d of snapshot.docs) {
-        await deleteDoc(doc(db, colName, d.id));
+        await firebaseDeleteDoc(doc(db, colName, d.id));
       }
     } catch (err) {
       console.error(`[Firestore Client] Error clearing collection ${colName}:`, err);
@@ -2278,6 +2392,7 @@ export async function resetDatabase(): Promise<void> {
   // Clear seeding promise and re-seed clean, compliant templates
   clearSeedingPromise();
   await ensureSeeded();
+  invalidateMetadataCaches();
   console.log("[Firestore Client] Database cleared and re-seeded successfully.");
 }
 

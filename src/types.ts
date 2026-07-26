@@ -75,6 +75,9 @@ export interface TaskInstance {
   status: 'pending' | 'in_progress' | 'completed' | 'late' | 'rejected' | 'escalated';
   requires_photo_before?: boolean;
   requires_photo_after?: boolean;
+  requires_supervisor_approval?: boolean;
+  requires_gps?: boolean;
+  requires_signature?: boolean;
   photo_before_url?: string;
   photo_before_taken_at?: string;
   photo_before_uploaded_at?: string;

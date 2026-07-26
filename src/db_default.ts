@@ -1,5 +1,5 @@
 export function getSeededDB() {
-  return {
+  const dbData = {
     "profiles": [
       {
         "id": "p1",
@@ -1740,4 +1740,7 @@ export function getSeededDB() {
       { "id": "sw_bas_15", "code": "SWBAS 015", "label": "مفتاح التكييف الرئيسي", "zone_id": "z_team_office", "panel_location": "لوحة Team Office & Technical (SWBAS)" }
     ]
   };
+  (dbData as any).task_templates = [];
+  (dbData as any).task_instances = [];
+  return dbData;
 }
