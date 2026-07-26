@@ -65,7 +65,7 @@ function cleanUndefined<T extends object>(obj: T): T {
 let localDBInitialized = false;
 
 // Automatically reset local fallback if switching to a new Firebase project ID
-const currentProjectId = "cleaner-app-1d3ca";
+const currentProjectId = firebaseConfig.projectId;
 try {
   const lastUsedProjectId = localStorage.getItem("last_used_project_id");
   if (lastUsedProjectId !== currentProjectId) {
@@ -632,56 +632,126 @@ async function ensureSeeded(): Promise<void> {
         return;
       }
       
-      console.log("[Firestore Client] Firestore is empty. Seeding initial data across collections...");
+      console.log("[Firestore Client] Firestore is empty. Checking for local database to seed...");
+      
+      let localDbData: any = null;
+      try {
+        const stored = localStorage.getItem("narisops_local_db");
+        if (stored) {
+          localDbData = JSON.parse(stored);
+        }
+      } catch (e) {
+        console.warn("[Firestore Client] Failed to parse local database during seed check:", e);
+      }
+
+      const hasCustomLocalData = localDbData && (
+        (localDbData.task_templates && Object.keys(localDbData.task_templates).length > 0) || 
+        (localDbData.task_instances && Object.keys(localDbData.task_instances).length > 0)
+      );
+
       const seeded = getSeededDB();
-      
-      // 1. Seed users (profiles)
-      for (const p of seeded.profiles) {
-        const profileToSeed = {
-          ...p,
-          password: await normalizePasswordRecord((p as any).password, p.username === "admin" ? "admin123" : "123456")
+
+      if (hasCustomLocalData) {
+        console.log("[Firestore Client] Seeding from friend's local database to prevent duplication or loss of offline additions!");
+        
+        // 1. Seed users (profiles)
+        // Combine seeded default users with any custom local users
+        const usersMap: Record<string, any> = {};
+        for (const p of seeded.profiles) {
+          usersMap[p.id] = p;
+        }
+        if (localDbData.users) {
+          for (const uid of Object.keys(localDbData.users)) {
+            usersMap[uid] = localDbData.users[uid];
+          }
+        }
+        for (const pId of Object.keys(usersMap)) {
+          const profileToSeed = {
+            ...usersMap[pId],
+            password: await normalizePasswordRecord(usersMap[pId].password, usersMap[pId].username === "admin" ? "admin123" : "123456")
+          };
+          await setDoc(doc(db, "users", pId), profileToSeed);
+        }
+
+        // Helper function to seed from local or fallback to default list
+        const seedCollection = async (colName: string, defaultList: any[]) => {
+          const localItems = localDbData[colName] || {};
+          const localKeys = Object.keys(localItems);
+          
+          if (localKeys.length > 0) {
+            console.log(`[Firestore Client] Seeding ${localKeys.length} items from local database for collection: ${colName}`);
+            for (const key of localKeys) {
+              await setDoc(doc(db, colName, key), localItems[key]);
+            }
+          } else {
+            console.log(`[Firestore Client] Local database is empty for ${colName}. Seeding default ${defaultList.length} items.`);
+            for (const item of defaultList) {
+              await setDoc(doc(db, colName, item.id), item);
+            }
+          }
         };
-        await setDoc(doc(db, "users", p.id), profileToSeed);
-      }
-      
-      // 2. Seed locations
-      for (const l of seeded.locations) {
-        await setDoc(doc(db, "locations", l.id), l);
-      }
-      
-      // 3. Seed zones
-      for (const z of seeded.zones) {
-        await setDoc(doc(db, "zones", z.id), z);
-      }
-      
-      // 4. Seed task_templates
-      for (const t of seeded.task_templates) {
-        await setDoc(doc(db, "task_templates", t.id), t);
-      }
-      
-      // 5. Seed task_instances
-      for (const ti of seeded.task_instances) {
-        await setDoc(doc(db, "task_instances", ti.id), ti);
-      }
-      
-      // 6. Seed operational_tasks
-      for (const ot of seeded.operational_tasks) {
-        await setDoc(doc(db, "operational_tasks", ot.id), ot);
-      }
-      
-      // 7. Seed notifications
-      for (const n of seeded.notifications) {
-        await setDoc(doc(db, "notifications", n.id), n);
-      }
-      
-      // 8. Seed device_switches
-      for (const sw of seeded.device_switches) {
-        await setDoc(doc(db, "device_switches", sw.id), sw);
-      }
-      
-      // 9. Seed kpi_snapshots
-      for (const k of seeded.kpi_snapshots) {
-        await setDoc(doc(db, "kpi_snapshots", k.id), k);
+
+        // Seed all collections
+        await seedCollection("locations", seeded.locations);
+        await seedCollection("zones", seeded.zones);
+        await seedCollection("task_templates", seeded.task_templates);
+        await seedCollection("task_instances", seeded.task_instances);
+        await seedCollection("operational_tasks", seeded.operational_tasks);
+        await seedCollection("notifications", seeded.notifications);
+        await seedCollection("device_switches", seeded.device_switches);
+        await seedCollection("kpi_snapshots", seeded.kpi_snapshots);
+
+      } else {
+        console.log("[Firestore Client] No local database found. Seeding initial default data across collections...");
+        
+        // 1. Seed users (profiles)
+        for (const p of seeded.profiles) {
+          const profileToSeed = {
+            ...p,
+            password: await normalizePasswordRecord((p as any).password, p.username === "admin" ? "admin123" : "123456")
+          };
+          await setDoc(doc(db, "users", p.id), profileToSeed);
+        }
+        
+        // 2. Seed locations
+        for (const l of seeded.locations) {
+          await setDoc(doc(db, "locations", l.id), l);
+        }
+        
+        // 3. Seed zones
+        for (const z of seeded.zones) {
+          await setDoc(doc(db, "zones", z.id), z);
+        }
+        
+        // 4. Seed task_templates
+        for (const t of seeded.task_templates) {
+          await setDoc(doc(db, "task_templates", t.id), t);
+        }
+        
+        // 5. Seed task_instances
+        for (const ti of seeded.task_instances) {
+          await setDoc(doc(db, "task_instances", ti.id), ti);
+        }
+        
+        // 6. Seed operational_tasks
+        for (const ot of seeded.operational_tasks) {
+          await setDoc(doc(db, "operational_tasks", ot.id), ot);
+        }
+        
+        // 7. Seed notifications
+        for (const n of seeded.notifications) {
+          await setDoc(doc(db, "notifications", n.id), n);
+        }
+        
+        // 8. Seed device_switches
+        for (const sw of seeded.device_switches) {
+          await setDoc(doc(db, "device_switches", sw.id), sw);
+        }
+        
+        // 9. Seed kpi_snapshots
+        for (const k of seeded.kpi_snapshots) {
+          await setDoc(doc(db, "kpi_snapshots", k.id), k);
+        }
       }
       
       console.log("[Firestore Client] Seeding completed successfully.");
