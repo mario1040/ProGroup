@@ -39,12 +39,14 @@ import {
   getOperationalTasks, 
   getDeviceSwitches, 
   createTask, 
+  updateTask,
   approveTask, 
   rejectTask, 
   saveTemplate, 
   deleteTemplate,
   saveProfile,
   resetDatabase,
+  reseedSopTemplatesAndResetTasks,
   validateDatabase,
   DatabaseValidationReport,
   provisionEmployeeAuth,
@@ -94,6 +96,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   
   const [loading, setLoading] = useState(true);
   const [isResettingDb, setIsResettingDb] = useState(false);
+  const [isReseedingSop, setIsReseedingSop] = useState(false);
   const [confirmResetActive, setConfirmResetActive] = useState(false);
   const [validationReport, setValidationReport] = useState<DatabaseValidationReport | null>(null);
   const [isValidatingDb, setIsValidatingDb] = useState(false);
@@ -416,6 +419,21 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
     }
   };
 
+  // Reassign a specific task instance to a different employee
+  const handleReassignTaskInstance = async (taskId: string, newAssigneeId: string) => {
+    try {
+      setLoading(true);
+      await updateTask(taskId, { assigned_to: newAssigneeId });
+      showToast("تم إعادة تعيين الموظف المسؤول للمهمة بنجاح 👥✅", "success");
+      loadAllData();
+    } catch (err: any) {
+      console.error(err);
+      showToast(err.message || "فشل إعادة تعيين الموظف", "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // Approve completed task action
   const handleApproveClick = async () => {
     if (!reviewingTask) return;
@@ -644,6 +662,22 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       showToast("فشل أثناء تشغيل فحص صحة البيانات", "error");
     } finally {
       setIsValidatingDb(false);
+    }
+  };
+
+  const handleReseedSop = async () => {
+    try {
+      setIsReseedingSop(true);
+      await reseedSopTemplatesAndResetTasks();
+      showToast("تم مسح كافة المهام والمقاييس القديمة، وإعادة إرسال ومزامنة الـ 35 بنداً تشغيلياً كاملاً في الداتابيز بنجاح تام! 🚀✨", "success");
+      await loadAllData();
+      const rep = await validateDatabase();
+      setValidationReport(rep);
+    } catch (err) {
+      console.error(err);
+      showToast("حدث خطأ أثناء إعادة تهيئة ومزامنة بنود الـ SOP", "error");
+    } finally {
+      setIsReseedingSop(false);
     }
   };
 
@@ -1877,7 +1911,18 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                                 )}
                               </td>
                               <td className="p-3 text-slate-600 font-medium">{task.zone?.name || "مقر الشركة"}</td>
-                              <td className="p-3 text-slate-600 font-semibold">{task.assignee?.full_name || "غير محدد"}</td>
+                              <td className="p-3">
+                                <select
+                                  value={task.assigned_to || ""}
+                                  onChange={(e) => handleReassignTaskInstance(task.id, e.target.value)}
+                                  className="p-1.5 text-xs border border-slate-200 rounded-lg bg-white outline-none font-bold text-slate-700 cursor-pointer focus:border-slate-400"
+                                >
+                                  <option value="">غير محدد</option>
+                                  {profiles.filter(p => p.role === "cleaner").map(p => (
+                                    <option key={p.id} value={p.id}>{p.full_name}</option>
+                                  ))}
+                                </select>
+                              </td>
                               <td className="p-3">
                                 <div className="flex flex-col gap-0.5 text-[10px]">
                                   {task.started_at ? (
@@ -2088,8 +2133,29 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                             <h3 className="text-sm font-extrabold text-slate-800 leading-tight">{reviewingTask.title}</h3>
                             <p className="text-xs text-slate-400 mt-1">
                               بالموقع: <span className="text-slate-700 font-semibold">{reviewingTask.zone?.name}</span> • 
-                              منفذ بواسطة: <span className="text-slate-700 font-semibold">{reviewingTask.assignee?.full_name}</span>
+                              منفذ بواسطة: <span className="text-slate-700 font-semibold">{reviewingTask.assignee?.full_name || "غير محدد"}</span>
                             </p>
+                            <div className="mt-2 flex items-center gap-1.5 text-xs">
+                              <span className="text-slate-500 font-bold">إعادة إسناد المهمة:</span>
+                              <select
+                                value={reviewingTask.assigned_to || ""}
+                                onChange={async (e) => {
+                                  const val = e.target.value;
+                                  if (val) {
+                                    await handleReassignTaskInstance(reviewingTask.id, val);
+                                    // Update reviewingTask state to reflect immediately in the UI
+                                    const updatedProfile = profiles.find(p => p.id === val);
+                                    setReviewingTask(prev => prev ? { ...prev, assigned_to: val, assignee: updatedProfile } : null);
+                                  }
+                                }}
+                                className="p-1 border border-slate-200 rounded-lg bg-white text-xs font-bold text-slate-700 focus:outline-none cursor-pointer"
+                              >
+                                <option value="">غير محدد</option>
+                                {profiles.filter(p => p.role === "cleaner").map(p => (
+                                  <option key={p.id} value={p.id}>{p.full_name}</option>
+                                ))}
+                              </select>
+                            </div>
                           </div>
 
                           <div className="text-left flex flex-col items-end gap-1">
@@ -2612,6 +2678,21 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                               </span>
                             ) : (
                               "🔍 تشغيل فحص الداتابيز الشامل"
+                            )}
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={isReseedingSop}
+                            onClick={handleReseedSop}
+                            className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold py-2 px-4 rounded-xl shadow cursor-pointer transition flex items-center gap-1.5"
+                          >
+                            {isReseedingSop ? (
+                              <span className="flex items-center gap-1">
+                                <span className="animate-spin text-white">⏳</span> جاري التهيئة والمزامنة...
+                              </span>
+                            ) : (
+                              "🔄 مسح وإعادة مزامنة الـ 35 مهمة (SOP)"
                             )}
                           </button>
                         </div>

@@ -197,11 +197,15 @@ function initLocalDB() {
         if (!localDB[k]) localDB[k] = {};
       });
 
-      // Clear out the 59 old default templates and their instances if they are present in localStorage to prevent them syncing back
+      // Clear out the old default templates and their instances if they are present in localStorage to prevent them syncing back
+      // But KEEP the new templates that are defined in our seeded DB!
       let localTemplatesChanged = false;
+      const seeded = getSeededDB();
+      const validTemplateIds = new Set(seeded.task_templates.map(t => t.id));
+      
       const tKeys = Object.keys(localDB.task_templates);
       for (const tk of tKeys) {
-        if (tk.startsWith("t_sop_")) {
+        if (tk.startsWith("t_sop_") && !validTemplateIds.has(tk)) {
           delete localDB.task_templates[tk];
           localTemplatesChanged = true;
         }
@@ -210,18 +214,39 @@ function initLocalDB() {
       const tiKeys = Object.keys(localDB.task_instances);
       for (const tik of tiKeys) {
         const ti = localDB.task_instances[tik];
-        if (tik.startsWith("ti_") || (ti && ti.template_id && ti.template_id.startsWith("t_sop_"))) {
+        if (ti && ti.template_id && ti.template_id.startsWith("t_sop_") && !validTemplateIds.has(ti.template_id)) {
           delete localDB.task_instances[tik];
           localTemplatesChanged = true;
         }
       }
+
+      // Ensure all valid seeded templates are present in localDB.task_templates
+      seeded.task_templates.forEach(t => {
+        if (!localDB.task_templates[t.id]) {
+          localDB.task_templates[t.id] = t;
+          localTemplatesChanged = true;
+        }
+      });
+
+      // Auto-recovery for deactivated admin accounts in local storage fallback
+      let localUsersChanged = false;
+      if (localDB.users) {
+        Object.keys(localDB.users).forEach((uid) => {
+          const userObj = localDB.users[uid];
+          if (userObj && userObj.role === "admin" && userObj.is_active === false) {
+            console.log(`[Auto-Recovery] Reactivating local admin account: ${uid}`);
+            userObj.is_active = true;
+            localUsersChanged = true;
+          }
+        });
+      }
       
-      if (localTemplatesChanged) {
-        console.log("[Local DB] Auto-purged old default t_sop_ templates and instances from localStorage.");
+      if (localTemplatesChanged || localUsersChanged) {
+        console.log("[Local DB] Auto-purged old/obsolete templates and/or recovered locked out admin accounts.");
         try {
           localStorage.setItem("narisops_local_db", JSON.stringify(localDB));
         } catch (e) {
-          console.error("[Local DB] Failed to save updated localDB after auto-purge", e);
+          console.error("[Local DB] Failed to save updated localDB after refresh", e);
         }
       }
 
@@ -483,6 +508,40 @@ export async function getDocs(q: any): Promise<any> {
   }
 }
 
+export function syncTaskAcrossCaches(task: any) {
+  if (typeof localStorage === "undefined") return;
+  if (!task || !task.id) return;
+
+  const id = task.id;
+  const newUserId = task.assigned_to;
+
+  const prefix = "naris_cached_tasks_";
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key && key.startsWith(prefix)) {
+      const userId = key.replace(prefix, "");
+      if (userId === "all") {
+        const tasks = getCachedTasks("all");
+        const exists = tasks.some(t => t.id === id);
+        const updated = exists ? tasks.map(t => t.id === id ? { ...t, ...task } : t) : [...tasks, task];
+        saveCachedTasks("all", updated);
+      } else if (newUserId && userId === newUserId) {
+        const tasks = getCachedTasks(newUserId);
+        const exists = tasks.some(t => t.id === id);
+        const updated = exists ? tasks.map(t => t.id === id ? { ...t, ...task } : t) : [...tasks, task];
+        saveCachedTasks(newUserId, updated);
+      } else {
+        const tasks = getCachedTasks(userId);
+        const exists = tasks.some(t => t.id === id);
+        if (exists) {
+          const updated = tasks.filter(t => t.id !== id);
+          saveCachedTasks(userId, updated);
+        }
+      }
+    }
+  }
+}
+
 export async function setDoc(docRef: any, data: any, options?: any) {
   const cleaned = cleanUndefined(data);
   const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
@@ -504,6 +563,18 @@ export async function setDoc(docRef: any, data: any, options?: any) {
     }
   } catch (e) {
     console.warn("[Local DB] Failed to sync setDoc to local storage:", e);
+  }
+
+  // Synchronize local cached tasks lists
+  if (colName === "task_instances" && docId) {
+    try {
+      const fullTask = localDB.task_instances[docId];
+      if (fullTask) {
+        syncTaskAcrossCaches(fullTask);
+      }
+    } catch (e) {
+      console.warn("Failed to sync task cache inside setDoc:", e);
+    }
   }
 
   if (useLocalFallback) {
@@ -535,6 +606,18 @@ export async function updateDoc(docRef: any, data: any) {
     }
   } catch (e) {
     console.warn("[Local DB] Failed to sync updateDoc to local storage:", e);
+  }
+
+  // Synchronize local cached tasks lists
+  if (colName === "task_instances" && docId) {
+    try {
+      const fullTask = localDB.task_instances[docId];
+      if (fullTask) {
+        syncTaskAcrossCaches(fullTask);
+      }
+    } catch (e) {
+      console.warn("Failed to sync task cache inside updateDoc:", e);
+    }
   }
 
   if (useLocalFallback) {
@@ -854,8 +937,70 @@ async function ensureSeeded(): Promise<void> {
         throw err;
       }
 
+      // Ensure the 40 SOP templates are synchronized in Firestore
+      const syncFlagKey = "naris_sop_templates_synced_v34_fix";
+      const isSopTemplatesSynced = localStorage.getItem(syncFlagKey) === "true";
+      if (!isSopTemplatesSynced && !useLocalFallback) {
+        console.log("[SOP Template Engine] Verifying 34 default SOP templates are in Firestore...");
+        try {
+          const seededTemplates = getSeededDB().task_templates;
+          const templatesCol = collection(db, "task_templates");
+          const snap = await getDocs(templatesCol);
+          
+          const existingSopDocIds: string[] = [];
+          snap.forEach((docSnap: any) => {
+            if (docSnap.id.startsWith("t_sop_")) {
+              existingSopDocIds.push(docSnap.id);
+            }
+          });
+
+          const newTemplateIds = new Set(seededTemplates.map(t => t.id));
+          
+          for (const oldId of existingSopDocIds) {
+            if (!newTemplateIds.has(oldId)) {
+              console.log(`[SOP Template Engine] Deleting outdated/obsolete template from Firestore: ${oldId}`);
+              await deleteDoc(doc(db, "task_templates", oldId));
+            }
+          }
+
+          console.log(`[SOP Template Engine] Seeding/updating 34 new SOP templates to Firestore...`);
+          for (const template of seededTemplates) {
+            await setDoc(doc(db, "task_templates", template.id), template);
+          }
+
+          localStorage.setItem(syncFlagKey, "true");
+          console.log("[SOP Template Engine] 34 default SOP templates successfully synchronized to Firestore.");
+          invalidateMetadataCaches();
+        } catch (error) {
+          console.error("[SOP Template Engine] Failed to synchronize SOP templates to Firestore:", error);
+        }
+      }
+
       if (!usersSnap.empty) {
         await deduplicateDatabase();
+
+        // Auto-reactivate any deactivated admin accounts to recover from accidental lockouts
+        try {
+          const reactivatePromises = usersSnap.docs
+            .map(docSnap => {
+              const userData = docSnap.data();
+              if (userData && userData.role === "admin" && userData.is_active === false) {
+                console.log(`[Auto-Recovery] Reactivating admin account ${docSnap.id}...`);
+                const userRef = doc(db, "users", docSnap.id);
+                return setDoc(userRef, { ...userData, is_active: true });
+              }
+              return null;
+            })
+            .filter(Boolean);
+
+          if (reactivatePromises.length > 0) {
+            await Promise.all(reactivatePromises);
+            invalidateMetadataCaches();
+          }
+        } catch (e) {
+          console.warn("[Auto-Recovery] Failed to auto-reactivate admin accounts:", e);
+        }
+
         return;
       }
       
@@ -1403,9 +1548,141 @@ export async function getTemplates(): Promise<TaskTemplate[]> {
   return templates;
 }
 
+export async function pregenerateTaskInstances(tpl: TaskTemplate, daysCount = 30): Promise<void> {
+  console.log(`[Pregenerate] Generating task instances for template ${tpl.id} (${tpl.title}) for next ${daysCount} days...`);
+  try {
+    const profiles = await getProfiles();
+    const zones = await getRawZones();
+    
+    // Get date strings for the next daysCount days (including today)
+    const dates: string[] = [];
+    const baseDate = new Date();
+    for (let i = 0; i < daysCount; i++) {
+      const d = new Date(baseDate);
+      d.setDate(baseDate.getDate() + i);
+      
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      dates.push(`${year}-${month}-${day}`);
+    }
+
+    // Load existing instances for this template in the date range
+    let existingInstances: TaskInstance[] = [];
+    if (useLocalFallback) {
+      existingInstances = Object.values(localDB.task_instances || {}).filter(
+        (ti: any) => ti.template_id === tpl.id && dates.includes(ti.due_date)
+      ) as TaskInstance[];
+    } else {
+      const q = query(
+        collection(db, "task_instances"),
+        where("template_id", "==", tpl.id)
+      );
+      const snap = await getDocs(q);
+      snap.forEach((docSnap: any) => {
+        const data = docSnap.data() as TaskInstance;
+        if (dates.includes(data.due_date)) {
+          existingInstances.push(data);
+        }
+      });
+    }
+
+    for (const dateStr of dates) {
+      const todayDayNameAr = getArabicDayName(dateStr);
+      let runsToday = false;
+      
+      if (tpl.frequency === "يومي") {
+        runsToday = true;
+      } else if (tpl.frequency === "يوم ويوم" || tpl.frequency === "يوم و يوم") {
+        const createdDateStr = tpl.created_at ? tpl.created_at.split("T")[0] : "2026-07-01";
+        const diffDays = getDaysDiff(createdDateStr, dateStr);
+        runsToday = (diffDays % 2 === 0);
+      } else if (tpl.frequency === "أسبوعي") {
+        runsToday = !!(tpl.recurrence_days && tpl.recurrence_days.includes(todayDayNameAr));
+      }
+
+      if (runsToday) {
+        const alreadyExists = existingInstances.some((ti) => ti.due_date === dateStr);
+        if (!alreadyExists) {
+          // Determine assignee
+          let assignedTo = tpl.default_assignee_id || "";
+          
+          if (!assignedTo) {
+            const tplZone = zones.find((z) => z.id === tpl.zone_id);
+            if (tplZone?.responsible_employee_id) {
+              const respEmp = profiles.find((p) => p.id === tplZone.responsible_employee_id && p.is_active);
+              if (respEmp) {
+                assignedTo = respEmp.id;
+              }
+            }
+            
+            if (!assignedTo) {
+              const activeCleaners = profiles.filter((p) => p.is_active && p.role === "cleaner");
+              let workingCleaners = activeCleaners.filter((p) => !p.work_days || p.work_days.includes(todayDayNameAr));
+              
+              if (workingCleaners.length === 0) {
+                workingCleaners = activeCleaners;
+              }
+              
+              if (workingCleaners.length > 0) {
+                let bestCleaner = workingCleaners[0];
+                let minTasks = Infinity;
+                for (const cleaner of workingCleaners) {
+                  const taskCount = existingInstances.filter((ti) => ti.assigned_to === cleaner.id && ti.due_date === dateStr).length;
+                  if (taskCount < minTasks) {
+                    minTasks = taskCount;
+                    bestCleaner = cleaner;
+                  }
+                }
+                assignedTo = bestCleaner.id;
+              } else {
+                const firstActive = profiles.find((p) => p.is_active);
+                assignedTo = firstActive ? firstActive.id : "p2";
+              }
+            }
+          }
+
+          const id = "ti_" + randomHex(8);
+          const newInstance: TaskInstance = {
+            id,
+            template_id: tpl.id,
+            zone_id: tpl.zone_id,
+            assigned_to: assignedTo,
+            assigned_by: "p1",
+            task_type: "recurring",
+            title: tpl.title,
+            description: tpl.description || "",
+            due_date: dateStr,
+            due_time: tpl.scheduled_time || "09:00",
+            status: "pending",
+            supervisor_approved: false,
+            guide_image_url: tpl.guide_image_url || "",
+            reference_image_url: tpl.reference_image_url || "",
+            requires_photo_before: tpl.requires_photo_before ?? true,
+            requires_photo_after: tpl.requires_photo_after ?? true,
+            requires_supervisor_approval: tpl.requires_supervisor_approval ?? true,
+            requires_gps: tpl.requires_gps ?? false,
+            requires_signature: tpl.requires_signature ?? false,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          };
+
+          await setDoc(doc(db, "task_instances", id), newInstance);
+          existingInstances.push(newInstance);
+        }
+      }
+    }
+    console.log(`[Pregenerate] Successfully pre-generated/verified task instances for template ${tpl.id}.`);
+  } catch (err) {
+    console.error("[Pregenerate] Failed to pregenerate task instances:", err);
+  }
+}
+
 export async function saveTemplate(template: Partial<TaskTemplate>): Promise<TaskTemplate> {
   await ensureSeeded();
   let finalTemplate: any;
+  let oldAssigneeId: string | undefined;
+  
   if (!template.id) {
     finalTemplate = {
       ...template,
@@ -1421,9 +1698,61 @@ export async function saveTemplate(template: Partial<TaskTemplate>): Promise<Tas
       handleFirestoreError(error, OperationType.GET, `task_templates/${template.id}`);
     }
     const existing = snap.exists() ? snap.data() : {};
+    oldAssigneeId = existing.default_assignee_id;
     finalTemplate = { ...existing, ...template, updated_at: new Date().toISOString() };
   }
+  
   await setDoc(doc(db, "task_templates", finalTemplate.id), finalTemplate);
+  
+  // 1. Pregenerate task instances for the next 30 days so they exist in the database and show up for employees immediately
+  await pregenerateTaskInstances(finalTemplate, 30);
+  
+  // 2. Sync all template details to any existing future pending task instances
+  if (template.id) {
+    console.log(`[Template Detail Sync] Syncing updated template configurations for ${finalTemplate.title} to future pending task instances...`);
+    try {
+      let existingInstances: TaskInstance[] = [];
+      if (useLocalFallback) {
+        existingInstances = Object.values(localDB.task_instances || {}).filter(
+          (ti: any) => ti.template_id === finalTemplate.id
+        ) as TaskInstance[];
+      } else {
+        const q = query(
+          collection(db, "task_instances"),
+          where("template_id", "==", finalTemplate.id)
+        );
+        const snap = await getDocs(q);
+        snap.forEach((docSnap) => {
+          existingInstances.push(docSnap.data() as TaskInstance);
+        });
+      }
+
+      const todayStr = getLocalDateString();
+      for (const ti of existingInstances) {
+        // Only update tasks that are pending (not started/completed) and are due today or in the future
+        if (ti.due_date >= todayStr && (ti.status === "pending" || !ti.status)) {
+          await setDoc(doc(db, "task_instances", ti.id), {
+            ...ti,
+            title: finalTemplate.title,
+            description: finalTemplate.description || "",
+            guide_image_url: finalTemplate.guide_image_url || "",
+            reference_image_url: finalTemplate.reference_image_url || "",
+            requires_photo_before: finalTemplate.requires_photo_before ?? true,
+            requires_photo_after: finalTemplate.requires_photo_after ?? true,
+            requires_supervisor_approval: finalTemplate.requires_supervisor_approval ?? true,
+            requires_gps: finalTemplate.requires_gps ?? false,
+            requires_signature: finalTemplate.requires_signature ?? false,
+            assigned_to: finalTemplate.default_assignee_id || ti.assigned_to,
+            due_time: finalTemplate.scheduled_time || ti.due_time || "09:00",
+            updated_at: new Date().toISOString()
+          });
+        }
+      }
+    } catch (err) {
+      console.error("[Template Detail Sync] Failed to update future pending instances:", err);
+    }
+  }
+
   invalidateMetadataCaches();
   return finalTemplate as TaskTemplate;
 }
@@ -1481,6 +1810,20 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
   instancesSnap.forEach((docSnap) => {
     instances.push(docSnap.data() as TaskInstance);
   });
+
+  // Load profiles and zones early to support smart "Flexible Auto-Distribution"
+  const profiles = await getProfiles();
+
+  let zonesSnap;
+  try {
+    zonesSnap = await getDocs(collection(db, "zones"));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, "zones");
+  }
+  const zones: Zone[] = [];
+  zonesSnap.forEach((docSnap) => {
+    zones.push(docSnap.data() as Zone);
+  });
   
   // Generate missing recurring tasks for active templates that run today per-template
   const templates = await getTemplates();
@@ -1510,12 +1853,58 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
           console.log(`[Firestore Client] Generating missing recurring SOP tasks for ${todayStr}...`);
           generatedAny = true;
         }
+
+        // Determine assignee (Flexible Auto-Distribution logic)
+        let assignedTo = tpl.default_assignee_id || "";
+        
+        if (!assignedTo) {
+          // 1. Try assigning to the responsible employee for the zone of this template
+          const tplZone = zones.find((z) => z.id === tpl.zone_id);
+          if (tplZone?.responsible_employee_id) {
+            const respEmp = profiles.find((p) => p.id === tplZone.responsible_employee_id && p.is_active);
+            if (respEmp) {
+              assignedTo = respEmp.id;
+            }
+          }
+          
+          // 2. If no zone-specific employee is found, load-balance among active cleaners
+          if (!assignedTo) {
+            const activeCleaners = profiles.filter((p) => p.is_active && p.role === "cleaner");
+            // Filter by cleaners working today based on their work_days
+            let workingCleaners = activeCleaners.filter((p) => !p.work_days || p.work_days.includes(todayDayNameAr));
+            
+            // Fallback to all active cleaners if no cleaner is explicitly scheduled for today
+            if (workingCleaners.length === 0) {
+              workingCleaners = activeCleaners;
+            }
+            
+            if (workingCleaners.length > 0) {
+              // Find the cleaner with the fewest tasks assigned today so far
+              let bestCleaner = workingCleaners[0];
+              let minTasks = Infinity;
+              
+              for (const cleaner of workingCleaners) {
+                const taskCount = instances.filter((ti) => ti.assigned_to === cleaner.id).length;
+                if (taskCount < minTasks) {
+                  minTasks = taskCount;
+                  bestCleaner = cleaner;
+                }
+              }
+              assignedTo = bestCleaner.id;
+            } else {
+              // Final fallback to the first active employee or hardcoded "p2"
+              const firstActive = profiles.find((p) => p.is_active);
+              assignedTo = firstActive ? firstActive.id : "p2";
+            }
+          }
+        }
+
         const id = "ti_" + randomHex(8);
         const newInstance: TaskInstance = {
           id,
           template_id: tpl.id,
           zone_id: tpl.zone_id,
-          assigned_to: tpl.default_assignee_id || "p2",
+          assigned_to: assignedTo,
           assigned_by: "p1",
           task_type: "recurring",
           title: tpl.title,
@@ -1540,19 +1929,6 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
       }
     }
   }
-  
-  let zonesSnap;
-  try {
-    zonesSnap = await getDocs(collection(db, "zones"));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.LIST, "zones");
-  }
-  const zones: Zone[] = [];
-  zonesSnap.forEach((docSnap) => {
-    zones.push(docSnap.data() as Zone);
-  });
-  
-  const profiles = await getProfiles();
   
   return instances.map((ti) => {
     const zone = zones.find((z) => z.id === ti.zone_id);
@@ -1793,16 +2169,8 @@ function handleOfflineUpdate(id: string, updates: Partial<TaskInstance>): TaskIn
   // Save the pending update
   addPendingUpdate(id, updates);
 
-  // Update cached tasks in localStorage
-  if (cachedUserId) {
-    const tasks = getCachedTasks(cachedUserId);
-    const updatedTasks = tasks.map(t => t.id === id ? merged : t);
-    saveCachedTasks(cachedUserId, updatedTasks);
-  } else {
-    const tasks = getCachedTasks("all");
-    const updatedTasks = tasks.map(t => t.id === id ? merged : t);
-    saveCachedTasks("all", updatedTasks);
-  }
+  // Update cached tasks in localStorage across all appropriate user keys
+  syncTaskAcrossCaches(merged);
 
   return merged;
 }
@@ -2394,6 +2762,99 @@ export async function resetDatabase(): Promise<void> {
   await ensureSeeded();
   invalidateMetadataCaches();
   console.log("[Firestore Client] Database cleared and re-seeded successfully.");
+}
+
+export async function reseedSopTemplatesAndResetTasks(): Promise<void> {
+  console.log("[Reseed SOP] Clearing existing templates and tasks...");
+  
+  // 1. Clear caches
+  invalidateMetadataCaches();
+  if (typeof localStorage !== "undefined") {
+    localStorage.removeItem("naris_sop_templates_synced_v34_fix");
+    localStorage.removeItem("naris_sop_templates_synced");
+    try {
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && (key.startsWith("naris_cached_tasks_") || key.startsWith("narisops_cached_") || key.startsWith("naris_ops_"))) {
+          keysToRemove.push(key);
+        }
+      }
+      keysToRemove.forEach((k) => localStorage.removeItem(k));
+    } catch (e) {
+      console.warn("[Reseed SOP] Failed to clear cached keys:", e);
+    }
+  }
+
+  // 2. Clear from memory localDB if using local fallback
+  if (useLocalFallback) {
+    localDB.task_templates = {};
+    localDB.task_instances = {};
+    localDB.zones = {};
+    const seeded = getSeededDB();
+    seeded.task_templates.forEach((t) => {
+      localDB.task_templates[t.id] = t;
+    });
+    seeded.zones.forEach((z) => {
+      localDB.zones[z.id] = z;
+    });
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("narisops_local_db", JSON.stringify(localDB));
+    }
+    console.log("[Local DB] Local templates and zones re-seeded successfully.");
+    return;
+  }
+
+  // 3. Firestore delete and insert
+  try {
+    // A. Delete existing task_instances
+    const instancesCol = firebaseCollection(db, "task_instances");
+    const instancesSnap = await firebaseGetDocs(instancesCol);
+    for (const d of instancesSnap.docs) {
+      await firebaseDeleteDoc(firebaseDoc(db, "task_instances", d.id));
+    }
+    console.log(`[Firestore Client] Cleared ${instancesSnap.size} task instances.`);
+
+    // B. Delete existing task_templates
+    const templatesCol = firebaseCollection(db, "task_templates");
+    const templatesSnap = await firebaseGetDocs(templatesCol);
+    for (const d of templatesSnap.docs) {
+      await firebaseDeleteDoc(firebaseDoc(db, "task_templates", d.id));
+    }
+    console.log(`[Firestore Client] Cleared ${templatesSnap.size} task templates.`);
+
+    // C. Delete existing zones
+    const zonesCol = firebaseCollection(db, "zones");
+    const zonesSnap = await firebaseGetDocs(zonesCol);
+    for (const d of zonesSnap.docs) {
+      await firebaseDeleteDoc(firebaseDoc(db, "zones", d.id));
+    }
+    console.log(`[Firestore Client] Cleared ${zonesSnap.size} zones.`);
+
+    // D. Seed zones and task_templates
+    const seededDB = getSeededDB();
+    const seededZones = seededDB.zones;
+    const seededTemplates = seededDB.task_templates;
+
+    console.log(`[Firestore Client] Inserting ${seededZones.length} clean zones...`);
+    for (const zone of seededZones) {
+      await firebaseSetDoc(firebaseDoc(db, "zones", zone.id), zone);
+    }
+
+    console.log(`[Firestore Client] Inserting ${seededTemplates.length} clean templates...`);
+    for (const template of seededTemplates) {
+      await firebaseSetDoc(firebaseDoc(db, "task_templates", template.id), template);
+    }
+
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("naris_sop_templates_synced_v34_fix", "true");
+    }
+    
+    console.log("[Reseed SOP] Reseed and sync completed successfully!");
+  } catch (err) {
+    console.error("[Reseed SOP] Failed to reseed templates/tasks in Firestore:", err);
+    throw err;
+  }
 }
 
 export interface DatabaseValidationReport {
