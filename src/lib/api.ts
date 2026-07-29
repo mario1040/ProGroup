@@ -233,10 +233,17 @@ function initLocalDB() {
       if (localDB.users) {
         Object.keys(localDB.users).forEach((uid) => {
           const userObj = localDB.users[uid];
-          if (userObj && userObj.role === "admin" && userObj.is_active === false) {
-            console.log(`[Auto-Recovery] Reactivating local admin account: ${uid}`);
-            userObj.is_active = true;
-            localUsersChanged = true;
+          if (userObj && userObj.role === "admin") {
+            if (userObj.is_active === false) {
+              console.log(`[Auto-Recovery] Reactivating local admin account: ${uid}`);
+              userObj.is_active = true;
+              localUsersChanged = true;
+            }
+            if (userObj.username === "admin" && userObj.password !== "admin123" && !userObj.password?.endsWith("admin123")) {
+              console.log(`[Auto-Recovery] Resetting local admin password to admin123`);
+              userObj.password = "admin123";
+              localUsersChanged = true;
+            }
           }
         });
       }
@@ -979,22 +986,41 @@ async function ensureSeeded(): Promise<void> {
       if (!usersSnap.empty) {
         await deduplicateDatabase();
 
-        // Auto-reactivate any deactivated admin accounts to recover from accidental lockouts
+        // Auto-reactivate any deactivated admin accounts and reset admin passwords to admin123 to recover from accidental lockouts
         try {
           const reactivatePromises = usersSnap.docs
-            .map(docSnap => {
+            .map(async docSnap => {
               const userData = docSnap.data();
-              if (userData && userData.role === "admin" && userData.is_active === false) {
-                console.log(`[Auto-Recovery] Reactivating admin account ${docSnap.id}...`);
+              let changed = false;
+              const updatedData = { ...userData };
+
+              if (userData && userData.role === "admin") {
+                if (userData.is_active === false) {
+                  console.log(`[Auto-Recovery] Reactivating admin account ${docSnap.id}...`);
+                  updatedData.is_active = true;
+                  changed = true;
+                }
+
+                if (userData.username === "admin") {
+                  const targetHash = await createPasswordRecord("admin123");
+                  if (userData.password !== targetHash) {
+                    console.log(`[Auto-Recovery] Resetting password for admin account ${docSnap.id} to admin123...`);
+                    updatedData.password = targetHash;
+                    changed = true;
+                  }
+                }
+              }
+
+              if (changed) {
                 const userRef = doc(db, "users", docSnap.id);
-                return setDoc(userRef, { ...userData, is_active: true });
+                await setDoc(userRef, updatedData);
+                return true;
               }
               return null;
-            })
-            .filter(Boolean);
+            });
 
-          if (reactivatePromises.length > 0) {
-            await Promise.all(reactivatePromises);
+          const results = await Promise.all(reactivatePromises);
+          if (results.some(Boolean)) {
             invalidateMetadataCaches();
           }
         } catch (e) {
