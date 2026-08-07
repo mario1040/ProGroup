@@ -387,7 +387,11 @@ function localFilter(items: any[], constraints: any[]): any[] {
 // --- Custom Wrapped Firestore API Layer ---
 
 export function collection(dbInstance: any, path: string): any {
-  const colRef = firebaseCollection(dbInstance, path) as any;
+  const targetDb = dbInstance || db;
+  if (!targetDb) {
+    console.error(`[collection] Both dbInstance and imported db are undefined for path: ${path}`);
+  }
+  const colRef = firebaseCollection(targetDb, path) as any;
   try {
     colRef.__collection_path = path;
   } catch (e) {
@@ -432,7 +436,11 @@ export function doc(...args: any[]): any {
     docId = third;
   }
   
-  const realDocRef = firebaseDoc(args[0], args[1], ...args.slice(2)) as any;
+  const firstArg = typeof first === "string" ? first : (first || db);
+  if (!firstArg) {
+    console.error(`[doc] Both first argument and imported db are undefined for path: ${colPath || second}`);
+  }
+  const realDocRef = firebaseDoc(firstArg, args[1], ...args.slice(2)) as any;
   try {
     realDocRef.__isDocRef = true;
     realDocRef.__collection_path = colPath;
@@ -1636,6 +1644,19 @@ export async function saveZone(zone: Partial<Zone>): Promise<Zone> {
     const existing = snap.exists() ? snap.data() : {};
     finalZone = { ...existing, ...zone };
   }
+  if (finalZone.cover_image_url && finalZone.cover_image_url.startsWith("data:")) {
+    try {
+      console.log(`[saveZone] Auto-uploading local base64 image to Firebase Storage for zone ${finalZone.id}...`);
+      const storagePath = `zones/${finalZone.id}/cover_${Date.now()}.jpg`;
+      const uploadedUrl = await uploadPhoto(finalZone.cover_image_url, storagePath);
+      finalZone.cover_image_url = uploadedUrl;
+      if (typeof localStorage !== "undefined") {
+        localStorage.setItem(`naris_zone_image_${finalZone.id}`, uploadedUrl);
+      }
+    } catch (err) {
+      console.error(`[saveZone] Failed to auto-upload cover image to Firebase Storage:`, err);
+    }
+  }
   await setDoc(doc(db, "zones", finalZone.id), finalZone);
   invalidateMetadataCaches();
   return finalZone as Zone;
@@ -1810,6 +1831,28 @@ export async function saveTemplate(template: Partial<TaskTemplate>): Promise<Tas
     const existing = snap.exists() ? snap.data() : {};
     oldAssigneeId = existing.default_assignee_id;
     finalTemplate = { ...existing, ...template, updated_at: new Date().toISOString() };
+  }
+  
+  if (finalTemplate.guide_image_url && finalTemplate.guide_image_url.startsWith("data:")) {
+    try {
+      console.log(`[saveTemplate] Auto-uploading guide image to Firebase Storage for template ${finalTemplate.id}...`);
+      const storagePath = `templates/guide_${finalTemplate.id}_${Date.now()}.jpg`;
+      const uploadedUrl = await uploadPhoto(finalTemplate.guide_image_url, storagePath);
+      finalTemplate.guide_image_url = uploadedUrl;
+    } catch (err) {
+      console.error(`[saveTemplate] Failed to auto-upload guide image to Firebase Storage:`, err);
+    }
+  }
+
+  if (finalTemplate.reference_image_url && finalTemplate.reference_image_url.startsWith("data:")) {
+    try {
+      console.log(`[saveTemplate] Auto-uploading reference image to Firebase Storage for template ${finalTemplate.id}...`);
+      const storagePath = `templates/ref_${finalTemplate.id}_${Date.now()}.jpg`;
+      const uploadedUrl = await uploadPhoto(finalTemplate.reference_image_url, storagePath);
+      finalTemplate.reference_image_url = uploadedUrl;
+    } catch (err) {
+      console.error(`[saveTemplate] Failed to auto-upload reference image to Firebase Storage:`, err);
+    }
   }
   
   await setDoc(doc(db, "task_templates", finalTemplate.id), finalTemplate);
@@ -2312,6 +2355,28 @@ export async function syncOfflineTasks(): Promise<number> {
           merged.photo_after_uploaded_at = item.updates.photo_after_uploaded_at || new Date().toISOString();
         }
 
+        if (merged.photo_before_url && merged.photo_before_url.startsWith("data:")) {
+          try {
+            console.log(`[Offline Sync] Auto-uploading local before photo to Firebase Storage for task ${item.taskId}...`);
+            const storagePath = `tasks/${item.taskId}/before_${Date.now()}.jpg`;
+            const uploadedUrl = await uploadPhoto(merged.photo_before_url, storagePath);
+            merged.photo_before_url = uploadedUrl;
+          } catch (err) {
+            console.error(`[Offline Sync] Failed to auto-upload photo_before to Firebase Storage:`, err);
+          }
+        }
+
+        if (merged.photo_after_url && merged.photo_after_url.startsWith("data:")) {
+          try {
+            console.log(`[Offline Sync] Auto-uploading local after photo to Firebase Storage for task ${item.taskId}...`);
+            const storagePath = `tasks/${item.taskId}/after_${Date.now()}.jpg`;
+            const uploadedUrl = await uploadPhoto(merged.photo_after_url, storagePath);
+            merged.photo_after_url = uploadedUrl;
+          } catch (err) {
+            console.error(`[Offline Sync] Failed to auto-upload photo_after to Firebase Storage:`, err);
+          }
+        }
+
         await firebaseSetDoc(docRef, cleanUndefined(merged));
         console.log(`[Offline Sync] Successfully synced task ${item.taskId}`);
         removePendingUpdate(item.taskId);
@@ -2447,6 +2512,28 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
       }
     }
     
+    if (merged.photo_before_url && merged.photo_before_url.startsWith("data:")) {
+      try {
+        console.log(`[updateTaskInstance] Auto-uploading local before photo to Firebase Storage for task ${id}...`);
+        const storagePath = `tasks/${id}/before_${Date.now()}.jpg`;
+        const uploadedUrl = await uploadPhoto(merged.photo_before_url, storagePath);
+        merged.photo_before_url = uploadedUrl;
+      } catch (err) {
+        console.error(`[updateTaskInstance] Failed to auto-upload photo_before to Firebase Storage:`, err);
+      }
+    }
+
+    if (merged.photo_after_url && merged.photo_after_url.startsWith("data:")) {
+      try {
+        console.log(`[updateTaskInstance] Auto-uploading local after photo to Firebase Storage for task ${id}...`);
+        const storagePath = `tasks/${id}/after_${Date.now()}.jpg`;
+        const uploadedUrl = await uploadPhoto(merged.photo_after_url, storagePath);
+        merged.photo_after_url = uploadedUrl;
+      } catch (err) {
+        console.error(`[updateTaskInstance] Failed to auto-upload photo_after to Firebase Storage:`, err);
+      }
+    }
+
     try {
       await setDoc(docRef, merged);
     } catch (error) {

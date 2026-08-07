@@ -1,6 +1,6 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
-import { initializeFirestore } from "firebase/firestore";
+import { initializeFirestore, getFirestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 
 // Hardcoded static configuration as a robust fallback to ensure zero runtime file system or download dependencies
@@ -19,7 +19,21 @@ export const firebaseConfig = {
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
 // CRITICAL: Initialize Firestore with custom database ID from config
-export const db = initializeFirestore(app, {}, firebaseConfig.firestoreDatabaseId);
+let dbInstance: any;
+try {
+  dbInstance = initializeFirestore(app, {}, firebaseConfig.firestoreDatabaseId);
+  console.log("[Firebase Init] Firestore initialized via initializeFirestore.");
+} catch (e: any) {
+  console.warn("[Firebase Init] initializeFirestore failed, falling back to getFirestore:", e);
+  try {
+    dbInstance = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+    console.log("[Firebase Init] Firestore obtained via getFirestore fallback.");
+  } catch (err: any) {
+    console.error("[Firebase Init] Critical: getFirestore also failed:", err);
+  }
+}
+
+export const db = dbInstance;
 export const auth = getAuth(app);
 export const storage = getStorage(app);
 
