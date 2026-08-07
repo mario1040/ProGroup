@@ -28,7 +28,8 @@ import {
   Calendar,
   Users,
   Box,
-  Zap
+  Zap,
+  Loader2
 } from "lucide-react";
 import { 
   getTasks, 
@@ -54,7 +55,14 @@ import {
   getLocalDateString,
   getTasksForRange,
   uploadPhoto,
-  compressImage
+  compressImage,
+  recoverAndReconcileLocalData,
+  RecoveryLogItem,
+  saveZone,
+  recoverZoneImagesFromCaches,
+  syncLocalZoneImagesToCloud,
+  ImageRecoveryLogItem,
+  ImageSyncResult
 } from "../lib/api";
 import { Profile, Zone, TaskTemplate, TaskInstance, OperationalTask, DeviceSwitch } from "../types";
 import InventoryManager from "./InventoryManager";
@@ -95,11 +103,22 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   const [deviceSwitches, setDeviceSwitches] = useState<DeviceSwitch[]>([]);
   
   const [loading, setLoading] = useState(true);
+  const [loadingZones, setLoadingZones] = useState(false);
+  const [loadingProfiles, setLoadingProfiles] = useState(false);
+  const [isSavingTemplate, setIsSavingTemplate] = useState(false);
+  const [isSavingTask, setIsSavingTask] = useState(false);
   const [isResettingDb, setIsResettingDb] = useState(false);
   const [isReseedingSop, setIsReseedingSop] = useState(false);
   const [confirmResetActive, setConfirmResetActive] = useState(false);
   const [validationReport, setValidationReport] = useState<DatabaseValidationReport | null>(null);
   const [isValidatingDb, setIsValidatingDb] = useState(false);
+  const [isRecoveringData, setIsRecoveringData] = useState(false);
+  const [recoveryLog, setRecoveryLog] = useState<RecoveryLogItem[] | null>(null);
+  const [isUploadingZoneImg, setIsUploadingZoneImg] = useState(false);
+  const [isRecoveringImages, setIsRecoveringImages] = useState(false);
+  const [imageRecoveryLog, setImageRecoveryLog] = useState<ImageRecoveryLogItem[] | null>(null);
+  const [isSyncingImages, setIsSyncingImages] = useState(false);
+  const [imageSyncLog, setImageSyncLog] = useState<ImageSyncResult[] | null>(null);
   const [useBase64Storage, setUseBase64Storage] = useState<boolean>(() => {
     if (typeof window !== "undefined") {
       const stored = localStorage.getItem("use_base64_storage");
@@ -200,6 +219,8 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   const loadAllData = async () => {
     try {
       setLoading(true);
+      setLoadingZones(true);
+      setLoadingProfiles(true);
       const [allTasks, allProfiles, allZones, allKpis, allTemplates, allOps, allSwitches] = await Promise.all([
         getTasks(selectedDate),
         getProfiles(),
@@ -235,11 +256,15 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       setTemplates(uniqueTemplates);
       setOperationalTasks(allOps);
       setDeviceSwitches(allSwitches);
+      setLoadingZones(false);
+      setLoadingProfiles(false);
     } catch (err) {
       console.error(err);
       showToast("خطأ أثناء تحميل بيانات لوحة التحكم", "error");
     } finally {
       setLoading(false);
+      setLoadingZones(false);
+      setLoadingProfiles(false);
     }
   };
 
@@ -382,6 +407,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
 
     try {
       setLoading(true);
+      setIsSavingTask(true);
       await createTask({
         title: newTaskData.title,
         description: newTaskData.description,
@@ -416,6 +442,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       showToast("حدث خطأ أثناء إسناد المهمة الجديدة", "error");
     } finally {
       setLoading(false);
+      setIsSavingTask(false);
     }
   };
 
@@ -597,6 +624,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
 
     try {
       setLoading(true);
+      setIsSavingTemplate(true);
       await saveTemplate(selectedTemplate);
       showToast("تم حفظ بند معيار SOP الموحد بنجاح ✅", "success");
       setIsSopModalOpen(false);
@@ -607,6 +635,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       showToast("فشل حفظ البند المعياري", "error");
     } finally {
       setLoading(false);
+      setIsSavingTemplate(false);
     }
   };
 
@@ -662,6 +691,120 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       showToast("فشل أثناء تشغيل فحص صحة البيانات", "error");
     } finally {
       setIsValidatingDb(false);
+    }
+  };
+
+  const handleRecoverAndReconcile = async () => {
+    try {
+      setIsRecoveringData(true);
+      const log = await recoverAndReconcileLocalData();
+      setRecoveryLog(log);
+      
+      const restoredZones = log.filter(item => item.type === 'zone' && item.action === 'restored_missing').length;
+      const restoredTasks = log.filter(item => item.type === 'task' && item.action === 'restored_missing').length;
+      const mergedTasks = log.filter(item => item.type === 'task' && item.action === 'merged_updates').length;
+
+      if (restoredZones > 0 || restoredTasks > 0 || mergedTasks > 0) {
+        showToast(
+          `اكتملت المعالجة بنجاح! تم استعادة (${restoredZones}) مناطق و (${restoredTasks}) مهام مفقودة، ودمج (${mergedTasks}) تحديثات لحالات المهام 🛡️✅`,
+          "success"
+        );
+      } else {
+        showToast("جميع البيانات والمناطق متطابقة ومتزامنة بالكامل مع السيرفر! 🟢✨", "success");
+      }
+      
+      loadAllData();
+    } catch (err) {
+      console.error(err);
+      showToast("فشل أثناء تشغيل نظام استرداد ومعالجة البيانات", "error");
+    } finally {
+      setIsRecoveringData(false);
+    }
+  };
+
+  const handleZoneImageUpload = async (zoneId: string, file: File) => {
+    try {
+      setIsUploadingZoneImg(true);
+      showToast("جاري ضغط ومعالجة صورة المكان...", "warning");
+
+      // Convert File to Base64
+      const reader = new FileReader();
+      const base64String = await new Promise<string>((resolve, reject) => {
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = (err) => reject(err);
+        reader.readAsDataURL(file);
+      });
+
+      // Compress image
+      const compressed = await compressImage(base64String, 1000, 1000, 0.7);
+
+      // Upload photo
+      const storagePath = `zones/${zoneId}/cover_${Date.now()}.jpg`;
+      const uploadedUrl = await uploadPhoto(compressed, storagePath);
+
+      // Save updated Zone cover image URL in database
+      await saveZone({
+        id: zoneId,
+        cover_image_url: uploadedUrl
+      });
+
+      // Update states
+      setZones(prev => prev.map(z => z.id === zoneId ? { ...z, cover_image_url: uploadedUrl } : z));
+      if (selectedZoneDetail && selectedZoneDetail.id === zoneId) {
+        setSelectedZoneDetail(prev => prev ? { ...prev, cover_image_url: uploadedUrl } : null);
+      }
+
+      showToast("تم رفع وتحديث صورة المكان وحفظها بنجاح! 📸✨", "success");
+      loadAllData();
+    } catch (err: any) {
+      console.error("[Zone Image Upload]", err);
+      showToast(`فشل في رفع صورة المكان: ${err.message || err}`, "error");
+    } finally {
+      setIsUploadingZoneImg(false);
+    }
+  };
+
+  const handleRecoverZoneImages = async () => {
+    try {
+      setIsRecoveringImages(true);
+      showToast("جاري البحث في جميع سجلات المتصفح وقاعدة البيانات المحلية عن صور الأماكن...", "warning");
+      const log = await recoverZoneImagesFromCaches();
+      setImageRecoveryLog(log);
+      
+      const restoredCount = log.filter(item => item.status === 'restored').length;
+      if (restoredCount > 0) {
+        showToast(`اكتمل الاسترداد! تم استعادة وتصحيح عدد (${restoredCount}) صور للأماكن من سجلات المتصفح بنجاح! 🎉📸`, "success");
+      } else {
+        showToast("فحص المتصفح مكتمل: جميع الصور متطابقة بالفعل ولا توجد صور مفقودة في السجلات المحلية. ✨", "success");
+      }
+      loadAllData();
+    } catch (err: any) {
+      console.error("[Recover Zone Images Error]", err);
+      showToast("فشل أثناء البحث واستعادة صور الأماكن المفقودة", "error");
+    } finally {
+      setIsRecoveringImages(false);
+    }
+  };
+
+  const handleSyncZoneImagesToCloud = async () => {
+    try {
+      setIsSyncingImages(true);
+      showToast("جاري ترحيل ورفع صور الأماكن المحلية ومزامنتها سحابياً...", "warning");
+      const log = await syncLocalZoneImagesToCloud();
+      setImageSyncLog(log);
+      
+      const successCount = log.filter(item => item.status === 'success').length;
+      if (successCount > 0) {
+        showToast(`تمت المزامنة السحابية بنجاح! تم رفع ومزامنة عدد (${successCount}) صور مع السيرفر السحابي لحمايتها بشكل دائم! ☁️✨`, "success");
+      } else {
+        showToast("جميع صور الأماكن الحالية مرفوعة ومؤمنة سحابياً بالفعل! لا توجد صور محلية تحتاج لمزامنة. 🟢", "success");
+      }
+      loadAllData();
+    } catch (err: any) {
+      console.error("[Sync Zone Images Error]", err);
+      showToast("فشل أثناء مزامنة صور الأماكن مع السحابة", "error");
+    } finally {
+      setIsSyncingImages(false);
     }
   };
 
@@ -1467,12 +1610,24 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                           <div
                             key={zone.id}
                             onClick={() => setSelectedZoneDetail(zone)}
-                            className={`border rounded-xl p-4.5 transition duration-200 cursor-pointer flex flex-col justify-between hover:shadow-md ${cardClass}`}
+                            className={`border rounded-xl p-4 transition duration-200 cursor-pointer flex flex-col justify-between hover:shadow-md ${cardClass}`}
                           >
-                            <div className="flex justify-between items-start">
-                              <div>
-                                <span className="text-[9px] text-slate-400 font-bold block">{zone.code || "SOP"} • {zone.floor}</span>
-                                <h4 className="text-xs font-extrabold text-slate-800 mt-0.5">{zone.name}</h4>
+                            <div>
+                              {zone.cover_image_url && (
+                                <div className="w-full h-24 rounded-lg overflow-hidden mb-3 border border-slate-100 shadow-sm">
+                                  <img 
+                                    src={zone.cover_image_url} 
+                                    alt={zone.name} 
+                                    className="w-full h-full object-cover" 
+                                    referrerPolicy="no-referrer"
+                                  />
+                                </div>
+                              )}
+                              <div className="flex justify-between items-start">
+                                <div>
+                                  <span className="text-[9px] text-slate-400 font-bold block">{zone.code || "SOP"} • {zone.floor}</span>
+                                  <h4 className="text-xs font-extrabold text-slate-800 mt-0.5">{zone.name}</h4>
+                                </div>
                               </div>
                             </div>
 
@@ -2726,6 +2881,196 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                         </div>
                       </div>
 
+                      {/* مركز استرداد البيانات والدمج الذكي (Data Recovery & Local Sync Integration Center) */}
+                      <div className="bg-gradient-to-l from-indigo-50/50 to-white border border-indigo-100 p-5 rounded-xl mb-4 shadow-sm text-right">
+                        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                          <div className="flex items-start gap-3">
+                            <div className="bg-indigo-100 p-2.5 rounded-lg text-indigo-700 font-bold text-lg">
+                              🛡️
+                            </div>
+                            <div>
+                              <span className="text-xs font-bold text-slate-800 block">
+                                نظام الاسترداد المتقدم وتدقيق المزامنة المحلية (Data Recovery Engine)
+                              </span>
+                              <span className="text-[11px] text-slate-500 block mt-1 leading-relaxed">
+                                يفحص هذا النظام سجلات وقاعدة بيانات المتصفح المحلية <code className="bg-slate-100 px-1 py-0.5 rounded text-indigo-700 font-mono text-[10px]">IndexedDB/localStorage</code> ويقارنها مع Firestore لاسترجاع أي مهام أو مناطق مفقودة أو متأثرة بضعف اتصال الشبكة، ثم يقوم بإعادة دمجها تلقائياً بدون تكرار!
+                              </span>
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            disabled={isRecoveringData}
+                            onClick={handleRecoverAndReconcile}
+                            className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white text-xs font-bold py-2.5 px-4 rounded-xl shadow cursor-pointer transition flex items-center gap-2 self-end md:self-auto"
+                          >
+                            {isRecoveringData ? (
+                              <>
+                                <Loader2 className="w-4 h-4 animate-spin text-white" />
+                                جاري استيراد وتصحيح البيانات...
+                              </>
+                            ) : (
+                              "🔄 فحص واستعادة السجلات والمناطق المفقودة"
+                            )}
+                          </button>
+                        </div>
+
+                        {recoveryLog && (
+                          <div className="mt-4 border-t border-indigo-100 pt-4 space-y-2">
+                            <h5 className="text-xs font-bold text-indigo-800 mb-2">سجل عمليات المعالجة والاستعادة الأخير:</h5>
+                            {recoveryLog.length === 0 ? (
+                              <p className="text-[11px] text-slate-400 italic">كل البيانات والمناطق والمهام متزامنة بشكل مثالي مع السيرفر. لا توجد تغييرات مفقودة أو معلقة! ✨</p>
+                            ) : (
+                              <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1 text-[11px]">
+                                {recoveryLog.map((logItem, index) => (
+                                  <div
+                                    key={index}
+                                    className={`flex items-start justify-between p-2 rounded-lg border text-right gap-2 ${
+                                      logItem.action === 'restored_missing' 
+                                        ? 'bg-emerald-50/50 border-emerald-100 text-emerald-800'
+                                        : logItem.action === 'merged_updates'
+                                        ? 'bg-blue-50/50 border-blue-100 text-blue-800'
+                                        : 'bg-rose-50/50 border-rose-100 text-rose-800'
+                                    }`}
+                                  >
+                                    <div className="flex-1">
+                                      <div className="flex items-center gap-2 mb-0.5">
+                                        <span className="font-bold">
+                                          [{logItem.type === 'zone' ? 'منطقة تشغيلية' : 'مهمة / SOP'}]
+                                        </span>
+                                        <span className="font-semibold text-slate-800">{logItem.name}</span>
+                                      </div>
+                                      <p className="text-slate-600 text-[10.5px] leading-relaxed">{logItem.details}</p>
+                                    </div>
+                                    <span className="text-[9px] text-slate-400 font-mono shrink-0">
+                                      {new Date(logItem.timestamp).toLocaleTimeString("ar-EG")}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* مركز استرداد ومزامنة صور الأماكن (Zone Image Recovery & Cloud Sync Center) */}
+                      <div className="bg-gradient-to-l from-emerald-50/50 to-white border border-emerald-100 p-5 rounded-xl mb-4 shadow-sm text-right">
+                        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
+                          <div className="flex items-start gap-3">
+                            <div className="bg-emerald-100 p-2.5 rounded-lg text-emerald-700 font-bold text-lg">
+                              🖼️
+                            </div>
+                            <div>
+                              <span className="text-xs font-bold text-slate-800 block">
+                                مركز استرداد ومزامنة صور الأماكن (Zone Image Recovery & Cloud Sync)
+                              </span>
+                              <span className="text-[11px] text-slate-500 block mt-1 leading-relaxed">
+                                يفحص هذا القسم كافة مخازن المتصفح المحلية التاريخية والاحتياطية لاستعادة صور الأماكن التي قمت برفعها يدوياً سابقاً من اللابتوب الخاص بك، ويسمح لك بترحيلها ومزامنتها سحابياً لضمان بقائها متاحة حتى عند مسح كاش المتصفح أو تغيير الجهاز!
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-3 self-end lg:self-auto shrink-0">
+                            <button
+                              type="button"
+                              disabled={isRecoveringImages}
+                              onClick={handleRecoverZoneImages}
+                              className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-300 text-white text-xs font-bold py-2 px-3.5 rounded-xl shadow cursor-pointer transition flex items-center gap-1.5"
+                            >
+                              {isRecoveringImages ? (
+                                <>
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
+                                  جاري فحص الذاكرة...
+                                </>
+                              ) : (
+                                "🔍 البحث واستعادة الصور من الكاش"
+                              )}
+                            </button>
+
+                            <button
+                              type="button"
+                              disabled={isSyncingImages}
+                              onClick={handleSyncZoneImagesToCloud}
+                              className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white text-xs font-bold py-2 px-3.5 rounded-xl shadow cursor-pointer transition flex items-center gap-1.5"
+                            >
+                              {isSyncingImages ? (
+                                <>
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
+                                  جاري الرفع والدمج...
+                                </>
+                              ) : (
+                                "☁️ ترحيل ومزامنة الصور مع السحابة"
+                              )}
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Image Recovery Logs */}
+                        {imageRecoveryLog && (
+                          <div className="mt-4 border-t border-emerald-100 pt-4">
+                            <h5 className="text-xs font-bold text-emerald-800 mb-2">نتائج فحص واستعادة صور الأماكن من كاش المتصفح:</h5>
+                            {imageRecoveryLog.length === 0 ? (
+                              <p className="text-[11px] text-slate-500 bg-slate-50 p-3 rounded-lg border border-slate-100">
+                                🟢 لم يتم العثور على أي صور مفقودة جديدة في مخازن المتصفح الاحتياطية. جميع الأماكن متزامنة ولديها صور مفعّلة بالفعل، أو لم يتم حفظ نسخ محلية احتياطية بعد.
+                              </p>
+                            ) : (
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-48 overflow-y-auto pr-1">
+                                {imageRecoveryLog.map((logItem, idx) => (
+                                  <div key={idx} className="flex items-center gap-2 p-2 bg-emerald-50/50 border border-emerald-100 rounded-lg text-right">
+                                    {logItem.imageUrl && (
+                                      <img 
+                                        src={logItem.imageUrl} 
+                                        alt={logItem.zoneName} 
+                                        className="w-10 h-10 rounded object-cover border border-emerald-200 shrink-0"
+                                        referrerPolicy="no-referrer"
+                                      />
+                                    )}
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-xs font-bold text-emerald-900 truncate">{logItem.zoneName}</p>
+                                      <p className="text-[9px] text-slate-500 truncate">المصدر: مفتاح <code className="bg-emerald-100 text-emerald-800 px-1 py-0.2 rounded font-mono">{logItem.sourceKey}</code></p>
+                                      <span className="inline-block mt-0.5 px-1.5 py-0.2 text-[9px] font-bold bg-emerald-100 text-emerald-800 rounded">تمت استعادة الصورة وحفظها محلياً وبالمزامنة السحابية! ✅</span>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Image Sync Logs */}
+                        {imageSyncLog && (
+                          <div className="mt-4 border-t border-indigo-100 pt-4">
+                            <h5 className="text-xs font-bold text-indigo-800 mb-2">نتائج مزامنة الصور المحلية سحابياً (Cloud Sync Log):</h5>
+                            {imageSyncLog.length === 0 ? (
+                              <p className="text-[11px] text-slate-500 bg-slate-50 p-3 rounded-lg border border-slate-100">
+                                🟢 لا توجد أي صور محلية غير متزامنة (بصيغة base64) في النظام حالياً. جميع صور الأماكن مرفوعة ومؤمنة على سيرفرات جوجل السحابية!
+                              </p>
+                            ) : (
+                              <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                                {imageSyncLog.map((syncItem, idx) => (
+                                  <div 
+                                    key={idx} 
+                                    className={`flex items-start justify-between p-2 rounded-lg border text-right gap-2 text-xs ${
+                                      syncItem.status === 'success' 
+                                        ? 'bg-emerald-50/50 border-emerald-100 text-emerald-800' 
+                                        : 'bg-rose-50/50 border-rose-100 text-rose-800'
+                                    }`}
+                                  >
+                                    <div>
+                                      <span className="font-bold">[{syncItem.zoneName}]</span>
+                                      <p className="text-[10px] mt-0.5">{syncItem.details}</p>
+                                    </div>
+                                    <span className="text-[9px] font-bold px-1.5 py-0.2 bg-white/60 border border-current rounded">
+                                      {syncItem.status === 'success' ? 'نجحت المزامنة ☁️' : 'فشلت المزامنة ⚠️'}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+
                       {/* Validation results section */}
                       {validationReport && (
                         <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-4">
@@ -3495,36 +3840,48 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
 
             <form onSubmit={handleAssignTaskSubmit} className="flex flex-col gap-4 text-xs font-semibold text-slate-700">
               <div className="flex flex-col gap-1">
-                <label>عنوان ووصف المهمة:</label>
+                <label className="flex justify-between items-center">
+                  <span>عنوان ووصف المهمة:</span>
+                  {isSavingTask && <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />}
+                </label>
                 <input
                   type="text"
                   required
+                  disabled={loading || isSavingTask}
                   placeholder="مثال: مسح زجاج الواجهة الرئيسي"
                   value={newTaskData.title}
                   onChange={(e) => setNewTaskData({...newTaskData, title: e.target.value})}
-                  className="p-2.5 border border-slate-200 rounded-lg outline-none"
+                  className="p-2.5 border border-slate-200 rounded-lg outline-none disabled:bg-slate-50 disabled:text-slate-400"
                 />
               </div>
 
               <div className="flex flex-col gap-1">
-                <label>الوصف المفصل والتعليمات:</label>
+                <label className="flex justify-between items-center">
+                  <span>الوصف المفصل والتعليمات:</span>
+                  {isSavingTask && <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />}
+                </label>
                 <textarea
+                  disabled={loading || isSavingTask}
                   placeholder="مثال: يرجى تنظيف بقع الأتربة ومسح المياه الزائدة من السلم"
                   value={newTaskData.description}
                   onChange={(e) => setNewTaskData({...newTaskData, description: e.target.value})}
                   rows={2}
-                  className="p-2 border border-slate-200 rounded-lg outline-none resize-none"
+                  className="p-2 border border-slate-200 rounded-lg outline-none resize-none disabled:bg-slate-50 disabled:text-slate-400"
                 ></textarea>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="flex flex-col gap-1">
-                  <label>الموظف المسؤول:</label>
+                  <label className="flex justify-between items-center">
+                    <span>الموظف المسؤول:</span>
+                    {loadingProfiles && <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />}
+                  </label>
                   <select
                     required
+                    disabled={loading || isSavingTask || loadingProfiles}
                     value={newTaskData.assigned_to}
                     onChange={(e) => setNewTaskData({...newTaskData, assigned_to: e.target.value})}
-                    className="p-2 border border-slate-200 rounded-lg bg-white"
+                    className="p-2 border border-slate-200 rounded-lg bg-white disabled:bg-slate-50 disabled:text-slate-400"
                   >
                     <option value="">اختر الموظف...</option>
                     {profiles.filter(p => p.role === "cleaner").map(p => (
@@ -3534,12 +3891,16 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                 </div>
 
                 <div className="flex flex-col gap-1">
-                  <label>موقع الغرفة / المنطقة:</label>
+                  <label className="flex justify-between items-center">
+                    <span>موقع الغرفة / المنطقة:</span>
+                    {loadingZones && <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />}
+                  </label>
                   <select
                     required
+                    disabled={loading || isSavingTask || loadingZones}
                     value={newTaskData.zone_id}
                     onChange={(e) => setNewTaskData({...newTaskData, zone_id: e.target.value})}
-                    className="p-2 border border-slate-200 rounded-lg bg-white"
+                    className="p-2 border border-slate-200 rounded-lg bg-white disabled:bg-slate-50 disabled:text-slate-400"
                   >
                     <option value="">اختر المنطقة...</option>
                     {zones.map(z => (
@@ -3550,12 +3911,16 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
               </div>
 
               <div className="flex flex-col gap-1">
-                <label>موعد الاستحقاق النهائي اليوم:</label>
+                <label className="flex justify-between items-center">
+                  <span>موعد الاستحقاق النهائي اليوم:</span>
+                  {isSavingTask && <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />}
+                </label>
                 <input
                   type="time"
+                  disabled={loading || isSavingTask}
                   value={newTaskData.due_time}
                   onChange={(e) => setNewTaskData({...newTaskData, due_time: e.target.value})}
-                  className="p-2 border border-slate-200 rounded-lg outline-none"
+                  className="p-2 border border-slate-200 rounded-lg outline-none disabled:bg-slate-50 disabled:text-slate-400"
                 />
               </div>
 
@@ -3565,18 +3930,20 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                   <label className="flex items-center gap-2 cursor-pointer text-slate-700">
                     <input
                       type="checkbox"
+                      disabled={loading || isSavingTask}
                       checked={newTaskData.requires_photo_before}
                       onChange={(e) => setNewTaskData({...newTaskData, requires_photo_before: e.target.checked})}
-                      className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 w-4 h-4 cursor-pointer"
+                      className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 w-4 h-4 cursor-pointer disabled:opacity-50"
                     />
                     <span>صورة قبل البدء 📸</span>
                   </label>
                   <label className="flex items-center gap-2 cursor-pointer text-slate-700">
                     <input
                       type="checkbox"
+                      disabled={loading || isSavingTask}
                       checked={newTaskData.requires_photo_after}
                       onChange={(e) => setNewTaskData({...newTaskData, requires_photo_after: e.target.checked})}
-                      className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 w-4 h-4 cursor-pointer"
+                      className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 w-4 h-4 cursor-pointer disabled:opacity-50"
                     />
                     <span>صورة بعد الانتهاء 📸</span>
                   </label>
@@ -3585,9 +3952,17 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
 
               <button
                 type="submit"
-                className="bg-slate-900 hover:bg-slate-800 text-white font-bold py-3 rounded-xl cursor-pointer transition shadow"
+                disabled={loading || isSavingTask}
+                className="bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white font-bold py-3 rounded-xl cursor-pointer transition shadow flex items-center justify-center gap-2"
               >
-                تأكيد الإسناد وإعلام الموظف ✅
+                {isSavingTask ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin text-white" />
+                    جاري التكليف وحفظ البيانات...
+                  </>
+                ) : (
+                  "تأكيد الإسناد وإعلام الموظف ✅"
+                )}
               </button>
             </form>
           </div>
@@ -3608,60 +3983,80 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
             <form onSubmit={handleSaveSopTemplate} className="flex flex-col gap-3.5 text-xs font-semibold text-slate-700">
               <div className="grid grid-cols-3 gap-3">
                 <div className="flex flex-col gap-1">
-                  <label>رمز البند (كود SOP):</label>
+                  <label className="flex justify-between items-center text-slate-500">
+                    <span>رمز البند (كود SOP):</span>
+                    {isSavingTemplate && <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />}
+                  </label>
                   <input
                     type="text"
                     required
+                    disabled={loading || isSavingTemplate}
                     placeholder="SOP_CLE01"
                     value={selectedTemplate.task_code || ""}
                     onChange={(e) => setSelectedTemplate({...selectedTemplate, task_code: e.target.value})}
-                    className="p-2 border border-slate-200 rounded-lg outline-none"
+                    className="p-2 border border-slate-200 rounded-lg outline-none disabled:bg-slate-50 disabled:text-slate-400"
                   />
                 </div>
 
                 <div className="flex flex-col gap-1 col-span-2">
-                  <label>عنوان البند وموضوع العمل:</label>
+                  <label className="flex justify-between items-center text-slate-500">
+                    <span>عنوان البند وموضوع العمل:</span>
+                    {isSavingTemplate && <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />}
+                  </label>
                   <input
                     type="text"
                     required
+                    disabled={loading || isSavingTemplate}
                     placeholder="مثال: تلميع أثاث صالة الاستقبال"
                     value={selectedTemplate.title || ""}
                     onChange={(e) => setSelectedTemplate({...selectedTemplate, title: e.target.value})}
-                    className="p-2 border border-slate-200 rounded-lg outline-none"
+                    className="p-2 border border-slate-200 rounded-lg outline-none disabled:bg-slate-50 disabled:text-slate-400"
                   />
                 </div>
               </div>
 
               <div className="flex flex-col gap-1">
-                <label>الهدف الرئيسي من البند (SOP Goal):</label>
+                <label className="flex justify-between items-center text-slate-500">
+                  <span>الهدف الرئيسي من البند (SOP Goal):</span>
+                  {isSavingTemplate && <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />}
+                </label>
                 <input
                   type="text"
+                  disabled={loading || isSavingTemplate}
                   placeholder="مثال: الحفاظ على مظهر استقبال نظيف ومشرق وجاذب للزوار"
                   value={selectedTemplate.goal || ""}
                   onChange={(e) => setSelectedTemplate({...selectedTemplate, goal: e.target.value})}
-                  className="p-2 border border-slate-200 rounded-lg outline-none"
+                  className="p-2 border border-slate-200 rounded-lg outline-none disabled:bg-slate-50 disabled:text-slate-400"
                 />
               </div>
 
               <div className="flex flex-col gap-1">
-                <label>التعليمات وخطوات التنفيذ بالتفصيل:</label>
+                <label className="flex justify-between items-center text-slate-500">
+                  <span>التعليمات وخطوات التنفيذ بالتفصيل:</span>
+                  {isSavingTemplate && <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />}
+                </label>
                 <textarea
+                  disabled={loading || isSavingTemplate}
                   placeholder="اكتب الخطوات التفصيلية بدقة..."
                   value={selectedTemplate.description || ""}
                   onChange={(e) => setSelectedTemplate({...selectedTemplate, description: e.target.value})}
                   rows={2}
-                  className="p-2 border border-slate-200 rounded-lg outline-none resize-none"
+                  className="p-2 border border-slate-200 rounded-lg outline-none resize-none disabled:bg-slate-50 disabled:text-slate-400"
                 ></textarea>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="flex flex-col gap-1">
-                  <label>موقع الغرفة / المنطقة المخصصة لها:</label>
+                  <label className="flex justify-between items-center text-slate-500">
+                    <span>موقع الغرفة / المنطقة المخصصة لها:</span>
+                    {loadingZones && <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />}
+                  </label>
                   <select
                     required
+                    disabled={loading || isSavingTemplate || loadingZones}
                     value={selectedTemplate.zone_id || ""}
                     onChange={(e) => setSelectedTemplate({...selectedTemplate, zone_id: e.target.value})}
-                    className="p-2 border border-slate-200 rounded-lg bg-white"
+                    className="p-2 border border-slate-200 rounded-lg bg-white disabled:bg-slate-50 disabled:text-slate-400"
                   >
                     <option value="">اختر المنطقة...</option>
                     {zones.map(z => (
@@ -3671,11 +4066,15 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                 </div>
 
                 <div className="flex flex-col gap-1">
-                  <label>المسؤول الافتراضي (Assignee):</label>
+                  <label className="flex justify-between items-center text-slate-500">
+                    <span>المسؤول الافتراضي (Assignee):</span>
+                    {loadingProfiles && <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />}
+                  </label>
                   <select
+                    disabled={loading || isSavingTemplate || loadingProfiles}
                     value={selectedTemplate.default_assignee_id || ""}
                     onChange={(e) => setSelectedTemplate({...selectedTemplate, default_assignee_id: e.target.value})}
-                    className="p-2 border border-slate-200 rounded-lg bg-white"
+                    className="p-2 border border-slate-200 rounded-lg bg-white disabled:bg-slate-50 disabled:text-slate-400"
                   >
                     <option value="">توزيع تلقائي مرن</option>
                     {profiles.filter(p => p.role === "cleaner").map(p => (
@@ -3687,11 +4086,15 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
 
               <div className="grid grid-cols-3 gap-3">
                 <div className="flex flex-col gap-1">
-                  <label>التصنيف:</label>
+                  <label className="flex justify-between items-center text-slate-500">
+                    <span>التصنيف:</span>
+                    {isSavingTemplate && <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />}
+                  </label>
                   <select
+                    disabled={loading || isSavingTemplate}
                     value={selectedTemplate.category || "نظافة"}
                     onChange={(e) => setSelectedTemplate({...selectedTemplate, category: e.target.value as any})}
-                    className="p-2 border border-slate-200 rounded-lg bg-white"
+                    className="p-2 border border-slate-200 rounded-lg bg-white disabled:bg-slate-50 disabled:text-slate-400"
                   >
                     <option value="نظافة">نظافة</option>
                     <option value="تشغيل">تشغيل</option>
@@ -3703,18 +4106,26 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                 </div>
 
                 <div className="flex flex-col gap-1">
-                  <label>توقيت الجدولة المعتاد:</label>
+                  <label className="flex justify-between items-center text-slate-500">
+                    <span>توقيت الجدولة المعتاد:</span>
+                    {isSavingTemplate && <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />}
+                  </label>
                   <input
                     type="time"
+                    disabled={loading || isSavingTemplate}
                     value={selectedTemplate.scheduled_time || "08:00"}
                     onChange={(e) => setSelectedTemplate({...selectedTemplate, scheduled_time: e.target.value})}
-                    className="p-2 border border-slate-200 rounded-lg outline-none"
+                    className="p-2 border border-slate-200 rounded-lg outline-none disabled:bg-slate-50 disabled:text-slate-400"
                   />
                 </div>
 
                 <div className="flex flex-col gap-1">
-                  <label>التكرار:</label>
+                  <label className="flex justify-between items-center text-slate-500">
+                    <span>التكرار:</span>
+                    {isSavingTemplate && <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />}
+                  </label>
                   <select
+                    disabled={loading || isSavingTemplate}
                     value={selectedTemplate.frequency || "يومي"}
                     onChange={(e) => {
                       const val = e.target.value;
@@ -3725,7 +4136,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                       }
                       setSelectedTemplate(updated);
                     }}
-                    className="p-2 border border-slate-200 rounded-lg bg-white"
+                    className="p-2 border border-slate-200 rounded-lg bg-white disabled:bg-slate-50 disabled:text-slate-400"
                   >
                     <option value="يومي">يومي</option>
                     <option value="يوم ويوم">يوم ويوم (يوم بعد يوم)</option>
@@ -3982,9 +4393,17 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                   )}
                   <button
                     type="submit"
-                    className="flex-1 bg-slate-900 hover:bg-slate-800 text-white font-bold py-3 rounded-xl cursor-pointer transition shadow flex items-center justify-center gap-1.5 text-xs"
+                    disabled={loading || isSavingTemplate}
+                    className="flex-1 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white font-bold py-3 rounded-xl cursor-pointer transition shadow flex items-center justify-center gap-1.5 text-xs"
                   >
-                    حفظ معيار الجودة بالدليل الموحد ✅
+                    {isSavingTemplate ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin text-white" />
+                        جاري حفظ معيار الجودة...
+                      </>
+                    ) : (
+                      "حفظ معيار الجودة بالدليل الموحد ✅"
+                    )}
                   </button>
                 </div>
               )}
@@ -3995,16 +4414,61 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
 
       {/* QUICK ZONE DETAIL VIEW OVERLAY */}
       {selectedZoneDetail && (
-        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 text-right" dir="rtl">
           <div className="bg-white rounded-2xl w-full max-w-md p-5 shadow-2xl flex flex-col gap-4">
             <div className="flex justify-between items-center border-b border-slate-100 pb-2">
-              <div>
+              <button onClick={() => setSelectedZoneDetail(null)} className="text-slate-400 hover:text-slate-600 cursor-pointer order-2">
+                <X className="w-5 h-5" />
+              </button>
+              <div className="order-1 text-right">
                 <span className="text-[9px] text-slate-400 font-bold block">{selectedZoneDetail.code} • {selectedZoneDetail.floor}</span>
                 <h3 className="text-xs font-extrabold text-slate-800">{selectedZoneDetail.name}</h3>
               </div>
-              <button onClick={() => setSelectedZoneDetail(null)} className="text-slate-400 hover:text-slate-600 cursor-pointer">
-                <X className="w-5 h-5" />
-              </button>
+            </div>
+
+            {/* Zone Cover Image / Photo Upload */}
+            <div className="relative w-full h-44 rounded-xl overflow-hidden bg-slate-100 border border-slate-200 group">
+              {selectedZoneDetail.cover_image_url ? (
+                <img 
+                  src={selectedZoneDetail.cover_image_url} 
+                  alt={selectedZoneDetail.name} 
+                  className="w-full h-full object-cover"
+                  referrerPolicy="no-referrer"
+                />
+              ) : (
+                <div className="w-full h-full flex flex-col items-center justify-center text-slate-400 gap-1 p-4 text-center">
+                  <Camera className="w-8 h-8 text-slate-300 animate-pulse" />
+                  <span className="text-[11px] font-bold">لا توجد صورة لهذا المكان حالياً 📸</span>
+                  <span className="text-[9px] text-slate-400">اضغط بالأسفل لرفع صورة مرجعية من لابتوبك</span>
+                </div>
+              )}
+
+              {/* Upload Overlay Button */}
+              <label className="absolute bottom-2 left-2 right-2 bg-slate-900/85 hover:bg-slate-900 text-white p-2 rounded-lg cursor-pointer flex items-center justify-center gap-1.5 text-[10px] font-bold shadow-lg transition duration-150">
+                {isUploadingZoneImg ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
+                    جاري رفع ومعالجة الصورة...
+                  </>
+                ) : (
+                  <>
+                    <Camera className="w-3.5 h-3.5 text-sky-400" />
+                    تحميل وتعيين صورة المكان من اللابتوب 📁
+                  </>
+                )}
+                <input 
+                  type="file" 
+                  accept="image/*" 
+                  disabled={isUploadingZoneImg}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      handleZoneImageUpload(selectedZoneDetail.id, file);
+                    }
+                  }}
+                  className="hidden" 
+                />
+              </label>
             </div>
 
             <div className="flex flex-col gap-3">

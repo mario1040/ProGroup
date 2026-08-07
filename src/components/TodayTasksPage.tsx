@@ -23,6 +23,7 @@ import { getTasks, listenTodayTasks, updateTask, getLocalDateString, deletePhoto
 import { isOnline, getPendingUpdates } from "../lib/offlineManager";
 import PhotoCapture from "./PhotoCapture";
 import ProfessorLogo from "./ProfessorLogo";
+import PhotoSyncIntegrityCenter from "./PhotoSyncIntegrityCenter";
 
 const TaskTimer = ({ task }: { task: TaskInstance & { zone?: Zone; template?: TaskTemplate } }) => {
   const [elapsed, setElapsed] = useState<number>(0);
@@ -74,6 +75,23 @@ const TaskTimer = ({ task }: { task: TaskInstance & { zone?: Zone; template?: Ta
       <Clock className="w-3 h-3" /> جاري التنفيذ: {timeString}
     </span>
   );
+};
+
+export const checkPhotoStatus = (url: string | null | undefined): {
+  status: 'synced' | 'local_base64' | 'not_uploaded';
+  label: string;
+  color: string;
+} => {
+  if (!url) {
+    return { status: 'not_uploaded', label: 'غير مرفوع', color: 'text-slate-400 bg-slate-100 border-slate-200' };
+  }
+  if (url.startsWith('data:image/')) {
+    return { status: 'local_base64', label: 'محفوظ محلياً (Base64) 📱', color: 'text-amber-700 bg-amber-50 border-amber-200' };
+  }
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    return { status: 'synced', label: 'مرفوع ومزامن سحابياً ☁️', color: 'text-emerald-700 bg-emerald-50 border-emerald-200' };
+  }
+  return { status: 'not_uploaded', label: 'غير معروف', color: 'text-slate-400 bg-slate-100 border-slate-200' };
 };
 
 interface TodayTasksPageProps {
@@ -580,6 +598,8 @@ export default function TodayTasksPage({
           </span>
         </div>
 
+        <PhotoSyncIntegrityCenter tasks={tasks} />
+
         {/* Categories / Filter Tabs */}
         <div className="flex gap-1.5 overflow-x-auto pb-3 scrollbar-none px-1">
           {[
@@ -666,13 +686,27 @@ export default function TodayTasksPage({
                   {/* Mandatories Indicators */}
                   <div className="flex gap-2 mt-2">
                     {task.template?.requires_photo_before && (
-                      <span className="text-[9px] font-semibold text-slate-400 bg-slate-100 py-0.5 px-1.5 rounded flex items-center gap-0.5">
-                        <Camera className="w-3 h-3" /> صورة قبل
+                      <span className="text-[9px] font-semibold text-slate-400 bg-slate-100 py-0.5 px-1.5 rounded flex items-center gap-1">
+                        <Camera className="w-3 h-3 text-slate-500" /> صورة قبل
+                        {task.photo_before_url ? (
+                          task.photo_before_url.startsWith("data:") ? (
+                            <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse border border-amber-300" title="محفوظة محلياً مؤقتاً" />
+                          ) : (
+                            <span className="w-2 h-2 rounded-full bg-emerald-500 border border-emerald-300" title="مرفوعة ومضمونة سحابياً" />
+                          )
+                        ) : null}
                       </span>
                     )}
                     {task.template?.requires_photo_after && (
-                      <span className="text-[9px] font-semibold text-slate-400 bg-slate-100 py-0.5 px-1.5 rounded flex items-center gap-0.5">
-                        <Camera className="w-3 h-3" /> صورة بعد
+                      <span className="text-[9px] font-semibold text-slate-400 bg-slate-100 py-0.5 px-1.5 rounded flex items-center gap-1">
+                        <Camera className="w-3 h-3 text-slate-500" /> صورة بعد
+                        {task.photo_after_url ? (
+                          task.photo_after_url.startsWith("data:") ? (
+                            <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse border border-amber-300" title="محفوظة محلياً مؤقتاً" />
+                          ) : (
+                            <span className="w-2 h-2 rounded-full bg-emerald-500 border border-emerald-300" title="مرفوعة ومضمونة سحابياً" />
+                          )
+                        ) : null}
                       </span>
                     )}
                   </div>
@@ -864,6 +898,62 @@ export default function TodayTasksPage({
                       );
                     })()}
                   </div>
+
+                  {/* Employee Uploaded Photos with Sync Status */}
+                  {(selectedTask.photo_before_url || selectedTask.photo_after_url) && (
+                    <div className="flex flex-col gap-3 mt-4 border border-slate-200 rounded-2xl p-4 bg-slate-50/50">
+                      <div className="flex items-center gap-2 pb-2 border-b border-slate-200 justify-between">
+                        <div className="flex items-center gap-2">
+                          <Camera className="w-4 h-4 text-indigo-600" />
+                          <span className="text-xs font-bold text-slate-800">📸 صور إثبات العمل المرفوعة:</span>
+                        </div>
+                        <span className="text-[10px] text-slate-400 font-bold">تم حفظها بشكل دائم في النظام</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        {selectedTask.photo_before_url && (() => {
+                          const status = checkPhotoStatus(selectedTask.photo_before_url);
+                          return (
+                            <div className="flex flex-col gap-1.5 bg-white p-2.5 rounded-xl border border-slate-100 shadow-sm">
+                              <span className="text-[10px] font-bold text-slate-500 block">صورة قبل العمل:</span>
+                              <div className="relative aspect-square rounded-lg overflow-hidden border border-slate-200 bg-slate-100">
+                                <img
+                                  src={selectedTask.photo_before_url}
+                                  alt="Before"
+                                  referrerPolicy="no-referrer"
+                                  onClick={() => setActiveLightboxImage(selectedTask.photo_before_url || null)}
+                                  className="w-full h-full object-cover cursor-pointer hover:scale-105 transition-transform"
+                                />
+                              </div>
+                              <span className={`text-[9px] font-extrabold py-1 px-1.5 rounded-md border text-center ${status.color}`}>
+                                {status.label}
+                              </span>
+                            </div>
+                          );
+                        })()}
+
+                        {selectedTask.photo_after_url && (() => {
+                          const status = checkPhotoStatus(selectedTask.photo_after_url);
+                          return (
+                            <div className="flex flex-col gap-1.5 bg-white p-2.5 rounded-xl border border-slate-100 shadow-sm">
+                              <span className="text-[10px] font-bold text-slate-500 block">صورة بعد العمل:</span>
+                              <div className="relative aspect-square rounded-lg overflow-hidden border border-slate-200 bg-slate-100">
+                                <img
+                                  src={selectedTask.photo_after_url}
+                                  alt="After"
+                                  referrerPolicy="no-referrer"
+                                  onClick={() => setActiveLightboxImage(selectedTask.photo_after_url || null)}
+                                  className="w-full h-full object-cover cursor-pointer hover:scale-105 transition-transform"
+                                />
+                              </div>
+                              <span className={`text-[9px] font-extrabold py-1 px-1.5 rounded-md border text-center ${status.color}`}>
+                                {status.label}
+                              </span>
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    </div>
+                  )}
 
                   {/* If rejected, show why */}
                   {selectedTask.status === "rejected" && selectedTask.supervisor_notes && (

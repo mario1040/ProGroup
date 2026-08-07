@@ -285,6 +285,14 @@ function initLocalDB() {
 function saveLocalDB() {
   try {
     localStorage.setItem("narisops_local_db", JSON.stringify(localDB));
+    if (localDB && localDB.zones) {
+      Object.keys(localDB.zones).forEach(zId => {
+        const zone = localDB.zones[zId];
+        if (zone && zone.cover_image_url) {
+          localStorage.setItem(`naris_zone_image_${zId}`, zone.cover_image_url);
+        }
+      });
+    }
   } catch (e) {
     console.error("[Local DB] Failed to save to localStorage", e);
   }
@@ -1027,6 +1035,82 @@ async function ensureSeeded(): Promise<void> {
           console.warn("[Auto-Recovery] Failed to auto-reactivate admin accounts:", e);
         }
 
+        // AUTO-HEALING: If database has users but other critical collections are empty, seed them!
+        try {
+          const locationsSnap = await getDocs(collection(db, "locations"));
+          if (locationsSnap.empty) {
+            console.log("[Firestore Client] Auto-healing: Locations collection is empty. Seeding defaults...");
+            const seeded = getSeededDB();
+            for (const l of seeded.locations) {
+              await setDoc(doc(db, "locations", l.id), l);
+            }
+          }
+        } catch (e) {
+          console.warn("[Firestore Client] Auto-healing: Failed to check/seed locations:", e);
+        }
+
+        try {
+          const zonesSnap = await getDocs(collection(db, "zones"));
+          const seeded = getSeededDB();
+          const existingZoneIds = new Set<string>();
+          zonesSnap.forEach((docSnap) => {
+            existingZoneIds.add(docSnap.id);
+          });
+
+          let healedCount = 0;
+          for (const z of seeded.zones) {
+            if (!existingZoneIds.has(z.id)) {
+              console.log(`[Firestore Client] Auto-healing missing default zone: ${z.name} (${z.id})`);
+              await setDoc(doc(db, "zones", z.id), z);
+              healedCount++;
+            }
+          }
+          if (healedCount > 0) {
+            console.log(`[Firestore Client] Auto-healed ${healedCount} missing zones.`);
+          }
+        } catch (e) {
+          console.warn("[Firestore Client] Auto-healing: Failed to check/seed zones:", e);
+        }
+
+        try {
+          const switchesSnap = await getDocs(collection(db, "device_switches"));
+          if (switchesSnap.empty) {
+            console.log("[Firestore Client] Auto-healing: Device switches collection is empty. Seeding defaults...");
+            const seeded = getSeededDB();
+            for (const sw of seeded.device_switches) {
+              await setDoc(doc(db, "device_switches", sw.id), sw);
+            }
+          }
+        } catch (e) {
+          console.warn("[Firestore Client] Auto-healing: Failed to check/seed device_switches:", e);
+        }
+
+        try {
+          const opTasksSnap = await getDocs(collection(db, "operational_tasks"));
+          if (opTasksSnap.empty) {
+            console.log("[Firestore Client] Auto-healing: Operational tasks collection is empty. Seeding defaults...");
+            const seeded = getSeededDB();
+            for (const ot of seeded.operational_tasks) {
+              await setDoc(doc(db, "operational_tasks", ot.id), ot);
+            }
+          }
+        } catch (e) {
+          console.warn("[Firestore Client] Auto-healing: Failed to check/seed operational_tasks:", e);
+        }
+
+        try {
+          const templatesSnap = await getDocs(collection(db, "task_templates"));
+          if (templatesSnap.empty) {
+            console.log("[Firestore Client] Auto-healing: Templates collection is empty. Seeding defaults...");
+            const seeded = getSeededDB();
+            for (const t of seeded.task_templates) {
+              await setDoc(doc(db, "task_templates", t.id), t);
+            }
+          }
+        } catch (e) {
+          console.warn("[Firestore Client] Auto-healing: Failed to check/seed task_templates:", e);
+        }
+
         return;
       }
       
@@ -1761,6 +1845,7 @@ export async function saveTemplate(template: Partial<TaskTemplate>): Promise<Tas
             ...ti,
             title: finalTemplate.title,
             description: finalTemplate.description || "",
+            zone_id: finalTemplate.zone_id,
             guide_image_url: finalTemplate.guide_image_url || "",
             reference_image_url: finalTemplate.reference_image_url || "",
             requires_photo_before: finalTemplate.requires_photo_before ?? true,
@@ -2122,7 +2207,7 @@ export async function createTask(task: Partial<TaskInstance>): Promise<TaskInsta
   const id = "ti_" + randomHex(8);
   const newInstance: TaskInstance = {
     id,
-    zone_id: task.zone_id || "z1",
+    zone_id: (task.zone_id && task.zone_id !== "z1") ? task.zone_id : "z_reception",
     template_id: task.template_id || null,
     assigned_to: task.assigned_to || "p2",
     assigned_by: task.assigned_by || "p1",
@@ -2758,6 +2843,23 @@ export async function resetDatabase(): Promise<void> {
     return;
   }
 
+  // 1. Backup existing zone cover images if any
+  const zoneImageBackup: Record<string, string> = {};
+  if (!useLocalFallback) {
+    try {
+      const zonesCol = collection(db, "zones");
+      const snap = await getDocs(zonesCol);
+      snap.forEach(docSnap => {
+        const data = docSnap.data();
+        if (data && data.cover_image_url) {
+          zoneImageBackup[docSnap.id] = data.cover_image_url;
+        }
+      });
+    } catch (e) {
+      console.warn("[Reset Database] Failed to backup zone cover images:", e);
+    }
+  }
+
   const collectionsToClear = [
     "users",
     "locations",
@@ -2786,6 +2888,23 @@ export async function resetDatabase(): Promise<void> {
   // Clear seeding promise and re-seed clean, compliant templates
   clearSeedingPromise();
   await ensureSeeded();
+
+  // Restore backed up zone cover images
+  if (Object.keys(zoneImageBackup).length > 0 && !useLocalFallback) {
+    console.log("[Reset Database] Restoring backed up zone cover images...");
+    for (const zId of Object.keys(zoneImageBackup)) {
+      try {
+        const docRef = doc(db, "zones", zId);
+        const zDoc = await getDoc(docRef);
+        if (zDoc.exists()) {
+          await setDoc(docRef, { ...zDoc.data(), cover_image_url: zoneImageBackup[zId] });
+        }
+      } catch (e) {
+        console.error(`[Reset Database] Failed to restore cover image for zone ${zId}:`, e);
+      }
+    }
+  }
+
   invalidateMetadataCaches();
   console.log("[Firestore Client] Database cleared and re-seeded successfully.");
 }
@@ -2814,6 +2933,13 @@ export async function reseedSopTemplatesAndResetTasks(): Promise<void> {
 
   // 2. Clear from memory localDB if using local fallback
   if (useLocalFallback) {
+    const existingZoneImages: Record<string, string> = {};
+    Object.keys(localDB.zones).forEach(zId => {
+      if (localDB.zones[zId]?.cover_image_url) {
+        existingZoneImages[zId] = localDB.zones[zId].cover_image_url;
+      }
+    });
+
     localDB.task_templates = {};
     localDB.task_instances = {};
     localDB.zones = {};
@@ -2822,17 +2948,33 @@ export async function reseedSopTemplatesAndResetTasks(): Promise<void> {
       localDB.task_templates[t.id] = t;
     });
     seeded.zones.forEach((z) => {
-      localDB.zones[z.id] = z;
+      const restoredUrl = existingZoneImages[z.id] || z.cover_image_url || "";
+      localDB.zones[z.id] = { ...z, cover_image_url: restoredUrl };
     });
     if (typeof localStorage !== "undefined") {
       localStorage.setItem("narisops_local_db", JSON.stringify(localDB));
     }
-    console.log("[Local DB] Local templates and zones re-seeded successfully.");
+    console.log("[Local DB] Local templates and zones re-seeded successfully with preserved images.");
     return;
   }
 
   // 3. Firestore delete and insert
   try {
+    // Backup existing zone cover images if any before clearing
+    const zoneImageBackup: Record<string, string> = {};
+    try {
+      const zonesCol = firebaseCollection(db, "zones");
+      const snap = await firebaseGetDocs(zonesCol);
+      snap.forEach(docSnap => {
+        const data = docSnap.data();
+        if (data && data.cover_image_url) {
+          zoneImageBackup[docSnap.id] = data.cover_image_url;
+        }
+      });
+    } catch (e) {
+      console.warn("[Reseed SOP] Failed to backup zone cover images before clearing:", e);
+    }
+
     // A. Delete existing task_instances
     const instancesCol = firebaseCollection(db, "task_instances");
     const instancesSnap = await firebaseGetDocs(instancesCol);
@@ -2862,9 +3004,11 @@ export async function reseedSopTemplatesAndResetTasks(): Promise<void> {
     const seededZones = seededDB.zones;
     const seededTemplates = seededDB.task_templates;
 
-    console.log(`[Firestore Client] Inserting ${seededZones.length} clean zones...`);
+    console.log(`[Firestore Client] Inserting ${seededZones.length} clean zones with restored images if any...`);
     for (const zone of seededZones) {
-      await firebaseSetDoc(firebaseDoc(db, "zones", zone.id), zone);
+      const restoredUrl = zoneImageBackup[zone.id] || zone.cover_image_url || "";
+      const updatedZone = { ...zone, cover_image_url: restoredUrl };
+      await firebaseSetDoc(firebaseDoc(db, "zones", zone.id), updatedZone);
     }
 
     console.log(`[Firestore Client] Inserting ${seededTemplates.length} clean templates...`);
@@ -3090,4 +3234,402 @@ export async function validateDatabase(): Promise<DatabaseValidationReport> {
   }
 
   return report;
+}
+
+export interface RecoveryLogItem {
+  id: string;
+  type: "zone" | "task";
+  name: string;
+  action: "restored_missing" | "merged_updates" | "no_change_needed" | "error";
+  details: string;
+  timestamp: string;
+}
+
+export async function recoverAndReconcileLocalData(): Promise<RecoveryLogItem[]> {
+  const log: RecoveryLogItem[] = [];
+  const nowStr = new Date().toISOString();
+
+  try {
+    console.log("[Data Recovery] Querying Firestore for existing zones...");
+    const zonesSnap = await getDocs(collection(db, "zones"));
+    const existingZoneIds = new Set<string>();
+    const existingZones: Record<string, any> = {};
+    zonesSnap.forEach(docSnap => {
+      existingZoneIds.add(docSnap.id);
+      existingZones[docSnap.id] = docSnap.data();
+    });
+
+    const localZonesMap: Record<string, any> = {};
+    
+    // Seeded zones defaults
+    const seeded = getSeededDB();
+    seeded.zones.forEach(z => {
+      localZonesMap[z.id] = z;
+    });
+
+    // Merge zones from localDB
+    if (localDB && localDB.zones) {
+      Object.keys(localDB.zones).forEach(id => {
+        localZonesMap[id] = { ...localZonesMap[id], ...localDB.zones[id] };
+      });
+    }
+
+    // Process zone restoration
+    for (const [zoneId, zone] of Object.entries(localZonesMap)) {
+      if (!existingZoneIds.has(zoneId)) {
+        try {
+          await setDoc(doc(db, "zones", zoneId), zone);
+          if (localDB && localDB.zones) {
+            localDB.zones[zoneId] = zone;
+          }
+          log.push({
+            id: zoneId,
+            type: "zone",
+            name: zone.name || zoneId,
+            action: "restored_missing",
+            details: `تم استعادة المنطقة '${zone.name || zoneId}' إلى السيرفر بنجاح للتصحيح التلقائي.`,
+            timestamp: nowStr
+          });
+        } catch (err: any) {
+          log.push({
+            id: zoneId,
+            type: "zone",
+            name: zone.name || zoneId,
+            action: "error",
+            details: `فشل استعادة المنطقة: ${err.message || err}`,
+            timestamp: nowStr
+          });
+        }
+      } else {
+        const serverZone = existingZones[zoneId];
+        if (!serverZone.name || !serverZone.id) {
+          try {
+            await setDoc(doc(db, "zones", zoneId), zone);
+            log.push({
+              id: zoneId,
+              type: "zone",
+              name: zone.name || zoneId,
+              action: "merged_updates",
+              details: "تم دمج ومعالجة الحقول غير المكتملة للمنطقة على السيرفر.",
+              timestamp: nowStr
+            });
+          } catch (err: any) {
+            console.error(`Failed to repair zone ${zoneId}`, err);
+          }
+        }
+      }
+    }
+
+    // Task Reconciliation
+    console.log("[Data Recovery] Querying Firestore for existing task instances...");
+    const taskInstancesSnap = await getDocs(collection(db, "task_instances"));
+    const existingTaskIds = new Set<string>();
+    const existingTasks: Record<string, any> = {};
+    taskInstancesSnap.forEach(docSnap => {
+      existingTaskIds.add(docSnap.id);
+      existingTasks[docSnap.id] = docSnap.data();
+    });
+
+    const localTasksMap: Record<string, any> = {};
+
+    if (localDB && localDB.task_instances) {
+      Object.keys(localDB.task_instances).forEach(id => {
+        localTasksMap[id] = localDB.task_instances[id];
+      });
+    }
+
+    if (typeof localStorage !== "undefined") {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith("naris_cached_tasks_")) {
+          try {
+            const dataStr = localStorage.getItem(key);
+            if (dataStr) {
+              const parsedTasks = JSON.parse(dataStr);
+              if (Array.isArray(parsedTasks)) {
+                parsedTasks.forEach(task => {
+                  if (task && task.id) {
+                    const existingLocal = localTasksMap[task.id];
+                    if (!existingLocal || (task.updated_at && (!existingLocal.updated_at || task.updated_at > existingLocal.updated_at))) {
+                      localTasksMap[task.id] = task;
+                    }
+                  }
+                });
+              }
+            }
+          } catch (err) {
+            console.warn("Failed parsing cached task key during recovery:", key, err);
+          }
+        }
+      }
+    }
+
+    for (const [taskId, localTask] of Object.entries(localTasksMap)) {
+      if (!existingTaskIds.has(taskId)) {
+        try {
+          await setDoc(doc(db, "task_instances", taskId), localTask);
+          if (localDB && localDB.task_instances) {
+            localDB.task_instances[taskId] = localTask;
+          }
+          log.push({
+            id: taskId,
+            type: "task",
+            name: localTask.title || taskId,
+            action: "restored_missing",
+            details: `تم العثور على مهمة محلية مفقودة على السيرفر (حالة: ${localTask.status}). تم رفعها واستعادتها بالكامل.`,
+            timestamp: nowStr
+          });
+        } catch (err: any) {
+          log.push({
+            id: taskId,
+            type: "task",
+            name: localTask.title || taskId,
+            action: "error",
+            details: `فشل إعادة مزامنة المهمة المفقودة: ${err.message || err}`,
+            timestamp: nowStr
+          });
+        }
+      } else {
+        const serverTask = existingTasks[taskId];
+        const isLocalCompleted = localTask.status === "completed" && serverTask.status !== "completed";
+        const isLocalInProgress = localTask.status === "in_progress" && serverTask.status === "pending";
+        const isLocalNewer = localTask.updated_at && serverTask.updated_at && localTask.updated_at > serverTask.updated_at;
+
+        if (isLocalCompleted || isLocalInProgress || isLocalNewer) {
+          try {
+            const mergedTask = {
+              ...serverTask,
+              ...localTask,
+              updated_at: nowStr
+            };
+            await setDoc(doc(db, "task_instances", taskId), mergedTask);
+            if (localDB && localDB.task_instances) {
+              localDB.task_instances[taskId] = mergedTask;
+            }
+            log.push({
+              id: taskId,
+              type: "task",
+              name: localTask.title || taskId,
+              action: "merged_updates",
+              details: `تم دمج تحديثات محلية أحدث لحالة المهمة بنجاح (الحالة المحلية: ${localTask.status}).`,
+              timestamp: nowStr
+            });
+          } catch (err: any) {
+            log.push({
+              id: taskId,
+              type: "task",
+              name: localTask.title || taskId,
+              action: "error",
+              details: `فشل دمج تحديثات المهمة: ${err.message || err}`,
+              timestamp: nowStr
+            });
+          }
+        }
+      }
+    }
+
+    if (typeof localStorage !== "undefined" && localDB) {
+      localStorage.setItem("narisops_local_db", JSON.stringify(localDB));
+    }
+
+    await syncOfflineTasks();
+
+  } catch (err: any) {
+    console.error("[Data Recovery] Fatal error during reconciliation:", err);
+    log.push({
+      id: "fatal_system",
+      type: "task",
+      name: "محرك المعالجة التلقائية",
+      action: "error",
+      details: `حدث خطأ عام غير متوقع أثناء الفحص والاستعادة: ${err.message || err}`,
+      timestamp: nowStr
+    });
+  }
+
+  return log;
+}
+
+export interface ImageRecoveryLogItem {
+  id: string;
+  zoneName: string;
+  sourceKey: string;
+  imageUrl: string;
+  status: "restored" | "already_exists" | "skipped";
+}
+
+export async function recoverZoneImagesFromCaches(): Promise<ImageRecoveryLogItem[]> {
+  const recovered: ImageRecoveryLogItem[] = [];
+  if (typeof localStorage === "undefined") return recovered;
+
+  const seeded = getSeededDB();
+  const zoneIds = seeded.zones.map(z => z.id);
+  const zoneNames = seeded.zones.reduce((acc, z) => ({ ...acc, [z.id]: z.name }), {} as Record<string, string>);
+
+  initLocalDB();
+  const activeZones = { ...localDB.zones };
+
+  let firestoreZones: Record<string, any> = {};
+  if (!useLocalFallback) {
+    try {
+      const snap = await getDocs(collection(db, "zones"));
+      snap.forEach(docSnap => {
+        firestoreZones[docSnap.id] = docSnap.data();
+      });
+    } catch (e) {
+      console.warn("Could not load firestore zones during image recovery:", e);
+    }
+  }
+
+  const saveRecovered = async (zId: string, imgUrl: string, keyName: string) => {
+    if (!localDB.zones[zId]) {
+      localDB.zones[zId] = { id: zId, ...getSeededDB().zones.find(z => z.id === zId) };
+    }
+    localDB.zones[zId].cover_image_url = imgUrl;
+    saveLocalDB();
+
+    if (!useLocalFallback) {
+      try {
+        const docRef = doc(db, "zones", zId);
+        const activeSnap = await getDoc(docRef);
+        const activeData = activeSnap.exists() ? activeSnap.data() : { id: zId, ...getSeededDB().zones.find(z => z.id === zId) };
+        await setDoc(docRef, { ...activeData, cover_image_url: imgUrl });
+      } catch (err) {
+        console.warn(`[Image Recovery] Failed to sync recovered image for ${zId} to Firestore:`, err);
+      }
+    }
+
+    recovered.push({
+      id: zId,
+      zoneName: zoneNames[zId] || zId,
+      sourceKey: keyName,
+      imageUrl: imgUrl,
+      status: "restored"
+    });
+
+    activeZones[zId] = { ...activeZones[zId], cover_image_url: imgUrl };
+    firestoreZones[zId] = { ...firestoreZones[zId], cover_image_url: imgUrl };
+  };
+
+  // 1. Scan localStorage for any JSON value that looks like our database structures or custom templates containing cover_image_url
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (!key) continue;
+    if (key === "naris_ops_session" || key === "naris_ops_user") continue;
+
+    try {
+      const value = localStorage.getItem(key);
+      if (!value) continue;
+
+      if (value.startsWith("{") || value.startsWith("[")) {
+        const parsed = JSON.parse(value);
+        
+        const searchInObject = async (obj: any, keyName: string) => {
+          if (!obj || typeof obj !== "object") return;
+
+          if (obj.id && zoneIds.includes(obj.id) && obj.cover_image_url) {
+            const zId = obj.id;
+            const imgUrl = obj.cover_image_url;
+            const currentActiveImg = activeZones[zId]?.cover_image_url || firestoreZones[zId]?.cover_image_url || "";
+            if (!currentActiveImg && imgUrl) {
+              await saveRecovered(zId, imgUrl, keyName);
+            }
+          }
+
+          if (obj.zones && typeof obj.zones === "object") {
+            for (const zId of Object.keys(obj.zones)) {
+              if (zoneIds.includes(zId) && obj.zones[zId]?.cover_image_url) {
+                const imgUrl = obj.zones[zId].cover_image_url;
+                const currentActiveImg = activeZones[zId]?.cover_image_url || firestoreZones[zId]?.cover_image_url || "";
+                if (!currentActiveImg && imgUrl) {
+                  await saveRecovered(zId, imgUrl, keyName);
+                }
+              }
+            }
+          }
+
+          for (const k of Object.keys(obj)) {
+            if (obj[k] && typeof obj[k] === "object") {
+              await searchInObject(obj[k], keyName);
+            }
+          }
+        };
+
+        await searchInObject(parsed, key);
+      }
+    } catch (err) {
+      // Ignore parse/traversal errors
+    }
+  }
+
+  // 2. Scan for specific standalone zone image backups
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key && key.startsWith("naris_zone_image_")) {
+      const zId = key.replace("naris_zone_image_", "");
+      if (zoneIds.includes(zId)) {
+        const imgUrl = localStorage.getItem(key);
+        if (imgUrl) {
+          const currentActiveImg = activeZones[zId]?.cover_image_url || firestoreZones[zId]?.cover_image_url || "";
+          if (!currentActiveImg) {
+            await saveRecovered(zId, imgUrl, key);
+          }
+        }
+      }
+    }
+  }
+
+  return recovered;
+}
+
+export interface ImageSyncResult {
+  id: string;
+  zoneName: string;
+  status: "success" | "skipped" | "error";
+  details: string;
+}
+
+export async function syncLocalZoneImagesToCloud(): Promise<ImageSyncResult[]> {
+  const results: ImageSyncResult[] = [];
+  initLocalDB();
+
+  const seeded = getSeededDB();
+  const zoneNames = seeded.zones.reduce((acc, z) => ({ ...acc, [z.id]: z.name }), {} as Record<string, string>);
+
+  const localZones = { ...localDB.zones };
+
+  for (const zId of Object.keys(localZones)) {
+    const zone = localZones[zId];
+    if (zone && zone.cover_image_url && zone.cover_image_url.startsWith("data:image/")) {
+      try {
+        console.log(`[Image Sync] Syncing local base64 image for zone ${zId} to Cloud Storage...`);
+        const storagePath = `zones/${zId}/cover_synced_${Date.now()}.jpg`;
+        const uploadedUrl = await uploadPhoto(zone.cover_image_url, storagePath);
+
+        zone.cover_image_url = uploadedUrl;
+        await saveZone({
+          id: zId,
+          cover_image_url: uploadedUrl
+        });
+
+        localStorage.setItem(`naris_zone_image_${zId}`, uploadedUrl);
+
+        results.push({
+          id: zId,
+          zoneName: zoneNames[zId] || zone.name || zId,
+          status: "success",
+          details: "تم رفع الصورة وضغطها وتعيين رابطها السحابي الدائم بنجاح بنسبة 100%."
+        });
+      } catch (err: any) {
+        console.error(`[Image Sync] Failed to sync zone ${zId} cover image:`, err);
+        results.push({
+          id: zId,
+          zoneName: zoneNames[zId] || zone.name || zId,
+          status: "error",
+          details: `فشل الرفع السحابي: ${err.message || err}`
+        });
+      }
+    }
+  }
+
+  return results;
 }
