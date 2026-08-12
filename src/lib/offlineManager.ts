@@ -172,15 +172,147 @@ if (typeof window !== "undefined" && typeof localStorage !== "undefined") {
   migrateSchema();
 }
 
+export function pruneStorageData(): void {
+  if (typeof localStorage === "undefined") return;
+  console.log("[Storage Pruner] Running proactive cleanup of localStorage...");
+
+  try {
+    const twoDaysAgo = new Date();
+    twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
+    const twoDaysAgoStr = twoDaysAgo.toISOString().split("T")[0]; // YYYY-MM-DD
+
+    // 1. Get pending update task IDs so we NEVER delete tasks that are waiting to sync
+    const pendingUpdates = getPendingUpdates();
+    const pendingTaskIds = new Set(pendingUpdates.map(item => item.taskId));
+
+    // 2. Prune cached tasks lists (naris_cached_tasks_*)
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(TASKS_CACHE_PREFIX)) {
+        try {
+          const raw = localStorage.getItem(key);
+          if (raw) {
+            const tasks = JSON.parse(raw);
+            if (Array.isArray(tasks)) {
+              let changed = false;
+              const filtered = tasks.filter((task: any) => {
+                if (!task || !task.id) return false;
+                
+                // If the task has a base64 image but no pending sync updates, we can strip the base64 to save major space
+                if (!pendingTaskIds.has(task.id)) {
+                  if (task.photo_before_url && task.photo_before_url.startsWith("data:")) {
+                    task.photo_before_url = "";
+                    changed = true;
+                  }
+                  if (task.photo_after_url && task.photo_after_url.startsWith("data:")) {
+                    task.photo_after_url = "";
+                    changed = true;
+                  }
+                }
+
+                // Delete completed/approved/rejected tasks older than 2 days
+                if (task.status === "completed" || task.status === "supervisor_approved" || task.status === "rejected") {
+                  if (pendingTaskIds.has(task.id)) return true;
+                  if (task.due_date && task.due_date < twoDaysAgoStr) {
+                    changed = true;
+                    return false;
+                  }
+                }
+                return true;
+              });
+
+              if (changed) {
+                localStorage.setItem(key, JSON.stringify(filtered));
+                console.log(`[Storage Pruner] Pruned cached tasks for key: ${key}`);
+              }
+            }
+          }
+        } catch (err) {
+          console.error(`[Storage Pruner] Error pruning cache for key ${key}:`, err);
+        }
+      }
+    }
+
+    // 3. Clear any leftover huge base64 zone images if they are not active zones
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith("naris_zone_image_")) {
+        const val = localStorage.getItem(key);
+        if (val && val.startsWith("data:image/") && val.length > 50000) {
+          localStorage.removeItem(key);
+          console.log(`[Storage Pruner] Removed large base64 zone image key: ${key}`);
+        }
+      }
+    }
+
+  } catch (e) {
+    console.error("[Storage Pruner] Error during general pruning:", e);
+  }
+}
+
 // ==========================================
 // LOCAL STORAGE GETTERS & SETTERS
 // ==========================================
 
 export function saveCachedTasks(userId: string, tasks: any[]): void {
   try {
-    localStorage.setItem(`${TASKS_CACHE_PREFIX}${userId}`, JSON.stringify(tasks));
+    const twoDaysAgo = new Date();
+    twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
+    const twoDaysAgoStr = twoDaysAgo.toISOString().split("T")[0]; // YYYY-MM-DD
+
+    const pendingUpdates = getPendingUpdates();
+    const pendingTaskIds = new Set(pendingUpdates.map(item => item.taskId));
+
+    const prunedTasks = tasks.filter((task: any) => {
+      if (!task || !task.id) return false;
+
+      // Strip base64 URLs of synced/unpending tasks
+      if (!pendingTaskIds.has(task.id)) {
+        if (task.photo_before_url && task.photo_before_url.startsWith("data:")) {
+          task.photo_before_url = "";
+        }
+        if (task.photo_after_url && task.photo_after_url.startsWith("data:")) {
+          task.photo_after_url = "";
+        }
+      }
+
+      // Filter out completed tasks older than 2 days
+      if (task.status === "completed" || task.status === "supervisor_approved" || task.status === "rejected") {
+        if (pendingTaskIds.has(task.id)) return true;
+        if (task.due_date && task.due_date < twoDaysAgoStr) {
+          return false;
+        }
+      }
+      return true;
+    });
+
+    // Limit total cached completed tasks to 50
+    const pendingTasks = prunedTasks.filter(t => !(t.status === "completed" || t.status === "supervisor_approved" || t.status === "rejected") || pendingTaskIds.has(t.id));
+    const completedTasks = prunedTasks.filter(t => (t.status === "completed" || t.status === "supervisor_approved" || t.status === "rejected") && !pendingTaskIds.has(t.id));
+    
+    let finalTasks = prunedTasks;
+    if (completedTasks.length > 50) {
+      completedTasks.sort((a, b) => (b.due_date || "").localeCompare(a.due_date || ""));
+      finalTasks = [...pendingTasks, ...completedTasks.slice(0, 50)];
+    }
+
+    localStorage.setItem(`${TASKS_CACHE_PREFIX}${userId}`, JSON.stringify(finalTasks));
   } catch (err) {
-    console.error("Failed to save cached tasks:", err);
+    console.warn("Failed to save cached tasks. Running aggressive storage cleanup...", err);
+    try {
+      pruneStorageData();
+      // Try one more time with a simple fallback to save just the tasks without any base64 images
+      const minimalTasks = tasks.map((t: any) => {
+        const copy = { ...t };
+        if (copy.photo_before_url && copy.photo_before_url.startsWith("data:")) copy.photo_before_url = "";
+        if (copy.photo_after_url && copy.photo_after_url.startsWith("data:")) copy.photo_after_url = "";
+        return copy;
+      });
+      localStorage.setItem(`${TASKS_CACHE_PREFIX}${userId}`, JSON.stringify(minimalTasks));
+      console.log("Cached tasks saved successfully after stripping base64 images.");
+    } catch (finalErr) {
+      console.error("Critical: Failed to save cached tasks even after stripping images:", finalErr);
+    }
   }
 }
 

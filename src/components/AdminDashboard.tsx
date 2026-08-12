@@ -2,6 +2,8 @@ import React, { useState, useEffect } from "react";
 import { jsPDF } from "jspdf";
 import html2canvas from "html2canvas";
 import ProfessorLogo from "./ProfessorLogo";
+import SwitchLabelsGuide from "./SwitchLabelsGuide";
+import { BookOpen } from "lucide-react";
 import { 
   CheckCircle, 
   Clock, 
@@ -91,7 +93,7 @@ interface AdminDashboardProps {
 
 export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) {
   // Navigation tabs for the Admin Panel
-  const [activeTab, setActiveTab] = useState<'overview' | 'tasks' | 'approvals' | 'kpis' | 'sop' | 'operational' | 'employees' | 'reports' | 'inventory'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'tasks' | 'approvals' | 'kpis' | 'sop' | 'operational' | 'employees' | 'reports' | 'inventory' | 'switch_labels'>('overview');
   
   // App data states
   const [tasks, setTasks] = useState<(TaskInstance & { zone?: Zone; assignee?: Profile; template?: TaskTemplate })[]>([]);
@@ -377,7 +379,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       // Search query
       const matchQuery = task.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
                          (task.description || "").toLowerCase().includes(searchQuery.toLowerCase()) ||
-                         (task.template?.task_code || "").toLowerCase().includes(searchQuery.toLowerCase());
+                         (task.task_code || "").toLowerCase().includes(searchQuery.toLowerCase());
       
       // Employee filter
       const matchEmployee = employeeFilter === "all" || task.assigned_to === employeeFilter;
@@ -1351,7 +1353,8 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
               { id: 'operational', label: 'تشغيل الإضاءة والأجهزة', icon: Lightbulb },
               { id: 'inventory', label: 'إدارة المخزون والمعدات', icon: Box },
               { id: 'employees', label: 'إدارة الموظفين وكلمات المرور', icon: Users },
-              { id: 'reports', label: 'التقارير الشهرية والأرشيف', icon: Calendar }
+              { id: 'reports', label: 'التقارير الشهرية والأرشيف', icon: Calendar },
+              { id: 'switch_labels', label: 'دليل مفاتيح الإضاءة 💡', icon: BookOpen }
             ].map((item: any) => {
               const Icon = item.icon;
               const isSelected = activeTab === item.id;
@@ -2056,7 +2059,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                         <tbody className="divide-y divide-slate-100">
                           {getFilteredTasks().map((task) => (
                             <tr key={task.id} className="hover:bg-slate-50/50">
-                              <td className="p-3 font-semibold text-slate-500">{task.template?.task_code || "ONE_TIME"}</td>
+                              <td className="p-3 font-semibold text-slate-500">{task.task_code || "ONE_TIME"}</td>
                               <td className="p-3">
                                 <span className="font-bold text-slate-800 block">{task.title}</span>
                                 {task.task_type === "rework" && (
@@ -2150,7 +2153,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                           {getFilteredTasks().filter(t => t.status === "pending").map(task => (
                             <div key={task.id} className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-sm hover:shadow hover:border-slate-300 cursor-pointer transition" onClick={() => selectReviewTask(task)}>
                               <div className="flex justify-between items-center text-[9px] text-slate-400 font-bold">
-                                <span>{task.template?.task_code || "ONE_TIME"}</span>
+                                <span>{task.task_code || "ONE_TIME"}</span>
                                 <span>وقت: {task.due_time}</span>
                               </div>
                               <h5 className="text-xs font-bold text-slate-800 mt-1">{task.title}</h5>
@@ -2178,7 +2181,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                           {getFilteredTasks().filter(t => t.status === "in_progress").map(task => (
                             <div key={task.id} className="bg-white border-2 border-amber-300 rounded-xl p-3.5 shadow-sm hover:shadow cursor-pointer transition" onClick={() => selectReviewTask(task)}>
                               <div className="flex justify-between items-center text-[9px] text-amber-600 font-bold">
-                                <span>{task.template?.task_code || "ONE_TIME"}</span>
+                                <span>{task.task_code || "ONE_TIME"}</span>
                                 <span>انطلق: {new Date(task.started_at || "").toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
                               </div>
                               <h5 className="text-xs font-bold text-slate-800 mt-1">{task.title}</h5>
@@ -2206,7 +2209,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                           {getFilteredTasks().filter(t => t.status === "completed").map(task => (
                             <div key={task.id} className={`bg-white border rounded-xl p-3.5 shadow-sm hover:shadow cursor-pointer transition ${task.supervisor_approved ? 'border-emerald-300' : 'border-purple-300'}`} onClick={() => { selectReviewTask(task); setActiveTab('approvals'); }}>
                               <div className="flex justify-between items-center text-[9px] text-slate-400 font-bold">
-                                <span>{task.template?.task_code || "ONE_TIME"}</span>
+                                <span>{task.task_code || "ONE_TIME"}</span>
                                 <span>{task.supervisor_approved ? "معتمدة" : "بحاجة لاعتماد"}</span>
                               </div>
                               <h5 className="text-xs font-bold text-slate-800 mt-1">{task.title}</h5>
@@ -2260,7 +2263,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                             }`}
                           >
                             <div className="flex justify-between items-center text-[9px] text-slate-400 font-bold">
-                              <span>{task.template?.task_code || "ONE_TIME"}</span>
+                              <span>{task.task_code || "ONE_TIME"}</span>
                               <span className="text-slate-500 font-bold">منجز: {task.due_time}</span>
                             </div>
                             <h4 className="text-xs font-bold text-slate-800 leading-tight">{task.title}</h4>
@@ -2283,7 +2286,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                         <div className="flex justify-between items-start border-b border-slate-100 pb-3">
                           <div>
                             <span className="text-[10px] bg-slate-100 py-0.5 px-2.5 rounded text-slate-600 font-bold mb-1.5 inline-block">
-                              بند المعيار: {reviewingTask.template?.task_code || "مهمة طارئة"}
+                              بند المعيار: {reviewingTask.task_code || "مهمة طارئة"}
                             </span>
                             <h3 className="text-sm font-extrabold text-slate-800 leading-tight">{reviewingTask.title}</h3>
                             <p className="text-xs text-slate-400 mt-1">
@@ -2331,13 +2334,47 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                         <div className="flex flex-col gap-2">
                           <span className="text-xs font-bold text-slate-600 block">مقارنة حالة التنظيف (قبل و بعد):</span>
                           
-                          <div className="grid grid-cols-2 gap-4 mt-2">
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-2">
+                            {/* Guide / Reference Image */}
+                            {(() => {
+                              const primaryImg = reviewingTask.reference_image_url || reviewingTask.guide_image_url || reviewingTask.zone?.cover_image_url;
+                              const hasRefImg = !!reviewingTask.reference_image_url;
+                              return (
+                                <div className="flex flex-col gap-1 text-center">
+                                  <span className="text-[10px] font-bold text-indigo-500 block">
+                                    {hasRefImg ? "الصورة المرجعية للمهمة 💡" : "الصورة الاسترشادية 💡"}
+                                  </span>
+                                  <div className="aspect-video bg-slate-900 border border-slate-200 rounded-lg overflow-hidden flex items-center justify-center relative">
+                                    {primaryImg ? (
+                                      <img 
+                                        src={primaryImg} 
+                                        alt="المرجع" 
+                                        className="w-full h-full object-contain cursor-zoom-in" 
+                                        referrerPolicy="no-referrer"
+                                        onClick={() => window.open(primaryImg, '_blank')}
+                                      />
+                                    ) : (
+                                      <div className="w-full h-full flex items-center justify-center text-slate-400 text-[10px] font-semibold">
+                                        لا توجد صورة استرشادية مسجلة
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })()}
+
                             {/* Photo Before */}
                             <div className="flex flex-col gap-1 text-center">
                               <span className="text-[10px] font-bold text-slate-400 block">قبل التنظيف 📷</span>
                               <div className="aspect-video bg-slate-900 border border-slate-200 rounded-lg overflow-hidden">
                                 {reviewingTask.photo_before_url ? (
-                                  <img src={reviewingTask.photo_before_url} alt="قبل" className="w-full h-full object-contain" />
+                                  <img 
+                                    src={reviewingTask.photo_before_url} 
+                                    alt="قبل" 
+                                    className="w-full h-full object-contain cursor-zoom-in" 
+                                    referrerPolicy="no-referrer"
+                                    onClick={() => window.open(reviewingTask.photo_before_url!, '_blank')}
+                                  />
                                 ) : (
                                   <div className="w-full h-full flex items-center justify-center text-slate-500 text-[10px] font-semibold">
                                     صورة قبل غير مطلوبة/مرفوعة
@@ -2351,7 +2388,13 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                               <span className="text-[10px] font-bold text-emerald-500 block">بعد تلميع الموقع 📸</span>
                               <div className="aspect-video bg-slate-900 border border-slate-200 rounded-lg overflow-hidden">
                                 {reviewingTask.photo_after_url ? (
-                                  <img src={reviewingTask.photo_after_url} alt="بعد" className="w-full h-full object-contain" />
+                                  <img 
+                                    src={reviewingTask.photo_after_url} 
+                                    alt="بعد" 
+                                    className="w-full h-full object-contain cursor-zoom-in" 
+                                    referrerPolicy="no-referrer"
+                                    onClick={() => window.open(reviewingTask.photo_after_url!, '_blank')}
+                                  />
                                 ) : (
                                   <div className="w-full h-full flex items-center justify-center text-slate-500 text-[10px] font-semibold">
                                     لا توجد صورة بعد
@@ -3728,6 +3771,33 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
 
                               {/* Image Verification logs (صورة قبل وبعد) */}
                               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                {/* Guide / Reference Image */}
+                                {(() => {
+                                  const primaryImg = task.reference_image_url || task.guide_image_url || task.zone?.cover_image_url;
+                                  const hasRefImg = !!task.reference_image_url;
+                                  return (
+                                    <div className="border border-slate-200 rounded-xl p-3 bg-white flex flex-col justify-between h-44">
+                                      <span className="text-[10px] font-bold text-indigo-600 mb-2 block border-b border-slate-100 pb-1">💡 {hasRefImg ? "الصورة المرجعية للمهمة" : "صورة الدليل الإرشادي"}</span>
+                                      {primaryImg ? (
+                                        <div className="relative group overflow-hidden rounded-lg border border-slate-100 h-full flex items-center justify-center bg-slate-50">
+                                          <img 
+                                            src={primaryImg} 
+                                            alt="صورة مرجعية" 
+                                            className="max-h-full object-contain cursor-zoom-in transition duration-200 hover:scale-105" 
+                                            referrerPolicy="no-referrer"
+                                            onClick={() => window.open(primaryImg, '_blank')}
+                                          />
+                                        </div>
+                                      ) : (
+                                        <div className="h-full rounded-lg bg-slate-50/50 border border-dashed border-slate-200 flex flex-col items-center justify-center text-slate-400">
+                                          <span className="text-xl">💡</span>
+                                          <span className="text-[10px] mt-1">لا توجد صورة إرشادية مسجلة</span>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })()}
+
                                 {/* Photo Before */}
                                 <div className="border border-slate-200 rounded-xl p-3 bg-white flex flex-col justify-between h-44">
                                   <span className="text-[10px] font-bold text-slate-500 mb-2 block border-b border-slate-100 pb-1">📸 صورة قبل البدء بالعمل (SOP)</span>
@@ -3817,6 +3887,14 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                       </div>
                     )}
                   </div>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === 'switch_labels' && (
+                <div className="flex flex-col gap-6 text-right" style={{ direction: 'rtl' }}>
+                  <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-xs">
+                    <SwitchLabelsGuide />
                   </div>
                 </div>
               )}

@@ -22,6 +22,7 @@ import MyKpiPage from "./components/MyKpiPage";
 import AdminDashboard from "./components/AdminDashboard";
 import ProfessorLogo from "./components/ProfessorLogo";
 import FirebaseDiagnosticTool from "./components/FirebaseDiagnosticTool";
+import SwitchLabelsGuide from "./components/SwitchLabelsGuide";
 
 type SessionSummary = {
   id: string;
@@ -75,7 +76,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
-  const [cleanerView, setCleanerView] = useState<"tasks" | "kpis">("tasks");
+  const [cleanerView, setCleanerView] = useState<"tasks" | "kpis" | "switch_guide">("tasks");
   const [offlineMode, setOfflineMode] = useState(isUsingLocalFallback());
 
   useEffect(() => {
@@ -322,9 +323,14 @@ export default function App() {
                 user={user}
                 onLogout={handleLogout}
                 onNavigateToKpis={() => setCleanerView("kpis")}
+                onNavigateToSwitchGuide={() => setCleanerView("switch_guide")}
               />
-            ) : (
+            ) : cleanerView === "kpis" ? (
               <MyKpiPage user={user} onBack={() => setCleanerView("tasks")} />
+            ) : (
+              <div className="min-h-screen bg-slate-50 flex flex-col p-2 md:p-4">
+                <SwitchLabelsGuide onBack={() => setCleanerView("tasks")} />
+              </div>
             )
           ) : (
             <AdminDashboard user={user} onLogout={handleLogout} />

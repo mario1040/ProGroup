@@ -60,9 +60,12 @@ export interface TaskTemplate {
   updated_at?: string;
 }
 
+export type SOPItem = TaskTemplate;
+
 export interface TaskInstance {
   id: string;
   template_id?: string;
+  sop_item_id?: string; // Direct reference to SOP master
   zone_id: string;
   assigned_to: string; // profile_id
   assigned_by?: string; // profile_id
@@ -101,6 +104,11 @@ export interface TaskInstance {
   delay_minutes?: number;
   guide_image_url?: string; // copied from template for direct access
   reference_image_url?: string; // reference image for cleaner view
+  goal?: string;
+  task_code?: string;
+  category?: 'تشغيل' | 'نظافة' | 'صيانة' | 'سلامة' | 'جودة' | 'تجهيز';
+  tools_required?: string;
+  estimated_duration_minutes?: number;
   created_at?: string;
   updated_at?: string;
 }

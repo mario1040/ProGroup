@@ -1,4 +1,4 @@
-import { Profile, Zone, TaskTemplate, TaskInstance, OperationalTask, DeviceSwitch } from "../types";
+import { Profile, Zone, TaskTemplate, SOPItem, TaskInstance, OperationalTask, DeviceSwitch } from "../types";
 import { 
   db, 
   auth, 
@@ -41,7 +41,8 @@ import {
   getCachedTasks, 
   addPendingUpdate, 
   getPendingUpdates, 
-  removePendingUpdate 
+  removePendingUpdate,
+  pruneStorageData
 } from "./offlineManager";
 
 // --- Clean Undefined Interceptor (Mandatory to prevent Firestore crash) ---
@@ -105,6 +106,7 @@ let useLocalFallback = localStorage.getItem("use_local_fallback") === "true";
 // --- Memory Cache for Metadata to Reduce Firestore Reads ---
 let cachedProfiles: Profile[] | null = null;
 let cachedTemplates: TaskTemplate[] | null = null;
+let cachedSopItems: SOPItem[] | null = null;
 let cachedZones: Zone[] | null = null;
 let cachedOperationalTasks: any[] | null = null;
 let cachedDeviceSwitches: DeviceSwitch[] | null = null;
@@ -112,6 +114,7 @@ let cachedDeviceSwitches: DeviceSwitch[] | null = null;
 export function invalidateMetadataCaches() {
   cachedProfiles = null;
   cachedTemplates = null;
+  cachedSopItems = null;
   cachedZones = null;
   cachedOperationalTasks = null;
   cachedDeviceSwitches = null;
@@ -144,6 +147,7 @@ export function forceClearAllCaches() {
     localDB.locations = {};
     localDB.zones = {};
     localDB.task_templates = {};
+    localDB.sop_items = {};
     localDB.task_instances = {};
     localDB.operational_tasks = {};
     localDB.notifications = {};
@@ -167,6 +171,7 @@ let localDB: {
   locations: Record<string, any>;
   zones: Record<string, any>;
   task_templates: Record<string, any>;
+  sop_items: Record<string, any>;
   task_instances: Record<string, any>;
   operational_tasks: Record<string, any>;
   notifications: Record<string, any>;
@@ -177,6 +182,7 @@ let localDB: {
   locations: {},
   zones: {},
   task_templates: {},
+  sop_items: {},
   task_instances: {},
   operational_tasks: {},
   notifications: {},
@@ -192,7 +198,7 @@ function initLocalDB() {
     if (stored) {
       localDB = JSON.parse(stored);
       // Ensure all collections exist
-      const keys: (keyof typeof localDB)[] = ["users", "locations", "zones", "task_templates", "task_instances", "operational_tasks", "notifications", "device_switches", "kpi_snapshots"];
+      const keys: (keyof typeof localDB)[] = ["users", "locations", "zones", "task_templates", "sop_items", "task_instances", "operational_tasks", "notifications", "device_switches", "kpi_snapshots"];
       keys.forEach(k => {
         if (!localDB[k]) localDB[k] = {};
       });
@@ -220,13 +226,26 @@ function initLocalDB() {
         }
       }
 
-      // Ensure all valid seeded templates are present in localDB.task_templates
+      // Ensure all valid seeded templates are present in localDB.task_templates & localDB.sop_items
       seeded.task_templates.forEach(t => {
         if (!localDB.task_templates[t.id]) {
           localDB.task_templates[t.id] = t;
           localTemplatesChanged = true;
         }
+        if (!localDB.sop_items[t.id]) {
+          localDB.sop_items[t.id] = t;
+          localTemplatesChanged = true;
+        }
       });
+
+      // Migrate existing local templates to sop_items if empty
+      if (!localDB.sop_items || Object.keys(localDB.sop_items).length === 0) {
+        localDB.sop_items = {};
+        Object.keys(localDB.task_templates).forEach(k => {
+          localDB.sop_items[k] = localDB.task_templates[k];
+        });
+        localTemplatesChanged = true;
+      }
 
       // Auto-recovery for deactivated admin accounts in local storage fallback
       let localUsersChanged = false;
@@ -271,7 +290,10 @@ function initLocalDB() {
   seeded.profiles.forEach(p => { localDB.users[p.id] = p; });
   seeded.locations.forEach(l => { localDB.locations[l.id] = l; });
   seeded.zones.forEach(z => { localDB.zones[z.id] = z; });
-  seeded.task_templates.forEach(t => { localDB.task_templates[t.id] = t; });
+  seeded.task_templates.forEach(t => { 
+    localDB.task_templates[t.id] = t; 
+    localDB.sop_items[t.id] = t;
+  });
   seeded.task_instances.forEach(ti => { localDB.task_instances[ti.id] = ti; });
   seeded.operational_tasks.forEach(ot => { localDB.operational_tasks[ot.id] = ot; });
   seeded.notifications.forEach(n => { localDB.notifications[n.id] = n; });
@@ -282,19 +304,111 @@ function initLocalDB() {
   localDBInitialized = true;
 }
 
+function pruneLocalDBInstances(): boolean {
+  if (!localDB || !localDB.task_instances) return false;
+  
+  const twoDaysAgo = new Date();
+  twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
+  const twoDaysAgoStr = twoDaysAgo.toISOString().split("T")[0]; // YYYY-MM-DD
+
+  const pendingUpdates = getPendingUpdates();
+  const pendingTaskIds = new Set(pendingUpdates.map(item => item.taskId));
+  
+  let changed = false;
+  const ids = Object.keys(localDB.task_instances);
+  for (const id of ids) {
+    const task = localDB.task_instances[id];
+    if (!task) continue;
+
+    // Remove base64 strings if the task has already been synced (not in pending queue)
+    if (!pendingTaskIds.has(id)) {
+      if (task.photo_before_url && task.photo_before_url.startsWith("data:")) {
+        task.photo_before_url = "";
+        changed = true;
+      }
+      if (task.photo_after_url && task.photo_after_url.startsWith("data:")) {
+        task.photo_after_url = "";
+        changed = true;
+      }
+    }
+
+    // Strip base64 guide/reference images from task instances (they will fall back to template)
+    if (task.guide_image_url && task.guide_image_url.startsWith("data:")) {
+      task.guide_image_url = "";
+      changed = true;
+    }
+    if (task.reference_image_url && task.reference_image_url.startsWith("data:")) {
+      task.reference_image_url = "";
+      changed = true;
+    }
+
+    // Prune completed/approved/rejected tasks older than 2 days
+    if (task.status === "completed" || task.status === "supervisor_approved" || task.status === "rejected") {
+      if (pendingTaskIds.has(id)) continue; // Never delete pending updates!
+      if (task.due_date && task.due_date < twoDaysAgoStr) {
+        delete localDB.task_instances[id];
+        changed = true;
+      }
+    }
+  }
+
+  // Limit total number of completed task instances in localDB
+  const remainingIds = Object.keys(localDB.task_instances);
+  const completedTasks = remainingIds
+    .map(id => localDB.task_instances[id])
+    .filter(t => t && (t.status === "completed" || t.status === "supervisor_approved" || t.status === "rejected") && !pendingTaskIds.has(t.id));
+
+  if (completedTasks.length > 50) {
+    completedTasks.sort((a, b) => (b.due_date || "").localeCompare(a.due_date || ""));
+    const toDelete = completedTasks.slice(50);
+    for (const t of toDelete) {
+      delete localDB.task_instances[t.id];
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
 function saveLocalDB() {
   try {
+    pruneLocalDBInstances();
     localStorage.setItem("narisops_local_db", JSON.stringify(localDB));
     if (localDB && localDB.zones) {
       Object.keys(localDB.zones).forEach(zId => {
         const zone = localDB.zones[zId];
         if (zone && zone.cover_image_url) {
-          localStorage.setItem(`naris_zone_image_${zId}`, zone.cover_image_url);
+          if (!zone.cover_image_url.startsWith("data:") || zone.cover_image_url.length < 50000) {
+            localStorage.setItem(`naris_zone_image_${zId}`, zone.cover_image_url);
+          }
         }
       });
     }
-  } catch (e) {
-    console.error("[Local DB] Failed to save to localStorage", e);
+  } catch (e: any) {
+    console.warn("[Local DB] First setItem failed (potential quota limit). Attempting aggressive prune...", e);
+    try {
+      pruneStorageData();
+      
+      // Even more aggressive localDB prune: strip ALL base64 images from completed tasks
+      if (localDB && localDB.task_instances) {
+        Object.keys(localDB.task_instances).forEach(id => {
+          const t = localDB.task_instances[id];
+          if (t && (t.status === "completed" || t.status === "supervisor_approved" || t.status === "rejected")) {
+            if (t.photo_before_url && t.photo_before_url.startsWith("data:")) {
+              t.photo_before_url = "";
+            }
+            if (t.photo_after_url && t.photo_after_url.startsWith("data:")) {
+              t.photo_after_url = "";
+            }
+          }
+        });
+      }
+      
+      localStorage.setItem("narisops_local_db", JSON.stringify(localDB));
+      console.log("[Local DB] Saved successfully after aggressive pruning.");
+    } catch (err) {
+      console.error("[Local DB] Critical: Failed to save even after aggressive pruning:", err);
+    }
   }
 }
 
@@ -748,9 +862,9 @@ export async function deduplicateDatabase(): Promise<void> {
   }
 
   deduplicationPromise = (async () => {
-    console.log("[Firestore Client] Running deduplication for task_templates and task_instances...");
+    console.log("[Firestore Client] Running deduplication for task_templates, sop_items and task_instances...");
     try {
-      // 1. Deduplicate task_templates
+      // 1. Deduplicate task_templates & sop_items
       const templatesCol = collection(db, "task_templates");
       const templatesSnap = await getDocs(templatesCol);
       const seenTemplates = new Map<string, string>(); // Key: title + "_" + zone_id, Value: kept_template_id
@@ -766,11 +880,35 @@ export async function deduplicateDatabase(): Promise<void> {
           console.log(`[Deduplicator] Deleting duplicate task_template: ${data.title} (${docSnap.id})`);
           try {
             await deleteDoc(doc(db, "task_templates", docSnap.id));
+            await deleteDoc(doc(db, "sop_items", docSnap.id));
           } catch (e) {
             console.error(`[Deduplicator] Failed to delete duplicate template ${docSnap.id}`, e);
           }
         } else {
           seenTemplates.set(key, docSnap.id);
+        }
+      }
+
+      // 1b. Deduplicate sop_items specifically if they diverged
+      const sopCol = collection(db, "sop_items");
+      const sopSnap = await getDocs(sopCol);
+      const seenSop = new Map<string, string>();
+      for (const docSnap of sopSnap.docs) {
+        const data = docSnap.data();
+        const title = (data.title || "").trim();
+        const zoneId = data.zone_id || "";
+        const key = `${title}_${zoneId}`;
+        
+        if (seenSop.has(key)) {
+          console.log(`[Deduplicator] Deleting duplicate sop_item: ${data.title} (${docSnap.id})`);
+          try {
+            await deleteDoc(doc(db, "sop_items", docSnap.id));
+            await deleteDoc(doc(db, "task_templates", docSnap.id));
+          } catch (e) {
+            console.error(`[Deduplicator] Failed to delete duplicate sop_item ${docSnap.id}`, e);
+          }
+        } else {
+          seenSop.set(key, docSnap.id);
         }
       }
 
@@ -837,12 +975,18 @@ export async function syncLocalDatabaseToFirestore(): Promise<void> {
     "locations",
     "zones",
     "task_templates",
+    "sop_items",
     "task_instances",
     "operational_tasks",
     "notifications",
     "device_switches",
     "kpi_snapshots"
   ];
+
+  // If localDbData.sop_items is missing/empty, populate from task_templates to preserve historical local templates
+  if (localDbData && (!localDbData.sop_items || Object.keys(localDbData.sop_items).length === 0)) {
+    localDbData.sop_items = localDbData.task_templates || {};
+  }
 
   // 1. Clear existing documents in Firestore to prevent duplicates
   for (const colName of colNames) {
@@ -960,42 +1104,23 @@ async function ensureSeeded(): Promise<void> {
         throw err;
       }
 
-      // Ensure the 40 SOP templates are synchronized in Firestore
-      const syncFlagKey = "naris_sop_templates_synced_v34_fix";
-      const isSopTemplatesSynced = localStorage.getItem(syncFlagKey) === "true";
-      if (!isSopTemplatesSynced && !useLocalFallback) {
-        console.log("[SOP Template Engine] Verifying 34 default SOP templates are in Firestore...");
+      // Ensure the default SOP templates are seeded ONLY if the task_templates collection is completely empty in Firestore
+      const templatesCol = collection(db, "task_templates");
+      const templatesSnap = await getDocs(templatesCol);
+      if (templatesSnap.empty && !useLocalFallback) {
+        console.log("[SOP Template Engine] Firestore task_templates is empty. Seeding 34 default SOP templates...");
         try {
           const seededTemplates = getSeededDB().task_templates;
-          const templatesCol = collection(db, "task_templates");
-          const snap = await getDocs(templatesCol);
-          
-          const existingSopDocIds: string[] = [];
-          snap.forEach((docSnap: any) => {
-            if (docSnap.id.startsWith("t_sop_")) {
-              existingSopDocIds.push(docSnap.id);
-            }
-          });
-
-          const newTemplateIds = new Set(seededTemplates.map(t => t.id));
-          
-          for (const oldId of existingSopDocIds) {
-            if (!newTemplateIds.has(oldId)) {
-              console.log(`[SOP Template Engine] Deleting outdated/obsolete template from Firestore: ${oldId}`);
-              await deleteDoc(doc(db, "task_templates", oldId));
-            }
-          }
-
-          console.log(`[SOP Template Engine] Seeding/updating 34 new SOP templates to Firestore...`);
           for (const template of seededTemplates) {
             await setDoc(doc(db, "task_templates", template.id), template);
+            await setDoc(doc(db, "sop_items", template.id), template);
+            console.log(`[SOP Template Engine] Seeded template and SOP item: ${template.id}`);
           }
-
+          const syncFlagKey = "naris_sop_templates_synced_v34_fix";
           localStorage.setItem(syncFlagKey, "true");
-          console.log("[SOP Template Engine] 34 default SOP templates successfully synchronized to Firestore.");
           invalidateMetadataCaches();
         } catch (error) {
-          console.error("[SOP Template Engine] Failed to synchronize SOP templates to Firestore:", error);
+          console.error("[SOP Template Engine] Failed to seed SOP templates:", error);
         }
       }
 
@@ -1113,6 +1238,7 @@ async function ensureSeeded(): Promise<void> {
             const seeded = getSeededDB();
             for (const t of seeded.task_templates) {
               await setDoc(doc(db, "task_templates", t.id), t);
+              await setDoc(doc(db, "sop_items", t.id), t);
             }
           }
         } catch (e) {
@@ -1169,6 +1295,7 @@ async function ensureSeeded(): Promise<void> {
         await seedCollection("locations", seeded.locations);
         await seedCollection("zones", seeded.zones);
         await seedCollection("task_templates", seeded.task_templates);
+        await seedCollection("sop_items", seeded.task_templates);
         await seedCollection("task_instances", seeded.task_instances);
         await seedCollection("operational_tasks", seeded.operational_tasks);
         await seedCollection("notifications", seeded.notifications);
@@ -1198,9 +1325,10 @@ async function ensureSeeded(): Promise<void> {
           await setDoc(doc(db, "zones", z.id), z);
         }
         
-        // 4. Seed task_templates
+        // 4. Seed task_templates & sop_items
         for (const t of seeded.task_templates) {
           await setDoc(doc(db, "task_templates", t.id), t);
+          await setDoc(doc(db, "sop_items", t.id), t);
         }
         
         // 5. Seed task_instances
@@ -1654,7 +1782,7 @@ export async function saveZone(zone: Partial<Zone>): Promise<Zone> {
         localStorage.setItem(`naris_zone_image_${finalZone.id}`, uploadedUrl);
       }
     } catch (err) {
-      console.error(`[saveZone] Failed to auto-upload cover image to Firebase Storage:`, err);
+      console.warn(`[saveZone] Failed to auto-upload cover image to Firebase Storage:`, err);
     }
   }
   await setDoc(doc(db, "zones", finalZone.id), finalZone);
@@ -1662,25 +1790,38 @@ export async function saveZone(zone: Partial<Zone>): Promise<Zone> {
   return finalZone as Zone;
 }
 
-export async function getTemplates(): Promise<TaskTemplate[]> {
+export async function getSopItems(): Promise<SOPItem[]> {
   await ensureSeeded();
-  if (cachedTemplates) return cachedTemplates;
+  if (cachedSopItems) return cachedSopItems;
+  
+  if (useLocalFallback) {
+    const items = Object.values(localDB.sop_items || {}) as SOPItem[];
+    items.sort((a, b) => (a.task_code || "").localeCompare(b.task_code || ""));
+    cachedSopItems = items;
+    return items;
+  }
+
   let snap;
   try {
-    snap = await getDocs(collection(db, "task_templates"));
+    snap = await getDocs(collection(db, "sop_items"));
   } catch (error) {
-    handleFirestoreError(error, OperationType.LIST, "task_templates");
+    handleFirestoreError(error, OperationType.LIST, "sop_items");
   }
-  const templates: TaskTemplate[] = [];
+  const items: SOPItem[] = [];
   snap.forEach((docSnap) => {
-    templates.push(docSnap.data() as TaskTemplate);
+    items.push(docSnap.data() as SOPItem);
   });
-  cachedTemplates = templates;
-  return templates;
+  items.sort((a, b) => (a.task_code || "").localeCompare(b.task_code || ""));
+  cachedSopItems = items;
+  return items;
 }
 
-export async function pregenerateTaskInstances(tpl: TaskTemplate, daysCount = 30): Promise<void> {
-  console.log(`[Pregenerate] Generating task instances for template ${tpl.id} (${tpl.title}) for next ${daysCount} days...`);
+export async function getTemplates(): Promise<TaskTemplate[]> {
+  return getSopItems();
+}
+
+export async function pregenerateTaskInstances(tpl: SOPItem, daysCount = 30): Promise<void> {
+  console.log(`[Pregenerate] Generating task instances for SOP item ${tpl.id} (${tpl.title}) for next ${daysCount} days...`);
   try {
     const profiles = await getProfiles();
     const zones = await getRawZones();
@@ -1698,21 +1839,35 @@ export async function pregenerateTaskInstances(tpl: TaskTemplate, daysCount = 30
       dates.push(`${year}-${month}-${day}`);
     }
 
-    // Load existing instances for this template in the date range
+    // Load existing instances for this SOP item in the date range
     let existingInstances: TaskInstance[] = [];
     if (useLocalFallback) {
       existingInstances = Object.values(localDB.task_instances || {}).filter(
-        (ti: any) => ti.template_id === tpl.id && dates.includes(ti.due_date)
+        (ti: any) => (ti.sop_item_id === tpl.id || ti.template_id === tpl.id) && dates.includes(ti.due_date)
       ) as TaskInstance[];
     } else {
+      // Direct query by sop_item_id
       const q = query(
         collection(db, "task_instances"),
-        where("template_id", "==", tpl.id)
+        where("sop_item_id", "==", tpl.id)
       );
       const snap = await getDocs(q);
       snap.forEach((docSnap: any) => {
         const data = docSnap.data() as TaskInstance;
         if (dates.includes(data.due_date)) {
+          existingInstances.push(data);
+        }
+      });
+
+      // Backward compatible fallback query by template_id
+      const qLegacy = query(
+        collection(db, "task_instances"),
+        where("template_id", "==", tpl.id)
+      );
+      const snapLegacy = await getDocs(qLegacy);
+      snapLegacy.forEach((docSnap: any) => {
+        const data = docSnap.data() as TaskInstance;
+        if (dates.includes(data.due_date) && !existingInstances.some(x => x.id === data.id)) {
           existingInstances.push(data);
         }
       });
@@ -1773,16 +1928,22 @@ export async function pregenerateTaskInstances(tpl: TaskTemplate, daysCount = 30
             }
           }
 
-          const id = "ti_" + randomHex(8);
+          const id = `ti_rec_${tpl.id}_${dateStr}`;
           const newInstance: TaskInstance = {
             id,
-            template_id: tpl.id,
+            template_id: tpl.id, // Legacy compatibility
+            sop_item_id: tpl.id,  // Direct master SOP item reference
             zone_id: tpl.zone_id,
             assigned_to: assignedTo,
             assigned_by: "p1",
             task_type: "recurring",
             title: tpl.title,
             description: tpl.description || "",
+            goal: tpl.goal || "",
+            task_code: tpl.task_code || "",
+            category: tpl.category || "تشغيل",
+            tools_required: tpl.tools_required || "",
+            estimated_duration_minutes: tpl.estimated_duration_minutes || 0,
             due_date: dateStr,
             due_time: tpl.scheduled_time || "09:00",
             status: "pending",
@@ -1803,148 +1964,200 @@ export async function pregenerateTaskInstances(tpl: TaskTemplate, daysCount = 30
         }
       }
     }
-    console.log(`[Pregenerate] Successfully pre-generated/verified task instances for template ${tpl.id}.`);
+    console.log(`[Pregenerate] Successfully pre-generated/verified task instances for SOP item ${tpl.id}.`);
   } catch (err) {
     console.error("[Pregenerate] Failed to pregenerate task instances:", err);
   }
 }
 
-export async function saveTemplate(template: Partial<TaskTemplate>): Promise<TaskTemplate> {
+export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
   await ensureSeeded();
-  let finalTemplate: any;
+  let finalItem: any;
   let oldAssigneeId: string | undefined;
   
-  if (!template.id) {
-    finalTemplate = {
-      ...template,
-      id: "t_" + randomHex(8),
+  if (!item.id) {
+    finalItem = {
+      ...item,
+      id: "sop_" + randomHex(8),
       created_at: new Date().toISOString()
     };
   } else {
-    const docRef = doc(db, "task_templates", template.id);
-    let snap;
-    try {
-      snap = await getDoc(docRef);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.GET, `task_templates/${template.id}`);
+    if (useLocalFallback) {
+      const existing = localDB.sop_items[item.id] || {};
+      oldAssigneeId = existing.default_assignee_id;
+      finalItem = { ...existing, ...item, updated_at: new Date().toISOString() };
+    } else {
+      const docRef = doc(db, "sop_items", item.id);
+      let snap;
+      try {
+        snap = await getDoc(docRef);
+      } catch (error) {
+        handleFirestoreError(error, OperationType.GET, `sop_items/${item.id}`);
+      }
+      const existing = snap.exists() ? snap.data() : {};
+      oldAssigneeId = existing.default_assignee_id;
+      finalItem = { ...existing, ...item, updated_at: new Date().toISOString() };
     }
-    const existing = snap.exists() ? snap.data() : {};
-    oldAssigneeId = existing.default_assignee_id;
-    finalTemplate = { ...existing, ...template, updated_at: new Date().toISOString() };
   }
   
-  if (finalTemplate.guide_image_url && finalTemplate.guide_image_url.startsWith("data:")) {
+  if (finalItem.guide_image_url && finalItem.guide_image_url.startsWith("data:")) {
     try {
-      console.log(`[saveTemplate] Auto-uploading guide image to Firebase Storage for template ${finalTemplate.id}...`);
-      const storagePath = `templates/guide_${finalTemplate.id}_${Date.now()}.jpg`;
-      const uploadedUrl = await uploadPhoto(finalTemplate.guide_image_url, storagePath);
-      finalTemplate.guide_image_url = uploadedUrl;
+      console.log(`[saveSopItem] Auto-uploading guide image to Firebase Storage for SOP item ${finalItem.id}...`);
+      const storagePath = `sop_items/guide_${finalItem.id}_${Date.now()}.jpg`;
+      const uploadedUrl = await uploadPhoto(finalItem.guide_image_url, storagePath);
+      finalItem.guide_image_url = uploadedUrl;
     } catch (err) {
-      console.error(`[saveTemplate] Failed to auto-upload guide image to Firebase Storage:`, err);
+      console.warn(`[saveSopItem] Failed to auto-upload guide image:`, err);
     }
   }
 
-  if (finalTemplate.reference_image_url && finalTemplate.reference_image_url.startsWith("data:")) {
+  if (finalItem.reference_image_url && finalItem.reference_image_url.startsWith("data:")) {
     try {
-      console.log(`[saveTemplate] Auto-uploading reference image to Firebase Storage for template ${finalTemplate.id}...`);
-      const storagePath = `templates/ref_${finalTemplate.id}_${Date.now()}.jpg`;
-      const uploadedUrl = await uploadPhoto(finalTemplate.reference_image_url, storagePath);
-      finalTemplate.reference_image_url = uploadedUrl;
+      console.log(`[saveSopItem] Auto-uploading reference image to Firebase Storage for SOP item ${finalItem.id}...`);
+      const storagePath = `sop_items/ref_${finalItem.id}_${Date.now()}.jpg`;
+      const uploadedUrl = await uploadPhoto(finalItem.reference_image_url, storagePath);
+      finalItem.reference_image_url = uploadedUrl;
     } catch (err) {
-      console.error(`[saveTemplate] Failed to auto-upload reference image to Firebase Storage:`, err);
+      console.warn(`[saveSopItem] Failed to auto-upload reference image:`, err);
     }
   }
   
-  await setDoc(doc(db, "task_templates", finalTemplate.id), finalTemplate);
+  if (useLocalFallback) {
+    localDB.sop_items[finalItem.id] = finalItem;
+    localDB.task_templates[finalItem.id] = finalItem; // For fallback
+    saveLocalDB();
+  } else {
+    await setDoc(doc(db, "sop_items", finalItem.id), finalItem);
+    await setDoc(doc(db, "task_templates", finalItem.id), finalItem); // Mirror for compatibility
+  }
   
-  // 1. Pregenerate task instances for the next 30 days so they exist in the database and show up for employees immediately
-  await pregenerateTaskInstances(finalTemplate, 30);
+  // Pregenerate task instances for the next 30 days
+  await pregenerateTaskInstances(finalItem, 30);
   
-  // 2. Sync all template details to any existing future pending task instances
-  if (template.id) {
-    console.log(`[Template Detail Sync] Syncing updated template configurations for ${finalTemplate.title} to future pending task instances...`);
+  // Sync all detail changes to any future pending task instances
+  if (item.id) {
+    console.log(`[SOP Detail Sync] Syncing updated SOP configurations for ${finalItem.title} to future pending task instances...`);
     try {
       let existingInstances: TaskInstance[] = [];
       if (useLocalFallback) {
         existingInstances = Object.values(localDB.task_instances || {}).filter(
-          (ti: any) => ti.template_id === finalTemplate.id
+          (ti: any) => (ti.sop_item_id === finalItem.id || ti.template_id === finalItem.id)
         ) as TaskInstance[];
       } else {
         const q = query(
           collection(db, "task_instances"),
-          where("template_id", "==", finalTemplate.id)
+          where("sop_item_id", "==", finalItem.id)
         );
         const snap = await getDocs(q);
         snap.forEach((docSnap) => {
           existingInstances.push(docSnap.data() as TaskInstance);
         });
+
+        const qLegacy = query(
+          collection(db, "task_instances"),
+          where("template_id", "==", finalItem.id)
+        );
+        const snapLegacy = await getDocs(qLegacy);
+        snapLegacy.forEach((docSnap) => {
+          if (!existingInstances.some(x => x.id === docSnap.id)) {
+            existingInstances.push(docSnap.data() as TaskInstance);
+          }
+        });
       }
 
       const todayStr = getLocalDateString();
       for (const ti of existingInstances) {
-        // Only update tasks that are pending (not started/completed) and are due today or in the future
         if (ti.due_date >= todayStr && (ti.status === "pending" || !ti.status)) {
-          await setDoc(doc(db, "task_instances", ti.id), {
+          const updatedInstance = {
             ...ti,
-            title: finalTemplate.title,
-            description: finalTemplate.description || "",
-            zone_id: finalTemplate.zone_id,
-            guide_image_url: finalTemplate.guide_image_url || "",
-            reference_image_url: finalTemplate.reference_image_url || "",
-            requires_photo_before: finalTemplate.requires_photo_before ?? true,
-            requires_photo_after: finalTemplate.requires_photo_after ?? true,
-            requires_supervisor_approval: finalTemplate.requires_supervisor_approval ?? true,
-            requires_gps: finalTemplate.requires_gps ?? false,
-            requires_signature: finalTemplate.requires_signature ?? false,
-            assigned_to: finalTemplate.default_assignee_id || ti.assigned_to,
-            due_time: finalTemplate.scheduled_time || ti.due_time || "09:00",
+            title: finalItem.title,
+            description: finalItem.description || "",
+            goal: finalItem.goal || "",
+            task_code: finalItem.task_code || "",
+            category: finalItem.category || "تشغيل",
+            tools_required: finalItem.tools_required || "",
+            estimated_duration_minutes: finalItem.estimated_duration_minutes || 0,
+            zone_id: finalItem.zone_id,
+            guide_image_url: finalItem.guide_image_url || "",
+            reference_image_url: finalItem.reference_image_url || "",
+            requires_photo_before: finalItem.requires_photo_before ?? true,
+            requires_photo_after: finalItem.requires_photo_after ?? true,
+            requires_supervisor_approval: finalItem.requires_supervisor_approval ?? true,
+            requires_gps: finalItem.requires_gps ?? false,
+            requires_signature: finalItem.requires_signature ?? false,
+            assigned_to: finalItem.default_assignee_id || ti.assigned_to,
+            due_time: finalItem.scheduled_time || ti.due_time || "09:00",
             updated_at: new Date().toISOString()
-          });
+          };
+          
+          if (useLocalFallback) {
+            localDB.task_instances[ti.id] = updatedInstance;
+          } else {
+            await setDoc(doc(db, "task_instances", ti.id), updatedInstance);
+          }
         }
       }
+      if (useLocalFallback) {
+        saveLocalDB();
+      }
     } catch (err) {
-      console.error("[Template Detail Sync] Failed to update future pending instances:", err);
+      console.error("[SOP Sync] Failed to sync to future tasks:", err);
     }
   }
 
   invalidateMetadataCaches();
-  return finalTemplate as TaskTemplate;
+  return finalItem as SOPItem;
 }
 
-export async function deleteTemplate(id: string): Promise<void> {
+export async function saveTemplate(template: Partial<TaskTemplate>): Promise<TaskTemplate> {
+  return saveSopItem(template);
+}
+
+export async function deleteSopItem(id: string): Promise<void> {
   if (!id || typeof id !== "string" || id.trim() === "") {
-    console.error("[Firestore Client] deleteTemplate: Invalid or empty ID provided:", id);
+    console.error("[Firestore Client] deleteSopItem: Invalid or empty ID provided:", id);
     throw new Error("معرف البند المعياري (ID) غير صالح أو مفقود.");
   }
   
   await ensureSeeded();
   try {
-    // 1. Delete all corresponding task instances of this template to prevent orphan tasks
     if (useLocalFallback) {
-      console.log(`[Local DB] Deleting corresponding task instances for template_id: ${id}`);
+      console.log(`[Local DB] Deleting corresponding task instances for SOP item: ${id}`);
       const keys = Object.keys(localDB.task_instances);
       for (const k of keys) {
-        if (localDB.task_instances[k].template_id === id) {
+        if (localDB.task_instances[k].sop_item_id === id || localDB.task_instances[k].template_id === id) {
           delete localDB.task_instances[k];
         }
       }
+      if (localDB.sop_items[id]) delete localDB.sop_items[id];
+      if (localDB.task_templates[id]) delete localDB.task_templates[id];
       saveLocalDB();
     } else {
-      console.log(`[Firestore Client] Deleting task instances for template_id: ${id}...`);
-      const q = query(collection(db, "task_instances"), where("template_id", "==", id));
+      console.log(`[Firestore Client] Deleting task instances for sop_item_id: ${id}...`);
+      const q = query(collection(db, "task_instances"), where("sop_item_id", "==", id));
       const snap = await getDocs(q);
       for (const d of snap.docs) {
         await deleteDoc(doc(db, "task_instances", d.id));
       }
-    }
 
-    // 2. Delete the template itself
-    await deleteDoc(doc(db, "task_templates", id));
+      const qLegacy = query(collection(db, "task_instances"), where("template_id", "==", id));
+      const snapLegacy = await getDocs(qLegacy);
+      for (const d of snapLegacy.docs) {
+        await deleteDoc(doc(db, "task_instances", d.id));
+      }
+
+      await deleteDoc(doc(db, "sop_items", id));
+      await deleteDoc(doc(db, "task_templates", id));
+    }
     invalidateMetadataCaches();
   } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, `task_templates/${id}`);
+    handleFirestoreError(error, OperationType.DELETE, `sop_items/${id}`);
     throw error;
   }
+}
+
+export async function deleteTemplate(id: string): Promise<void> {
+  return deleteSopItem(id);
 }
 
 export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone?: Zone; assignee?: Profile; template?: TaskTemplate })[]> {
@@ -2053,7 +2266,7 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
           }
         }
 
-        const id = "ti_" + randomHex(8);
+        const id = `ti_rec_${tpl.id}_${todayStr}`;
         const newInstance: TaskInstance = {
           id,
           template_id: tpl.id,
@@ -2063,6 +2276,11 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
           task_type: "recurring",
           title: tpl.title,
           description: tpl.description || "",
+          goal: tpl.goal || "",
+          task_code: tpl.task_code || "",
+          category: tpl.category || "تشغيل",
+          tools_required: tpl.tools_required || "",
+          estimated_duration_minutes: tpl.estimated_duration_minutes || 0,
           due_date: todayStr,
           due_time: tpl.scheduled_time || "09:00",
           status: "pending",
@@ -2362,7 +2580,7 @@ export async function syncOfflineTasks(): Promise<number> {
             const uploadedUrl = await uploadPhoto(merged.photo_before_url, storagePath);
             merged.photo_before_url = uploadedUrl;
           } catch (err) {
-            console.error(`[Offline Sync] Failed to auto-upload photo_before to Firebase Storage:`, err);
+            console.warn(`[Offline Sync] Failed to auto-upload photo_before to Firebase Storage:`, err);
           }
         }
 
@@ -2373,12 +2591,20 @@ export async function syncOfflineTasks(): Promise<number> {
             const uploadedUrl = await uploadPhoto(merged.photo_after_url, storagePath);
             merged.photo_after_url = uploadedUrl;
           } catch (err) {
-            console.error(`[Offline Sync] Failed to auto-upload photo_after to Firebase Storage:`, err);
+            console.warn(`[Offline Sync] Failed to auto-upload photo_after to Firebase Storage:`, err);
           }
         }
 
         await firebaseSetDoc(docRef, cleanUndefined(merged));
         console.log(`[Offline Sync] Successfully synced task ${item.taskId}`);
+        
+        // Update local DB and local cache with synced task so base64 strings are swapped for remote URLs
+        if (localDB && localDB.task_instances) {
+          localDB.task_instances[item.taskId] = merged;
+          saveLocalDB();
+        }
+        syncTaskAcrossCaches(merged);
+
         removePendingUpdate(item.taskId);
         successCount++;
       } else {
@@ -2386,7 +2612,7 @@ export async function syncOfflineTasks(): Promise<number> {
         removePendingUpdate(item.taskId);
       }
     } catch (err) {
-      console.error(`[Offline Sync] Failed to sync task ${item.taskId}:`, err);
+      console.warn(`[Offline Sync] Failed to sync task ${item.taskId}:`, err);
       // If network fails, break out of the loop to try again later
       break;
     }
@@ -2437,15 +2663,21 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
       throw new Error("تنبيه: تم إكمال هذه المهمة بالفعل مسبقاً ولا يمكن إعادة تسليمها.");
     }
 
-    let template: TaskTemplate | undefined;
-    if (currentTask.template_id) {
+    let template: any;
+    const sopId = currentTask.sop_item_id || currentTask.template_id;
+    if (sopId) {
       try {
-        const tplSnap = await getDoc(doc(db, "task_templates", currentTask.template_id));
+        const tplSnap = await getDoc(doc(db, "sop_items", sopId));
         if (tplSnap.exists()) {
-          template = tplSnap.data() as TaskTemplate;
+          template = tplSnap.data();
+        } else {
+          const legacySnap = await getDoc(doc(db, "task_templates", sopId));
+          if (legacySnap.exists()) {
+            template = legacySnap.data();
+          }
         }
       } catch (error) {
-        console.warn("Could not retrieve template", error);
+        console.warn("Could not retrieve SOP master item", error);
       }
     }
     
@@ -2519,7 +2751,7 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
         const uploadedUrl = await uploadPhoto(merged.photo_before_url, storagePath);
         merged.photo_before_url = uploadedUrl;
       } catch (err) {
-        console.error(`[updateTaskInstance] Failed to auto-upload photo_before to Firebase Storage:`, err);
+        console.warn(`[updateTaskInstance] Failed to auto-upload photo_before to Firebase Storage:`, err);
       }
     }
 
@@ -2530,7 +2762,7 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
         const uploadedUrl = await uploadPhoto(merged.photo_after_url, storagePath);
         merged.photo_after_url = uploadedUrl;
       } catch (err) {
-        console.error(`[updateTaskInstance] Failed to auto-upload photo_after to Firebase Storage:`, err);
+        console.warn(`[updateTaskInstance] Failed to auto-upload photo_after to Firebase Storage:`, err);
       }
     }
 
@@ -2915,6 +3147,7 @@ export async function resetDatabase(): Promise<void> {
     locations: {},
     zones: {},
     task_templates: {},
+    sop_items: {},
     task_instances: {},
     operational_tasks: {},
     notifications: {},
@@ -3027,12 +3260,30 @@ export async function reseedSopTemplatesAndResetTasks(): Promise<void> {
       }
     });
 
+    const existingTemplateImages: Record<string, { guide?: string; ref?: string }> = {};
+    Object.keys(localDB.task_templates || {}).forEach(tId => {
+      if (localDB.task_templates[tId]?.guide_image_url || localDB.task_templates[tId]?.reference_image_url) {
+        existingTemplateImages[tId] = {
+          guide: localDB.task_templates[tId].guide_image_url,
+          ref: localDB.task_templates[tId].reference_image_url
+        };
+      }
+    });
+
     localDB.task_templates = {};
+    localDB.sop_items = {};
     localDB.task_instances = {};
     localDB.zones = {};
     const seeded = getSeededDB();
-    seeded.task_templates.forEach((t) => {
-      localDB.task_templates[t.id] = t;
+    seeded.task_templates.forEach((t: any) => {
+      const backup = existingTemplateImages[t.id];
+      const resItem = {
+        ...t,
+        guide_image_url: backup?.guide || t.guide_image_url || "",
+        reference_image_url: backup?.ref || t.reference_image_url || ""
+      };
+      localDB.task_templates[t.id] = resItem;
+      localDB.sop_items[t.id] = resItem;
     });
     seeded.zones.forEach((z) => {
       const restoredUrl = existingZoneImages[z.id] || z.cover_image_url || "";
@@ -3062,6 +3313,37 @@ export async function reseedSopTemplatesAndResetTasks(): Promise<void> {
       console.warn("[Reseed SOP] Failed to backup zone cover images before clearing:", e);
     }
 
+    // Backup existing template guide & reference images if any before clearing
+    const templateImageBackup: Record<string, { guide?: string; ref?: string }> = {};
+    try {
+      const templatesCol = firebaseCollection(db, "task_templates");
+      const snap = await firebaseGetDocs(templatesCol);
+      snap.forEach(docSnap => {
+        const data = docSnap.data();
+        if (data && (data.guide_image_url || data.reference_image_url)) {
+          templateImageBackup[docSnap.id] = {
+            guide: data.guide_image_url,
+            ref: data.reference_image_url
+          };
+        }
+      });
+
+      // Also backup from sop_items if any
+      const sopCol = firebaseCollection(db, "sop_items");
+      const sopSnap = await firebaseGetDocs(sopCol);
+      sopSnap.forEach(docSnap => {
+        const data = docSnap.data();
+        if (data && (data.guide_image_url || data.reference_image_url) && !templateImageBackup[docSnap.id]) {
+          templateImageBackup[docSnap.id] = {
+            guide: data.guide_image_url,
+            ref: data.reference_image_url
+          };
+        }
+      });
+    } catch (e) {
+      console.warn("[Reseed SOP] Failed to backup template images before clearing:", e);
+    }
+
     // A. Delete existing task_instances
     const instancesCol = firebaseCollection(db, "task_instances");
     const instancesSnap = await firebaseGetDocs(instancesCol);
@@ -3070,13 +3352,24 @@ export async function reseedSopTemplatesAndResetTasks(): Promise<void> {
     }
     console.log(`[Firestore Client] Cleared ${instancesSnap.size} task instances.`);
 
-    // B. Delete existing task_templates
+    // B. Delete existing task_templates and sop_items
     const templatesCol = firebaseCollection(db, "task_templates");
     const templatesSnap = await firebaseGetDocs(templatesCol);
     for (const d of templatesSnap.docs) {
       await firebaseDeleteDoc(firebaseDoc(db, "task_templates", d.id));
     }
     console.log(`[Firestore Client] Cleared ${templatesSnap.size} task templates.`);
+
+    try {
+      const sopCol = firebaseCollection(db, "sop_items");
+      const sopSnap = await firebaseGetDocs(sopCol);
+      for (const d of sopSnap.docs) {
+        await firebaseDeleteDoc(firebaseDoc(db, "sop_items", d.id));
+      }
+      console.log(`[Firestore Client] Cleared ${sopSnap.size} SOP items.`);
+    } catch (e) {
+      console.warn("[Reseed SOP] Failed to clear sop_items:", e);
+    }
 
     // C. Delete existing zones
     const zonesCol = firebaseCollection(db, "zones");
@@ -3098,9 +3391,16 @@ export async function reseedSopTemplatesAndResetTasks(): Promise<void> {
       await firebaseSetDoc(firebaseDoc(db, "zones", zone.id), updatedZone);
     }
 
-    console.log(`[Firestore Client] Inserting ${seededTemplates.length} clean templates...`);
-    for (const template of seededTemplates) {
-      await firebaseSetDoc(firebaseDoc(db, "task_templates", template.id), template);
+    console.log(`[Firestore Client] Inserting ${seededTemplates.length} clean templates and SOP items...`);
+    for (const template of seededTemplates as any[]) {
+      const backup = templateImageBackup[template.id];
+      const updatedTemplate = {
+        ...template,
+        guide_image_url: backup?.guide || template.guide_image_url || "",
+        reference_image_url: backup?.ref || template.reference_image_url || ""
+      };
+      await firebaseSetDoc(firebaseDoc(db, "task_templates", template.id), updatedTemplate);
+      await firebaseSetDoc(firebaseDoc(db, "sop_items", template.id), updatedTemplate);
     }
 
     if (typeof localStorage !== "undefined") {
@@ -3154,6 +3454,7 @@ export async function validateDatabase(): Promise<DatabaseValidationReport> {
     { name: "locations", label: "المواقع الجغرافية (locations)" },
     { name: "zones", label: "المناطق والأقسام (zones)" },
     { name: "task_templates", label: "القوالب المعيارية (task_templates)" },
+    { name: "sop_items", label: "بنود SOP المعيارية (sop_items)" },
     { name: "task_instances", label: "مهام العمل والتشغيل (task_instances)" },
     { name: "operational_tasks", label: "المهام التشغيلية (operational_tasks)" }
   ];
@@ -3222,24 +3523,24 @@ export async function validateDatabase(): Promise<DatabaseValidationReport> {
           }
         } 
         
-        else if (col.name === "task_templates") {
+        else if (col.name === "task_templates" || col.name === "sop_items") {
           if (!data.zone_id) {
-            detail.errors.push(`القالب [${id}]: معرف المنطقة 'zone_id' مفقود.`);
+            detail.errors.push(`البند [${id}]: معرف المنطقة 'zone_id' مفقود.`);
             docHasError = true;
           }
           if (!data.task_code) {
-            detail.errors.push(`القالب [${id}]: رمز المهمة 'task_code' مفقود.`);
+            detail.errors.push(`البند [${id}]: رمز المهمة 'task_code' مفقود.`);
             docHasError = true;
           }
           if (!data.title) {
-            detail.errors.push(`القالب [${id}]: العنوان 'title' مفقود.`);
+            detail.errors.push(`البند [${id}]: العنوان 'title' مفقود.`);
             docHasError = true;
           }
           if (data.requires_photo_before === undefined) {
-            detail.warnings.push(`القالب [${id}]: حقل 'requires_photo_before' غير معرف (يفترض false).`);
+            detail.warnings.push(`البند [${id}]: حقل 'requires_photo_before' غير معرف (يفترض false).`);
           }
           if (data.requires_photo_after === undefined) {
-            detail.warnings.push(`القالب [${id}]: حقل 'requires_photo_after' غير معرف (يفترض false).`);
+            detail.warnings.push(`البند [${id}]: حقل 'requires_photo_after' غير معرف (يفترض false).`);
           }
         } 
         
