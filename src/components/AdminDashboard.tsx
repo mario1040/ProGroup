@@ -69,7 +69,7 @@ import {
 import { Profile, Zone, TaskTemplate, TaskInstance, OperationalTask, DeviceSwitch } from "../types";
 import InventoryManager from "./InventoryManager";
 
-// Import Recharts for KPI charts
+// Import Test Recharts for KPI charts
 import { 
   ResponsiveContainer, 
   BarChart, 
@@ -621,6 +621,21 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
 
     if (selectedTemplate.frequency === "أسبوعي" && (!selectedTemplate.recurrence_days || selectedTemplate.recurrence_days.length === 0)) {
       showToast("يرجى تحديد يوم واحد على الأقل للتكرار الأسبوعي 📅", "warning");
+      return;
+    }
+
+    if (selectedTemplate.frequency === "مرتين أسبوعيا" && (!selectedTemplate.recurrence_days || selectedTemplate.recurrence_days.length !== 2)) {
+      showToast("يرجى تحديد يومين بالضبط للتكرار مرتين أسبوعياً 📅", "warning");
+      return;
+    }
+
+    if (selectedTemplate.frequency === "ثلاث مرات أسبوعيا" && (!selectedTemplate.recurrence_days || selectedTemplate.recurrence_days.length !== 3)) {
+      showToast("يرجى تحديد ثلاثة أيام بالضبط للتكرار ثلاث مرات أسبوعياً 📅", "warning");
+      return;
+    }
+
+    if (selectedTemplate.frequency === "ثلاث مرات يوميا" && (!selectedTemplate.scheduled_times || selectedTemplate.scheduled_times.length !== 3)) {
+      showToast("يرجى تحديد ثلاثة أوقات بالضبط للتكرار ثلاث مرات يومياً ⏰", "warning");
       return;
     }
 
@@ -4126,19 +4141,62 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                   </select>
                 </div>
 
-                <div className="flex flex-col gap-1">
-                  <label className="flex justify-between items-center text-slate-500">
-                    <span>توقيت الجدولة المعتاد:</span>
-                    {isSavingTemplate && <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />}
-                  </label>
-                  <input
-                    type="time"
-                    disabled={loading || isSavingTemplate}
-                    value={selectedTemplate.scheduled_time || "08:00"}
-                    onChange={(e) => setSelectedTemplate({...selectedTemplate, scheduled_time: e.target.value})}
-                    className="p-2 border border-slate-200 rounded-lg outline-none disabled:bg-slate-50 disabled:text-slate-400"
-                  />
-                </div>
+                {selectedTemplate.frequency === "ثلاث مرات يوميا" ? (
+                  <div className="flex flex-col gap-1 col-span-2">
+                    <label className="flex justify-between items-center text-slate-500">
+                      <span>أوقات الجدولة (3 أوقات مطلوبة):</span>
+                      {isSavingTemplate && <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />}
+                    </label>
+                    <div className="flex flex-col gap-2">
+                      {(selectedTemplate.scheduled_times || [selectedTemplate.scheduled_time || "08:00"]).map((time, idx) => (
+                        <div key={idx} className="flex items-center gap-2">
+                          <input
+                            type="time"
+                            disabled={loading || isSavingTemplate}
+                            value={time}
+                            onChange={(e) => {
+                              const current = selectedTemplate.scheduled_times || [selectedTemplate.scheduled_time || "08:00"];
+                              const updated = [...current];
+                              updated[idx] = e.target.value;
+                              setSelectedTemplate({...selectedTemplate, scheduled_times: updated});
+                            }}
+                            className="p-2 border border-slate-200 rounded-lg outline-none disabled:bg-slate-50 disabled:text-slate-400 flex-1"
+                          />
+                          {(selectedTemplate.scheduled_times || []).length > 1 && (
+                            <button type="button" onClick={() => {
+                              const current = selectedTemplate.scheduled_times || [];
+                              setSelectedTemplate({...selectedTemplate, scheduled_times: current.filter((_, i) => i !== idx)});
+                            }} className="text-red-500 hover:text-red-700 text-xs font-bold px-2 py-1 rounded border border-red-200 hover:bg-red-50 transition">
+                              حذف
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                      {(selectedTemplate.scheduled_times || []).length < 5 && (
+                        <button type="button" onClick={() => {
+                          const current = selectedTemplate.scheduled_times || [];
+                          setSelectedTemplate({...selectedTemplate, scheduled_times: [...current, "08:00"]});
+                        }} className="text-indigo-600 hover:text-indigo-800 text-xs font-bold py-1.5 px-3 rounded border border-indigo-200 hover:bg-indigo-50 transition self-start">
+                          + إضافة وقت
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-1">
+                    <label className="flex justify-between items-center text-slate-500">
+                      <span>توقيت الجدولة المعتاد:</span>
+                      {isSavingTemplate && <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />}
+                    </label>
+                    <input
+                      type="time"
+                      disabled={loading || isSavingTemplate}
+                      value={selectedTemplate.scheduled_time || "08:00"}
+                      onChange={(e) => setSelectedTemplate({...selectedTemplate, scheduled_time: e.target.value})}
+                      className="p-2 border border-slate-200 rounded-lg outline-none disabled:bg-slate-50 disabled:text-slate-400"
+                    />
+                  </div>
+                )}
 
                 <div className="flex flex-col gap-1">
                   <label className="flex justify-between items-center text-slate-500">
@@ -4151,9 +4209,13 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                     onChange={(e) => {
                       const val = e.target.value;
                       const updated: any = { ...selectedTemplate, frequency: val };
-                      if (val === "أسبوعي" && (!selectedTemplate.recurrence_days || selectedTemplate.recurrence_days.length === 0)) {
-                        // Default to the current day or empty list
+                      if ((val === "أسبوعي" || val === "مرتين أسبوعيا" || val === "ثلاث مرات أسبوعيا") && (!selectedTemplate.recurrence_days || selectedTemplate.recurrence_days.length === 0)) {
                         updated.recurrence_days = [];
+                      }
+                      if (val === "ثلاث مرات يوميا") {
+                        updated.scheduled_times = selectedTemplate.scheduled_times?.length > 0
+                          ? selectedTemplate.scheduled_times
+                          : [selectedTemplate.scheduled_time || "08:00"];
                       }
                       setSelectedTemplate(updated);
                     }}
@@ -4162,11 +4224,14 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                     <option value="يومي">يومي</option>
                     <option value="يوم ويوم">يوم ويوم (يوم بعد يوم)</option>
                     <option value="أسبوعي">أسبوعي (أيام محددة)</option>
+                    <option value="مرتين أسبوعيا">مرتين أسبوعياً</option>
+                    <option value="ثلاث مرات أسبوعيا">ثلاث مرات أسبوعياً</option>
+                    <option value="ثلاث مرات يوميا">ثلاث مرات يومياً</option>
                   </select>
                 </div>
               </div>
 
-              {selectedTemplate.frequency === "أسبوعي" && (
+              {["أسبوعي", "مرتين أسبوعيا", "ثلاث مرات أسبوعيا"].includes(selectedTemplate.frequency) && (
                 <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200/60 flex flex-col gap-2.5 animate-fade-in">
                   <label className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
                     📅 حدد أيام التكرار في الأسبوع:

@@ -1124,7 +1124,6 @@ async function ensureSeeded(): Promise<void> {
       }
 
       if (!usersSnap.empty) {
-        await deduplicateDatabase();
 
         // Auto-reactivate any deactivated admin accounts and reset admin passwords to admin123 to recover from accidental lockouts
         try {
@@ -2621,16 +2620,20 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
     
     const merged = { ...currentTask, ...updates, updated_at: new Date().toISOString() };
 
-    // 2. Enforce "before photo" requirement
-    const requiresBefore = template ? template.requires_photo_before : true;
+    // 2. Enforce "before photo" requirement — use task instance snapshot first, SOP fallback only if undefined
+    const requiresBefore = currentTask.requires_photo_before !== undefined
+      ? currentTask.requires_photo_before
+      : (template ? template.requires_photo_before : true);
     if (requiresBefore && (updates.status === "in_progress" || updates.status === "completed")) {
       if (!merged.photo_before_url) {
         throw new Error("خطأ حماية: لا يمكن بدء أو إكمال هذه المهمة بدون التقاط ورفع صورة إثبات ما قبل البدء (Before Photo).");
       }
     }
 
-    // 3. Enforce "after photo" requirement
-    const requiresAfter = template ? template.requires_photo_after : true;
+    // 3. Enforce "after photo" requirement — use task instance snapshot first
+    const requiresAfter = currentTask.requires_photo_after !== undefined
+      ? currentTask.requires_photo_after
+      : (template ? template.requires_photo_after : true);
     if (requiresAfter && updates.status === "completed") {
       if (!merged.photo_after_url) {
         throw new Error("خطأ حماية: لا يمكن إغلاق وإكمال هذه المهمة بدون التقاط ورفع صورة إثبات جودة العمل (After Photo).");
@@ -2674,7 +2677,9 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
         }
       }
       
-      const requiresApproval = template ? template.requires_supervisor_approval : true;
+      const requiresApproval = currentTask.requires_supervisor_approval !== undefined
+        ? currentTask.requires_supervisor_approval
+        : (template ? template.requires_supervisor_approval : true);
       if (!requiresApproval) {
         merged.supervisor_approved = true;
         merged.supervisor_approved_at = new Date().toISOString();

@@ -58,6 +58,7 @@ export interface TaskTemplate {
   reference_image_url?: string; // reference image for cleaner view
   created_at?: string;
   updated_at?: string;
+  scheduled_times?: string[]; // ["09:00", "13:00", "17:00"] for multi-occurrence daily SOPs
 }
 
 export type SOPItem = TaskTemplate;
