@@ -153,16 +153,7 @@ export default function TodayTasksPage({
   useEffect(() => {
     setLoading(true);
     const unsubscribe = listenTodayTasks(user.id, (myTasks) => {
-      // Deduplicate task instances by title, zone, date, and time
-      const seenTask = new Set<string>();
-      const uniqueTasks = myTasks.filter(t => {
-        const key = `${(t.title || "").trim().toLowerCase()}_${t.zone_id || ""}_${t.due_date || ""}_${t.due_time || ""}`;
-        if (seenTask.has(key)) return false;
-        seenTask.add(key);
-        return true;
-      });
-
-      setTasks(uniqueTasks);
+      setTasks(myTasks);
       setLoading(false);
       
       setSelectedTask((prevSelected) => {

@@ -238,15 +238,6 @@ function initLocalDB() {
         }
       });
 
-      // Migrate existing local templates to sop_items if empty
-      if (!localDB.sop_items || Object.keys(localDB.sop_items).length === 0) {
-        localDB.sop_items = {};
-        Object.keys(localDB.task_templates).forEach(k => {
-          localDB.sop_items[k] = localDB.task_templates[k];
-        });
-        localTemplatesChanged = true;
-      }
-
       // Auto-recovery for deactivated admin accounts in local storage fallback
       let localUsersChanged = false;
       if (localDB.users) {
@@ -1404,6 +1395,88 @@ export function getDaysDiff(dateStr1: string, dateStr2: string) {
   return Math.floor(Math.abs(utc2 - utc1) / (1000 * 60 * 60 * 24));
 }
 
+// --- Recurrence Engine Helpers ---
+
+function getSopOccurrencesForDate(sop: SOPItem, dateStr: string): { time: string; occurrenceIndex: number }[] {
+  if (!sop.is_active) return [];
+  const dayNameAr = getArabicDayName(dateStr);
+  const occurrences: { time: string; occurrenceIndex: number }[] = [];
+  const times: string[] = [];
+  if (sop.scheduled_times && sop.scheduled_times.length > 0) {
+    times.push(...sop.scheduled_times);
+  } else if (sop.scheduled_time) {
+    times.push(sop.scheduled_time);
+  } else {
+    times.push("09:00");
+  }
+  switch (sop.frequency) {
+    case "يومي":
+      times.forEach((time, idx) => occurrences.push({ time, occurrenceIndex: idx }));
+      break;
+    case "يوم ويوم":
+    case "يوم و يوم":
+      const createdDateStr = sop.created_at ? sop.created_at.split("T")[0] : "2026-07-01";
+      if (getDaysDiff(createdDateStr, dateStr) % 2 === 0) {
+        times.forEach((time, idx) => occurrences.push({ time, occurrenceIndex: idx }));
+      }
+      break;
+    case "أسبوعي":
+    case "مرتين أسبوعيا":
+    case "ثلاث مرات أسبوعيا":
+      if (sop.recurrence_days && sop.recurrence_days.includes(dayNameAr)) {
+        times.forEach((time, idx) => occurrences.push({ time, occurrenceIndex: idx }));
+      }
+      break;
+    case "ثلاث مرات يوميا":
+      times.forEach((time, idx) => occurrences.push({ time, occurrenceIndex: idx }));
+      break;
+    default:
+      return [];
+  }
+  return occurrences;
+}
+
+function generateTaskInstanceId(sopId: string, dateStr: string, occurrenceIndex: number): string {
+  return `ti_rec_${sopId}_${dateStr}_${occurrenceIndex}`;
+}
+
+function buildTaskInstanceSnapshot(
+  sop: SOPItem,
+  dateStr: string,
+  occurrence: { time: string; occurrenceIndex: number },
+  assignedTo: string
+): TaskInstance {
+  return {
+    id: generateTaskInstanceId(sop.id, dateStr, occurrence.occurrenceIndex),
+    template_id: sop.id,
+    sop_item_id: sop.id,
+    zone_id: sop.zone_id,
+    assigned_to: assignedTo,
+    assigned_by: "p1",
+    task_type: "recurring",
+    title: sop.title,
+    description: sop.description || "",
+    goal: sop.goal || "",
+    task_code: sop.task_code || "",
+    category: sop.category || "تشغيل",
+    tools_required: sop.tools_required || "",
+    estimated_duration_minutes: sop.estimated_duration_minutes || 0,
+    due_date: dateStr,
+    due_time: occurrence.time,
+    status: "pending",
+    supervisor_approved: false,
+    guide_image_url: sop.guide_image_url || "",
+    reference_image_url: sop.reference_image_url || "",
+    requires_photo_before: sop.requires_photo_before ?? true,
+    requires_photo_after: sop.requires_photo_after ?? true,
+    requires_supervisor_approval: sop.requires_supervisor_approval ?? true,
+    requires_gps: sop.requires_gps ?? false,
+    requires_signature: sop.requires_signature || false,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString()
+  };
+}
+
 // --- API Operations ---
 
 const PRE_SEEDED_USERS = [
@@ -1815,105 +1888,47 @@ export async function getTemplates(): Promise<TaskTemplate[]> {
   return getSopItems();
 }
 
-export async function pregenerateTaskInstances(tpl: SOPItem, daysCount = 30): Promise<void> {
+export async function pregenerateTaskInstances(tpl: SOPItem, daysCount = 7): Promise<void> {
   console.log(`[Pregenerate] Generating task instances for SOP item ${tpl.id} (${tpl.title}) for next ${daysCount} days...`);
   try {
     const profiles = await getProfiles();
     const zones = await getRawZones();
-    
-    // Get date strings for the next daysCount days (including today)
     const dates: string[] = [];
     const baseDate = new Date();
     for (let i = 0; i < daysCount; i++) {
       const d = new Date(baseDate);
       d.setDate(baseDate.getDate() + i);
-      
       const year = d.getFullYear();
       const month = String(d.getMonth() + 1).padStart(2, "0");
       const day = String(d.getDate()).padStart(2, "0");
       dates.push(`${year}-${month}-${day}`);
     }
 
-    // Load existing instances for this SOP item in the date range
-    let existingInstances: TaskInstance[] = [];
-    if (useLocalFallback) {
-      existingInstances = Object.values(localDB.task_instances || {}).filter(
-        (ti: any) => (ti.sop_item_id === tpl.id || ti.template_id === tpl.id) && dates.includes(ti.due_date)
-      ) as TaskInstance[];
-    } else {
-      // Direct query by sop_item_id
-      const q = query(
-        collection(db, "task_instances"),
-        where("sop_item_id", "==", tpl.id)
-      );
-      const snap = await getDocs(q);
-      snap.forEach((docSnap: any) => {
-        const data = docSnap.data() as TaskInstance;
-        if (dates.includes(data.due_date)) {
-          existingInstances.push(data);
-        }
-      });
-
-      // Backward compatible fallback query by template_id
-      const qLegacy = query(
-        collection(db, "task_instances"),
-        where("template_id", "==", tpl.id)
-      );
-      const snapLegacy = await getDocs(qLegacy);
-      snapLegacy.forEach((docSnap: any) => {
-        const data = docSnap.data() as TaskInstance;
-        if (dates.includes(data.due_date) && !existingInstances.some(x => x.id === data.id)) {
-          existingInstances.push(data);
-        }
-      });
-    }
-
     for (const dateStr of dates) {
-      const todayDayNameAr = getArabicDayName(dateStr);
-      let runsToday = false;
-      
-      if (tpl.frequency === "يومي") {
-        runsToday = true;
-      } else if (tpl.frequency === "يوم ويوم" || tpl.frequency === "يوم و يوم") {
-        const createdDateStr = tpl.created_at ? tpl.created_at.split("T")[0] : "2026-07-01";
-        const diffDays = getDaysDiff(createdDateStr, dateStr);
-        runsToday = (diffDays % 2 === 0);
-      } else if (tpl.frequency === "أسبوعي") {
-        runsToday = !!(tpl.recurrence_days && tpl.recurrence_days.includes(todayDayNameAr));
-      }
-
-      if (runsToday) {
-        const alreadyExists = existingInstances.some((ti) => ti.due_date === dateStr);
-        if (!alreadyExists) {
-          // Determine assignee
+      const occurrences = getSopOccurrencesForDate(tpl, dateStr);
+      for (const occurrence of occurrences) {
+        const instanceId = generateTaskInstanceId(tpl.id, dateStr, occurrence.occurrenceIndex);
+        // Check existence with a lightweight getDoc to avoid loading all instances
+        const existingSnap = await getDoc(doc(db, "task_instances", instanceId));
+        if (!existingSnap.exists()) {
           let assignedTo = tpl.default_assignee_id || "";
-          
           if (!assignedTo) {
             const tplZone = zones.find((z) => z.id === tpl.zone_id);
             if (tplZone?.responsible_employee_id) {
               const respEmp = profiles.find((p) => p.id === tplZone.responsible_employee_id && p.is_active);
-              if (respEmp) {
-                assignedTo = respEmp.id;
-              }
+              if (respEmp) assignedTo = respEmp.id;
             }
-            
             if (!assignedTo) {
+              const dayNameAr = getArabicDayName(dateStr);
               const activeCleaners = profiles.filter((p) => p.is_active && p.role === "cleaner");
-              let workingCleaners = activeCleaners.filter((p) => !p.work_days || p.work_days.includes(todayDayNameAr));
-              
-              if (workingCleaners.length === 0) {
-                workingCleaners = activeCleaners;
-              }
-              
+              let workingCleaners = activeCleaners.filter((p) => !p.work_days || p.work_days.includes(dayNameAr));
+              if (workingCleaners.length === 0) workingCleaners = activeCleaners;
               if (workingCleaners.length > 0) {
                 let bestCleaner = workingCleaners[0];
                 let minTasks = Infinity;
                 for (const cleaner of workingCleaners) {
-                  const taskCount = existingInstances.filter((ti) => ti.assigned_to === cleaner.id && ti.due_date === dateStr).length;
-                  if (taskCount < minTasks) {
-                    minTasks = taskCount;
-                    bestCleaner = cleaner;
-                  }
+                  const taskCount = instances.filter((ti) => ti.assigned_to === cleaner.id && ti.due_date === dateStr).length;
+                  if (taskCount < minTasks) { minTasks = taskCount; bestCleaner = cleaner; }
                 }
                 assignedTo = bestCleaner.id;
               } else {
@@ -1922,49 +1937,16 @@ export async function pregenerateTaskInstances(tpl: SOPItem, daysCount = 30): Pr
               }
             }
           }
-
-          const id = `ti_rec_${tpl.id}_${dateStr}`;
-          const newInstance: TaskInstance = {
-            id,
-            template_id: tpl.id, // Legacy compatibility
-            sop_item_id: tpl.id,  // Direct master SOP item reference
-            zone_id: tpl.zone_id,
-            assigned_to: assignedTo,
-            assigned_by: "p1",
-            task_type: "recurring",
-            title: tpl.title,
-            description: tpl.description || "",
-            goal: tpl.goal || "",
-            task_code: tpl.task_code || "",
-            category: tpl.category || "تشغيل",
-            tools_required: tpl.tools_required || "",
-            estimated_duration_minutes: tpl.estimated_duration_minutes || 0,
-            due_date: dateStr,
-            due_time: tpl.scheduled_time || "09:00",
-            status: "pending",
-            supervisor_approved: false,
-            guide_image_url: tpl.guide_image_url || "",
-            reference_image_url: tpl.reference_image_url || "",
-            requires_photo_before: tpl.requires_photo_before ?? true,
-            requires_photo_after: tpl.requires_photo_after ?? true,
-            requires_supervisor_approval: tpl.requires_supervisor_approval ?? true,
-            requires_gps: tpl.requires_gps ?? false,
-            requires_signature: tpl.requires_signature ?? false,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString()
-          };
-
-          await setDoc(doc(db, "task_instances", id), newInstance);
-          existingInstances.push(newInstance);
+          const newInstance = buildTaskInstanceSnapshot(tpl, dateStr, occurrence, assignedTo);
+          await setDoc(doc(db, "task_instances", instanceId), newInstance, { merge: true });
         }
       }
     }
-    console.log(`[Pregenerate] Successfully pre-generated/verified task instances for SOP item ${tpl.id}.`);
+    console.log(`[Pregenerate] Completed for SOP item ${tpl.id}.`);
   } catch (err) {
-    console.error("[Pregenerate] Failed to pregenerate task instances:", err);
+    console.error("[Pregenerate] Failed:", err);
   }
 }
-
 export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
   await ensureSeeded();
   let finalItem: any;
@@ -2077,9 +2059,7 @@ export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
             requires_gps: finalItem.requires_gps ?? false,
             requires_signature: finalItem.requires_signature ?? false,
             assigned_to: finalItem.default_assignee_id || ti.assigned_to,
-            due_time: (finalItem.scheduled_times && finalItem.scheduled_times.length > 0)
-              ? (finalItem.scheduled_times[0] || ti.due_time || "09:00")
-              : (finalItem.scheduled_time || ti.due_time || "09:00"),
+            due_time: ti.due_time || (finalItem.scheduled_times && finalItem.scheduled_times.length > 0 ? finalItem.scheduled_times[0] : finalItem.scheduled_time) || "09:00",
             updated_at: new Date().toISOString()
           };
           
@@ -2170,110 +2150,46 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
   let generatedAny = false;
   
   for (const tpl of templates) {
-    if (!tpl.is_active) continue;
-    
-    let runsToday = false;
-    if (tpl.frequency === "يومي") {
-      runsToday = true;
-    } else if (tpl.frequency === "يوم ويوم" || tpl.frequency === "يوم و يوم") {
-      const createdDateStr = tpl.created_at ? tpl.created_at.split("T")[0] : "2026-07-01";
-      const diffDays = getDaysDiff(createdDateStr, todayStr);
-      runsToday = (diffDays % 2 === 0);
-    } else if (tpl.frequency === "أسبوعي") {
-      runsToday = !!(tpl.recurrence_days && tpl.recurrence_days.includes(todayDayNameAr));
-    }
-    
-    if (runsToday) {
-      // Check if an instance of this specific recurring template already exists for today
-      const alreadyExists = instances.some((ti) => ti.template_id === tpl.id && ti.due_date === todayStr);
-      
+    const occurrences = getSopOccurrencesForDate(tpl, todayStr);
+    for (const occurrence of occurrences) {
+      const instanceId = generateTaskInstanceId(tpl.id, todayStr, occurrence.occurrenceIndex);
+      const alreadyExists = instances.some((ti) => ti.id === instanceId);
       if (!alreadyExists) {
         if (!generatedAny) {
           console.log(`[Firestore Client] Generating missing recurring SOP tasks for ${todayStr}...`);
           generatedAny = true;
         }
-
-        // Determine assignee (Flexible Auto-Distribution logic)
         let assignedTo = tpl.default_assignee_id || "";
-        
         if (!assignedTo) {
-          // 1. Try assigning to the responsible employee for the zone of this template
           const tplZone = zones.find((z) => z.id === tpl.zone_id);
           if (tplZone?.responsible_employee_id) {
             const respEmp = profiles.find((p) => p.id === tplZone.responsible_employee_id && p.is_active);
-            if (respEmp) {
-              assignedTo = respEmp.id;
-            }
+            if (respEmp) assignedTo = respEmp.id;
           }
-          
-          // 2. If no zone-specific employee is found, load-balance among active cleaners
           if (!assignedTo) {
             const activeCleaners = profiles.filter((p) => p.is_active && p.role === "cleaner");
-            // Filter by cleaners working today based on their work_days
             let workingCleaners = activeCleaners.filter((p) => !p.work_days || p.work_days.includes(todayDayNameAr));
-            
-            // Fallback to all active cleaners if no cleaner is explicitly scheduled for today
-            if (workingCleaners.length === 0) {
-              workingCleaners = activeCleaners;
-            }
-            
+            if (workingCleaners.length === 0) workingCleaners = activeCleaners;
             if (workingCleaners.length > 0) {
-              // Find the cleaner with the fewest tasks assigned today so far
               let bestCleaner = workingCleaners[0];
               let minTasks = Infinity;
-              
               for (const cleaner of workingCleaners) {
                 const taskCount = instances.filter((ti) => ti.assigned_to === cleaner.id).length;
-                if (taskCount < minTasks) {
-                  minTasks = taskCount;
-                  bestCleaner = cleaner;
-                }
+                if (taskCount < minTasks) { minTasks = taskCount; bestCleaner = cleaner; }
+                assignedTo = bestCleaner.id;
               }
-              assignedTo = bestCleaner.id;
             } else {
-              // Final fallback to the first active employee or hardcoded "p2"
               const firstActive = profiles.find((p) => p.is_active);
               assignedTo = firstActive ? firstActive.id : "p2";
             }
           }
         }
-
-        const id = `ti_rec_${tpl.id}_${todayStr}`;
-        const newInstance: TaskInstance = {
-          id,
-          template_id: tpl.id,
-          zone_id: tpl.zone_id,
-          assigned_to: assignedTo,
-          assigned_by: "p1",
-          task_type: "recurring",
-          title: tpl.title,
-          description: tpl.description || "",
-          goal: tpl.goal || "",
-          task_code: tpl.task_code || "",
-          category: tpl.category || "تشغيل",
-          tools_required: tpl.tools_required || "",
-          estimated_duration_minutes: tpl.estimated_duration_minutes || 0,
-          due_date: todayStr,
-          due_time: tpl.scheduled_time || "09:00",
-          status: "pending",
-          supervisor_approved: false,
-          guide_image_url: tpl.guide_image_url || "",
-          reference_image_url: tpl.reference_image_url || "",
-          requires_photo_before: tpl.requires_photo_before ?? true,
-          requires_photo_after: tpl.requires_photo_after ?? true,
-          requires_supervisor_approval: tpl.requires_supervisor_approval ?? true,
-          requires_gps: tpl.requires_gps ?? false,
-          requires_signature: tpl.requires_signature ?? false,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString()
-        };
-        
-        await setDoc(doc(db, "task_instances", id), newInstance);
+        const newInstance = buildTaskInstanceSnapshot(tpl, todayStr, occurrence, assignedTo);
+        await setDoc(doc(db, "task_instances", newInstance.id), newInstance, { merge: true });
         instances.push(newInstance);
       }
     }
   }
-  
   return instances.map((ti) => {
     const zone = zones.find((z) => z.id === ti.zone_id);
     const assignee = profiles.find((p) => p.id === ti.assigned_to);
