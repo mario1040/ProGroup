@@ -45,7 +45,7 @@ import {
   pruneStorageData
 } from "./offlineManager";
 
-// --- Clean Undefined Interceptor (Mandatory to prevent Firestore crash) ---
+// 44--- Clean Undefined Interceptor (Mandatory to prevent Firestore crash) ---
 function cleanUndefined<T extends object>(obj: T): T {
   if (!obj || typeof obj !== "object") return obj;
   const result = Array.isArray(obj) ? [] : {};
@@ -1113,8 +1113,7 @@ async function ensureSeeded(): Promise<void> {
           const seededTemplates = getSeededDB().task_templates;
           for (const template of seededTemplates) {
             await setDoc(doc(db, "task_templates", template.id), template);
-            await setDoc(doc(db, "sop_items", template.id), template);
-            console.log(`[SOP Template Engine] Seeded template and SOP item: ${template.id}`);
+            console.log(`[SOP Template Engine] Seeded template: ${template.id}`);
           }
           const syncFlagKey = "naris_sop_templates_synced_v34_fix";
           localStorage.setItem(syncFlagKey, "true");
@@ -1238,7 +1237,6 @@ async function ensureSeeded(): Promise<void> {
             const seeded = getSeededDB();
             for (const t of seeded.task_templates) {
               await setDoc(doc(db, "task_templates", t.id), t);
-              await setDoc(doc(db, "sop_items", t.id), t);
             }
           }
         } catch (e) {
@@ -1295,7 +1293,6 @@ async function ensureSeeded(): Promise<void> {
         await seedCollection("locations", seeded.locations);
         await seedCollection("zones", seeded.zones);
         await seedCollection("task_templates", seeded.task_templates);
-        await seedCollection("sop_items", seeded.task_templates);
         await seedCollection("task_instances", seeded.task_instances);
         await seedCollection("operational_tasks", seeded.operational_tasks);
         await seedCollection("notifications", seeded.notifications);
@@ -1325,10 +1322,9 @@ async function ensureSeeded(): Promise<void> {
           await setDoc(doc(db, "zones", z.id), z);
         }
         
-        // 4. Seed task_templates & sop_items
+        // 4. Seed task_templates
         for (const t of seeded.task_templates) {
           await setDoc(doc(db, "task_templates", t.id), t);
-          await setDoc(doc(db, "sop_items", t.id), t);
         }
         
         // 5. Seed task_instances
@@ -2024,11 +2020,9 @@ export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
   
   if (useLocalFallback) {
     localDB.sop_items[finalItem.id] = finalItem;
-    localDB.task_templates[finalItem.id] = finalItem; // For fallback
     saveLocalDB();
   } else {
     await setDoc(doc(db, "sop_items", finalItem.id), finalItem);
-    await setDoc(doc(db, "task_templates", finalItem.id), finalItem); // Mirror for compatibility
   }
   
   // Pregenerate task instances for the next 30 days
@@ -2122,32 +2116,11 @@ export async function deleteSopItem(id: string): Promise<void> {
   await ensureSeeded();
   try {
     if (useLocalFallback) {
-      console.log(`[Local DB] Deleting corresponding task instances for SOP item: ${id}`);
-      const keys = Object.keys(localDB.task_instances);
-      for (const k of keys) {
-        if (localDB.task_instances[k].sop_item_id === id || localDB.task_instances[k].template_id === id) {
-          delete localDB.task_instances[k];
-        }
-      }
       if (localDB.sop_items[id]) delete localDB.sop_items[id];
-      if (localDB.task_templates[id]) delete localDB.task_templates[id];
       saveLocalDB();
     } else {
-      console.log(`[Firestore Client] Deleting task instances for sop_item_id: ${id}...`);
-      const q = query(collection(db, "task_instances"), where("sop_item_id", "==", id));
-      const snap = await getDocs(q);
-      for (const d of snap.docs) {
-        await deleteDoc(doc(db, "task_instances", d.id));
-      }
-
-      const qLegacy = query(collection(db, "task_instances"), where("template_id", "==", id));
-      const snapLegacy = await getDocs(qLegacy);
-      for (const d of snapLegacy.docs) {
-        await deleteDoc(doc(db, "task_instances", d.id));
-      }
-
+      console.log(`[Firestore Client] Deleting master SOP item: ${id}...`);
       await deleteDoc(doc(db, "sop_items", id));
-      await deleteDoc(doc(db, "task_templates", id));
     }
     invalidateMetadataCaches();
   } catch (error) {
@@ -2497,6 +2470,37 @@ export async function createTask(task: Partial<TaskInstance>): Promise<TaskInsta
   return newInstance;
 }
 
+function validateTaskInstanceUpdate(merged: TaskInstance, updates: Partial<TaskInstance>) {
+  // 1. Enforce "before photo" requirement
+  const requiresBefore = merged.requires_photo_before === true;
+  if (requiresBefore && (updates.status === "in_progress" || updates.status === "completed" || merged.status === "completed")) {
+    if (!merged.photo_before_url) {
+      throw new Error("خطأ حماية: لا يمكن بدء أو إكمال هذه المهمة بدون التقاط ورفع صورة إثبات ما قبل البدء (Before Photo).");
+    }
+  }
+
+  // 2. Enforce "after photo" requirement
+  const requiresAfter = merged.requires_photo_after === true;
+  if (requiresAfter && (updates.status === "completed" || merged.status === "completed")) {
+    if (!merged.photo_after_url) {
+      throw new Error("خطأ حماية: لا يمكن إغلاق وإكمال هذه المهمة بدون التقاط ورفع صورة إثبات جودة العمل (After Photo).");
+    }
+  }
+
+  // Prevent lifting After photo before Before photo
+  if (updates.photo_after_url && requiresBefore && !merged.photo_before_url) {
+    throw new Error("خطأ حماية: لا يمكن رفع صورة الإثبات بعد العمل قبل رفع صورة الإثبات قبل العمل.");
+  }
+
+  // 3. Enforce "signature" requirement
+  const requiresSignature = merged.requires_signature === true;
+  if (requiresSignature && (updates.status === "completed" || merged.status === "completed")) {
+    if (!merged.employee_signature_url) {
+      throw new Error("خطأ حماية: لا يمكن إكمال هذه المهمة بدون التوقيع الإلكتروني المطلوب.");
+    }
+  }
+}
+
 function handleOfflineUpdate(id: string, updates: Partial<TaskInstance>): TaskInstance {
   console.log(`[Offline Engine] Saving local update for task: ${id}`, updates);
   
@@ -2526,6 +2530,9 @@ function handleOfflineUpdate(id: string, updates: Partial<TaskInstance>): TaskIn
 
   const merged = { ...cachedTask, ...updates, updated_at: new Date().toISOString() };
   
+  // Strict completion contract validation BEFORE saving local task state or queueing updates
+  validateTaskInstanceUpdate(merged, updates);
+
   if (updates.status === "in_progress" && !cachedTask.started_at) {
     merged.started_at = new Date().toISOString();
   }
@@ -2561,6 +2568,15 @@ export async function syncOfflineTasks(): Promise<number> {
       if (snap.exists()) {
         const currentTask = snap.data() as TaskInstance;
         const merged = { ...currentTask, ...item.updates, updated_at: new Date().toISOString() };
+        
+        // Revalidate the mutation again during reconnect sync
+        try {
+          validateTaskInstanceUpdate(merged, item.updates);
+        } catch (validationErr: any) {
+          console.warn(`[Offline Sync] Revalidation failed for task ${item.taskId}. Removing corrupted/incomplete update.`, validationErr);
+          removePendingUpdate(item.taskId);
+          continue; // Skip this sync item
+        }
         
         if (item.updates.status === "in_progress" && !currentTask.started_at) {
           merged.started_at = merged.started_at || new Date().toISOString();

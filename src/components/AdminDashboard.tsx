@@ -661,21 +661,8 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   };
 
   const handleResetDatabase = async () => {
-    try {
-      setIsResettingDb(true);
-      await resetDatabase();
-      showToast("تمت إعادة فحص وتأسيس قاعدة البيانات بنجاح تام وفق اللائحة الرسمية لنظام التشغيل والنظافة! 🚀✅", "success");
-      setConfirmResetActive(false);
-      // Run automatic validation check after reset to prove database is perfect
-      const rep = await validateDatabase();
-      setValidationReport(rep);
-      loadAllData();
-    } catch (err) {
-      console.error(err);
-      showToast("فشل في إعادة تهيئة قاعدة البيانات", "error");
-    } finally {
-      setIsResettingDb(false);
-    }
+    showToast("عذراً، تم تعطيل ميزة إعادة تهيئة قاعدة البيانات لحماية السجلات التاريخية للعميل ومنع فقدان البيانات. 🔒⚠️", "error");
+    return;
   };
 
   const handleRunValidation = async () => {
@@ -811,19 +798,8 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   };
 
   const handleReseedSop = async () => {
-    try {
-      setIsReseedingSop(true);
-      await reseedSopTemplatesAndResetTasks();
-      showToast("تم مسح كافة المهام والمقاييس القديمة، وإعادة إرسال ومزامنة الـ 35 بنداً تشغيلياً كاملاً في الداتابيز بنجاح تام! 🚀✨", "success");
-      await loadAllData();
-      const rep = await validateDatabase();
-      setValidationReport(rep);
-    } catch (err) {
-      console.error(err);
-      showToast("حدث خطأ أثناء إعادة تهيئة ومزامنة بنود الـ SOP", "error");
-    } finally {
-      setIsReseedingSop(false);
-    }
+    showToast("عذراً، تم تعطيل ميزة إعادة تهيئة ومزامنة الـ SOP لحماية السجلات التاريخية للعميل ومنع فقدان البيانات. 🔒⚠️", "error");
+    return;
   };
 
   const handleToggleBase64 = (enabled: boolean) => {
@@ -2711,36 +2687,9 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
 
                     <div className="flex flex-wrap items-center gap-2">
                       {/* Database Reset and Re-seed Tool */}
-                      {confirmResetActive ? (
-                        <div className="flex items-center gap-2 bg-rose-50 border border-rose-200 p-1.5 rounded-xl">
-                          <span className="text-xs font-bold text-rose-700 px-1">متأكد من مسح وإعادة بناء كل الجداول؟</span>
-                          <button
-                            type="button"
-                            disabled={isResettingDb}
-                            onClick={handleResetDatabase}
-                            className="bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-bold py-1.5 px-3 rounded-lg shadow transition cursor-pointer"
-                          >
-                            {isResettingDb ? "جاري التهيئة..." : "نعم، ابدأ الآن ⚠️"}
-                          </button>
-                          <button
-                            type="button"
-                            disabled={isResettingDb}
-                            onClick={() => setConfirmResetActive(false)}
-                            className="text-slate-500 hover:text-slate-800 text-[11px] font-bold py-1.5 px-2 cursor-pointer"
-                          >
-                            إلغاء
-                          </button>
-                        </div>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => setConfirmResetActive(true)}
-                          className="bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold py-2 px-3 rounded-xl shadow cursor-pointer transition flex items-center gap-1"
-                          title="إعادة فحص الجداول ومزامنتها وتوليد المهام الرسمية من الصفر"
-                        >
-                          🔄 فحص وإعادة تهيئة قاعدة البيانات
-                        </button>
-                      )}
+                      <div className="bg-slate-100 text-slate-500 text-xs font-bold py-2 px-3 rounded-xl border border-slate-200 flex items-center gap-1.5" title="تم تعطيل هذه الميزة مؤقتاً لحماية السجلات التاريخية من الحذف">
+                        🔒 ميزة إعادة التهيئة معطلة لحماية البيانات
+                      </div>
 
                       <button
                         type="button"
@@ -2881,17 +2830,11 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
 
                           <button
                             type="button"
-                            disabled={isReseedingSop}
-                            onClick={handleReseedSop}
-                            className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold py-2 px-4 rounded-xl shadow cursor-pointer transition flex items-center gap-1.5"
+                            disabled
+                            className="bg-slate-200 text-slate-400 text-xs font-bold py-2 px-4 rounded-xl cursor-not-allowed flex items-center gap-1.5"
+                            title="تم تعطيل التهيئة لسلامة البيانات التاريخية"
                           >
-                            {isReseedingSop ? (
-                              <span className="flex items-center gap-1">
-                                <span className="animate-spin text-white">⏳</span> جاري التهيئة والمزامنة...
-                              </span>
-                            ) : (
-                              "🔄 مسح وإعادة مزامنة الـ 35 مهمة (SOP)"
-                            )}
+                            🔒 إعادة مزامنة الـ SOP معطلة لحماية البيانات
                           </button>
                         </div>
                       </div>
