@@ -493,6 +493,35 @@ export default function TodayTasksPage({
 
   return (
     <div className="min-h-screen bg-slate-50 pb-28 font-sans">
+      {!isOnlineState && (
+        <div className="bg-rose-600 text-white py-3.5 px-4 sticky top-0 z-[60] shadow-md animate-fade-in text-right" dir="rtl">
+          <div className="max-w-md mx-auto flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <AlertTriangle className="w-5 h-5 text-rose-100 shrink-0 animate-bounce" />
+              <div>
+                <p className="font-bold text-xs text-rose-50">لا يوجد اتصال بالإنترنت</p>
+                <p className="text-[10px] text-rose-100 mt-0.5 leading-normal">
+                  تطبيق Naris Ops يتطلب اتصالاً نشطاً بالإنترنت. تم إيقاف جميع العمليات ورفع الصور مؤقتاً لتجنب فقدان البيانات.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => {
+                setIsOnlineState(isOnline());
+                if (isOnline()) {
+                  showToast("تمت استعادة الاتصال بالإنترنت بنجاح! 🟢", "success");
+                } else {
+                  showToast("لا يزال الاتصال مقطوعاً. يرجى التحقق من الشبكة.", "error");
+                }
+              }}
+              className="bg-white/15 hover:bg-white/25 active:bg-white/35 text-white text-[10px] font-extrabold py-1.5 px-3 rounded-lg border border-white/25 cursor-pointer shrink-0 transition"
+            >
+              🔄 إعادة الفحص
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Toast Alert */}
       {toast && (
         <div className={`fixed top-4 left-4 right-4 md:left-auto md:w-96 z-50 p-4 rounded-xl shadow-lg border transition-all duration-300 transform translate-y-0 flex items-center gap-3 ${
@@ -984,8 +1013,8 @@ export default function TodayTasksPage({
                       <button
                         type="button"
                         onClick={handleStartTask}
-                        disabled={isSubmitting}
-                        className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3.5 rounded-xl transition shadow-md shadow-indigo-600/15 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                        disabled={isSubmitting || !isOnlineState}
+                        className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3.5 rounded-xl transition shadow-md shadow-indigo-600/15 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         {isSubmitting ? (
                           <Loader2 className="w-5 h-5 animate-spin" />
@@ -1002,7 +1031,8 @@ export default function TodayTasksPage({
                       <button
                         type="button"
                         onClick={handleFinishTaskClick}
-                        className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3.5 rounded-xl transition shadow flex items-center justify-center gap-2 cursor-pointer"
+                        disabled={!isOnlineState}
+                        className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3.5 rounded-xl transition shadow flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         <CheckCircle2 className="w-5 h-5" />
                         <span>إنهاء المهمة وتسليمها</span>
@@ -1040,6 +1070,7 @@ export default function TodayTasksPage({
                     onPhotoUploaded={handlePhotoBeforeSubmitted} 
                     required={true}
                     storagePath={`task-photos/${selectedTask.zone_id}/${selectedTask.id}/before.jpg`}
+                    disabled={!isOnlineState}
                   />
 
                   {isSubmitting && (
@@ -1064,6 +1095,7 @@ export default function TodayTasksPage({
                     onPhotoUploaded={handlePhotoAfterSubmitted} 
                     required={true}
                     storagePath={`task-photos/${selectedTask.zone_id}/${selectedTask.id}/after.jpg`}
+                    disabled={!isOnlineState}
                   />
                 </div>
               )}
@@ -1090,8 +1122,8 @@ export default function TodayTasksPage({
                   <button
                     type="button"
                     onClick={() => submitTaskCompleted()}
-                    disabled={isSubmitting}
-                    className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold py-3.5 rounded-xl transition shadow flex items-center justify-center gap-2 cursor-pointer mt-2"
+                    disabled={isSubmitting || !isOnlineState}
+                    className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:bg-slate-300 text-white font-bold py-3.5 rounded-xl transition shadow flex items-center justify-center gap-2 cursor-pointer mt-2 disabled:cursor-not-allowed"
                   >
                     {isSubmitting ? (
                       <Loader2 className="w-5 h-5 animate-spin" />
@@ -1110,57 +1142,46 @@ export default function TodayTasksPage({
         </div>
       )}
 
-      {/* Visual 'Sync Queue' Indicator Footer */}
-      <div className="fixed bottom-0 left-0 right-0 z-40 bg-slate-900/95 backdrop-blur-md border-t border-slate-800 text-slate-100 py-3 px-4 shadow-2xl">
+      {/* Visual Connection Status Indicator Footer */}
+      <div className="fixed bottom-0 left-0 right-0 z-40 bg-slate-900/95 backdrop-blur-md border-t border-slate-800 text-slate-100 py-3 px-4 shadow-2xl" dir="rtl">
         <div className="max-w-md mx-auto flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className={`p-2 rounded-xl shrink-0 transition-colors ${pendingCount > 0 ? 'bg-amber-500/10 text-amber-400' : 'bg-emerald-500/10 text-emerald-400'}`}>
-              <CheckCircle2 className={`w-5 h-5 ${pendingCount > 0 ? 'animate-pulse' : ''}`} />
+            <div className={`p-2 rounded-xl shrink-0 transition-colors ${isOnlineState ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
+              {isOnlineState ? (
+                <CheckCircle2 className="w-5 h-5" />
+              ) : (
+                <AlertTriangle className="w-5 h-5 animate-pulse" />
+              )}
             </div>
             <div>
               <div className="font-bold flex items-center gap-2 text-slate-100 text-xs">
-                <span>طابور المزامنة</span>
-                <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border ${pendingCount > 0 ? 'bg-amber-500/20 text-amber-400 border-amber-500/30' : 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'}`}>
-                  {pendingCount} معلقة
+                <span>حالة الاتصال بالسحابة</span>
+                <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border ${isOnlineState ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border-rose-500/30'}`}>
+                  {isOnlineState ? "نشط" : "غير متصل"}
                 </span>
               </div>
-              <p className="text-[10px] text-slate-400 mt-1 leading-normal">
-                {pendingCount > 0 
-                  ? "إجراءات مكتملة بانتظار الاتصال لحفظها في السحابة" 
-                  : "جميع المهام محدثة بالكامل ومزامنة مع الخادم"}
+              <p className="text-[10px] text-slate-400 mt-1 leading-normal text-right">
+                {isOnlineState 
+                  ? "تطبيق Naris Ops متصل بخدمات Firebase السحابية ومزامن بالكامل." 
+                  : "يرجى إعادة الاتصال بالشبكة للمتابعة وتحديث حالة المهام."}
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-3 shrink-0">
-            <div className="hidden sm:flex flex-col items-end text-right">
-              <span className="text-[9px] text-slate-500">الاتصال بالشبكة</span>
-              <span className={`text-[10px] font-extrabold mt-0.5 ${isOnlineState ? 'text-emerald-400' : 'text-amber-400'}`}>
-                {isOnlineState ? "متصل بالإنترنت" : "دون اتصال بالشبكة"}
-              </span>
-            </div>
-
-
-
-            {pendingCount > 0 && (
-              <button
-                onClick={handleSyncClick}
-                disabled={isSyncing || !isOnlineState}
-                className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-800 disabled:text-slate-500 disabled:border-slate-800/80 text-white font-bold py-1.5 px-3 rounded-xl flex items-center gap-1.5 cursor-pointer transition text-xs shadow-md shadow-indigo-600/15"
-              >
-                {isSyncing ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    <span>مزامنة...</span>
-                  </>
-                ) : (
-                  <>
-                    <Send className="w-3.5 h-3.5 rotate-180" />
-                    <span>مزامنة الآن</span>
-                  </>
-                )}
-              </button>
-            )}
+            <button
+              onClick={() => {
+                setIsOnlineState(isOnline());
+                if (isOnline()) {
+                  showToast("تم التحقق واستعادة الاتصال السحابي! 🟢", "success");
+                } else {
+                  showToast("لا يزال غير متصل بالإنترنت. يرجى مراجعة الشبكة.", "error");
+                }
+              }}
+              className="bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-200 font-bold py-1.5 px-3 rounded-xl cursor-pointer transition text-xs border border-slate-700/60 flex items-center gap-1.5"
+            >
+              🔄 فحص الاتصال
+            </button>
           </div>
         </div>
       </div>

@@ -8,9 +8,10 @@ interface PhotoCaptureProps {
   onPhotoUploaded: (metadata: { url: string; size: number; mimeType: string; takenAt: string }) => void;
   required?: boolean;
   storagePath: string; // Structured path for Firebase Storage
+  disabled?: boolean;
 }
 
-export default function PhotoCapture({ label, onPhotoUploaded, required = true, storagePath }: PhotoCaptureProps) {
+export default function PhotoCapture({ label, onPhotoUploaded, required = true, storagePath, disabled = false }: PhotoCaptureProps) {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [rawBase64, setRawBase64] = useState<string | null>(null);
   const [compressedBase64, setCompressedBase64] = useState<string | null>(null);
@@ -165,33 +166,9 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
         },
         async (err) => {
           setActiveTask(null);
-          console.warn("[PhotoCapture] ⚠️ Stage 7: Upload error caught. Falling back to Base64...", err);
-          try {
-            const superCompressedBase64 = await compressImage(payload, 400, 400, 0.45);
-            console.log(`[PhotoCapture] ✅ Fallback Success: Generated base64 (length: ${superCompressedBase64.length})`);
-            
-            const imageUrl = superCompressedBase64;
-            setProgress(100);
-            setUploadedUrl(imageUrl);
-            
-            const finalSize = Math.round((superCompressedBase64.length - "data:image/jpeg;base64,".length) * 3 / 4);
-            const finalMimeType = "image/jpeg";
-            const finalTakenAt = takenAt || new Date().toISOString();
-
-            const metadata = {
-              url: imageUrl,
-              size: finalSize,
-              mimeType: finalMimeType,
-              takenAt: finalTakenAt
-            };
-            
-            onPhotoUploaded(metadata);
-          } catch (fallbackErr: any) {
-            setError(err.message || "فشل رفع الصورة إلى التخزين السحابي. يرجى المحاولة مرة أخرى.");
-            console.error("[PhotoCapture] ❌ Stage 7: Upload and Fallback error caught in component:", fallbackErr);
-          } finally {
-            setUploading(false);
-          }
+          console.error("[PhotoCapture] ❌ Upload failed:", err);
+          setError("تعذر رفع الصورة. يرجى التأكد من الاتصال بالإنترنت والمحاولة مرة أخرى.");
+          setUploading(false);
         },
         async () => {
           try {
@@ -224,7 +201,7 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
             onPhotoUploaded(metadata);
             console.log("[PhotoCapture] ✅ Stage 6: Upload flow fully completed successfully.");
           } catch (err: any) {
-            setError(err.message || "فشل جلب رابط الصورة. يرجى المحاولة مرة أخرى.");
+            setError("تعذر رفع الصورة. يرجى التأكد من الاتصال بالإنترنت والمحاولة مرة أخرى.");
           } finally {
             setActiveTask(null);
             setUploading(false);
@@ -233,33 +210,9 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
       );
     } catch (err: any) {
       setActiveTask(null);
-      console.warn("[PhotoCapture] ⚠️ Stage 7: Upload error caught. Falling back to Base64...", err);
-      try {
-        const superCompressedBase64 = await compressImage(payload, 400, 400, 0.45);
-        console.log(`[PhotoCapture] ✅ Fallback Success: Generated base64 (length: ${superCompressedBase64.length})`);
-        
-        const imageUrl = superCompressedBase64;
-        setProgress(100);
-        setUploadedUrl(imageUrl);
-        
-        const finalSize = Math.round((superCompressedBase64.length - "data:image/jpeg;base64,".length) * 3 / 4);
-        const finalMimeType = "image/jpeg";
-        const finalTakenAt = takenAt || new Date().toISOString();
-
-        const metadata = {
-          url: imageUrl,
-          size: finalSize,
-          mimeType: finalMimeType,
-          takenAt: finalTakenAt
-        };
-        
-        onPhotoUploaded(metadata);
-      } catch (fallbackErr: any) {
-        setError(err.message || "فشل رفع الصورة إلى التخزين السحابي. يرجى المحاولة مرة أخرى.");
-        console.error("[PhotoCapture] ❌ Stage 7: Upload and Fallback error caught in component:", fallbackErr);
-      } finally {
-        setUploading(false);
-      }
+      console.error("[PhotoCapture] ❌ Upload initiation failed:", err);
+      setError("تعذر رفع الصورة. يرجى التأكد من الاتصال بالإنترنت والمحاولة مرة أخرى.");
+      setUploading(false);
     }
   };
 
@@ -322,8 +275,9 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
       {!previewUrl && (
         <button
           type="button"
-          onClick={triggerCamera}
-          className="flex flex-col items-center gap-3 py-8 px-10 bg-slate-50 border-2 border-dashed border-slate-300 hover:border-blue-500 hover:bg-blue-50/30 text-slate-600 rounded-2xl transition duration-200 cursor-pointer w-full max-w-sm group"
+          onClick={disabled ? undefined : triggerCamera}
+          disabled={disabled}
+          className="flex flex-col items-center gap-3 py-8 px-10 bg-slate-50 border-2 border-dashed border-slate-300 hover:border-blue-500 hover:bg-blue-50/30 text-slate-600 rounded-2xl transition duration-200 cursor-pointer w-full max-w-sm group disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <div className="p-4 bg-white rounded-full shadow-sm group-hover:scale-110 transition duration-200 border border-slate-100">
             <Camera className="w-8 h-8 text-blue-500" />
@@ -429,16 +383,17 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
                 <>
                   <button
                     type="button"
-                    onClick={resetPhoto}
-                    className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 border border-slate-200 hover:border-slate-300 text-slate-700 rounded-xl text-xs font-bold cursor-pointer transition duration-150 flex items-center justify-center gap-1"
+                    onClick={disabled ? undefined : resetPhoto}
+                    disabled={disabled}
+                    className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 border border-slate-200 hover:border-slate-300 text-slate-700 rounded-xl text-xs font-bold cursor-pointer transition duration-150 flex items-center justify-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <RefreshCw className="w-3.5 h-3.5" /> إلغاء وإعادة التقاط
                   </button>
                   <button
                     type="button"
-                    onClick={handleConfirmUpload}
-                    disabled={!compressedBase64 && !rawBase64}
-                    className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white rounded-xl text-xs font-bold cursor-pointer transition duration-150 flex items-center justify-center gap-1.5 shadow-sm shadow-blue-200"
+                    onClick={disabled ? undefined : handleConfirmUpload}
+                    disabled={disabled || (!compressedBase64 && !rawBase64)}
+                    className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white rounded-xl text-xs font-bold cursor-pointer transition duration-150 flex items-center justify-center gap-1.5 shadow-sm shadow-blue-200 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <Upload className="w-3.5 h-3.5" /> تأكيد ورفع سحابي
                   </button>

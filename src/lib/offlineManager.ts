@@ -327,62 +327,22 @@ export function getCachedTasks(userId: string): any[] {
 }
 
 export function getPendingUpdates(): PendingUpdate[] {
-  try {
-    const data = localStorage.getItem(PENDING_UPDATES_KEY);
-    return data ? JSON.parse(data) : [];
-  } catch (err) {
-    console.error("Failed to get pending updates:", err);
-    return [];
-  }
+  // Offline pending updates are disabled in online-only production mode
+  return [];
 }
 
 export function savePendingUpdates(updates: PendingUpdate[]): void {
-  try {
-    localStorage.setItem(PENDING_UPDATES_KEY, JSON.stringify(updates));
-  } catch (err) {
-    console.error("Failed to save pending updates:", err);
-  }
+  // Disabled
 }
 
 export function addPendingUpdate(taskId: string, updates: Partial<TaskInstance>): void {
-  try {
-    const currentQueue = getPendingUpdates();
-    const existingIndex = currentQueue.findIndex((item) => item.taskId === taskId);
-
-    if (existingIndex > -1) {
-      currentQueue[existingIndex].updates = {
-        ...currentQueue[existingIndex].updates,
-        ...updates,
-      };
-      currentQueue[existingIndex].timestamp = new Date().toISOString();
-    } else {
-      currentQueue.push({
-        taskId,
-        updates,
-        timestamp: new Date().toISOString(),
-      });
-    }
-
-    savePendingUpdates(currentQueue);
-  } catch (err) {
-    console.error("Failed to add pending update:", err);
-  }
+  // Disabled
 }
 
 export function removePendingUpdate(taskId: string): void {
-  try {
-    const currentQueue = getPendingUpdates();
-    const filtered = currentQueue.filter((item) => item.taskId !== taskId);
-    savePendingUpdates(filtered);
-  } catch (err) {
-    console.error("Failed to remove pending update:", err);
-  }
+  // Disabled
 }
 
 export function clearAllPendingUpdates(): void {
-  try {
-    localStorage.removeItem(PENDING_UPDATES_KEY);
-  } catch (err) {
-    console.error("Failed to clear pending updates:", err);
-  }
+  // Disabled
 }

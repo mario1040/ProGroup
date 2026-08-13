@@ -2555,86 +2555,8 @@ function handleOfflineUpdate(id: string, updates: Partial<TaskInstance>): TaskIn
 }
 
 export async function syncOfflineTasks(): Promise<number> {
-  const pending = getPendingUpdates();
-  if (pending.length === 0) return 0;
-
-  console.log(`[Offline Sync] Synchronizing ${pending.length} pending updates...`);
-  let successCount = 0;
-
-  for (const item of pending) {
-    try {
-      const docRef = doc(db, "task_instances", item.taskId);
-      const snap = await getDoc(docRef);
-      if (snap.exists()) {
-        const currentTask = snap.data() as TaskInstance;
-        const merged = { ...currentTask, ...item.updates, updated_at: new Date().toISOString() };
-        
-        // Revalidate the mutation again during reconnect sync
-        try {
-          validateTaskInstanceUpdate(merged, item.updates);
-        } catch (validationErr: any) {
-          console.warn(`[Offline Sync] Revalidation failed for task ${item.taskId}. Removing corrupted/incomplete update.`, validationErr);
-          removePendingUpdate(item.taskId);
-          continue; // Skip this sync item
-        }
-        
-        if (item.updates.status === "in_progress" && !currentTask.started_at) {
-          merged.started_at = merged.started_at || new Date().toISOString();
-        }
-        if (item.updates.status === "completed" && !currentTask.completed_at) {
-          merged.completed_at = merged.completed_at || new Date().toISOString();
-          if (!merged.photo_after_taken_at) {
-            merged.photo_after_taken_at = item.updates.photo_after_taken_at || new Date().toISOString();
-          }
-          merged.photo_after_uploaded_at = item.updates.photo_after_uploaded_at || new Date().toISOString();
-        }
-
-        if (merged.photo_before_url && merged.photo_before_url.startsWith("data:")) {
-          try {
-            console.log(`[Offline Sync] Auto-uploading local before photo to Firebase Storage for task ${item.taskId}...`);
-            const storagePath = `tasks/${item.taskId}/before_${Date.now()}.jpg`;
-            const uploadedUrl = await uploadPhoto(merged.photo_before_url, storagePath);
-            merged.photo_before_url = uploadedUrl;
-          } catch (err) {
-            console.warn(`[Offline Sync] Failed to auto-upload photo_before to Firebase Storage:`, err);
-          }
-        }
-
-        if (merged.photo_after_url && merged.photo_after_url.startsWith("data:")) {
-          try {
-            console.log(`[Offline Sync] Auto-uploading local after photo to Firebase Storage for task ${item.taskId}...`);
-            const storagePath = `tasks/${item.taskId}/after_${Date.now()}.jpg`;
-            const uploadedUrl = await uploadPhoto(merged.photo_after_url, storagePath);
-            merged.photo_after_url = uploadedUrl;
-          } catch (err) {
-            console.warn(`[Offline Sync] Failed to auto-upload photo_after to Firebase Storage:`, err);
-          }
-        }
-
-        await firebaseSetDoc(docRef, cleanUndefined(merged));
-        console.log(`[Offline Sync] Successfully synced task ${item.taskId}`);
-        
-        // Update local DB and local cache with synced task so base64 strings are swapped for remote URLs
-        if (localDB && localDB.task_instances) {
-          localDB.task_instances[item.taskId] = merged;
-          saveLocalDB();
-        }
-        syncTaskAcrossCaches(merged);
-
-        removePendingUpdate(item.taskId);
-        successCount++;
-      } else {
-        console.warn(`[Offline Sync] Task ${item.taskId} not found in Firestore during sync, removing from queue.`);
-        removePendingUpdate(item.taskId);
-      }
-    } catch (err) {
-      console.warn(`[Offline Sync] Failed to sync task ${item.taskId}:`, err);
-      // If network fails, break out of the loop to try again later
-      break;
-    }
-  }
-
-  return successCount;
+  // Offline sync is completely disabled/deactivated in online-only production mode
+  return 0;
 }
 
 // Background auto-sync listener setup
@@ -2654,7 +2576,7 @@ if (typeof window !== "undefined") {
 
 export async function updateTask(id: string, updates: Partial<TaskInstance>): Promise<TaskInstance> {
   if (!isOnline()) {
-    return handleOfflineUpdate(id, updates);
+    throw new Error("لا يوجد اتصال بالإنترنت. يرجى إعادة الاتصال بالشبكة للمحاولة مرة أخرى.");
   }
 
   try {
@@ -2664,8 +2586,8 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
     try {
       snap = await getDoc(docRef);
     } catch (error) {
-      console.warn("[Offline Engine] getDoc failed. Falling back to local update.", error);
-      return handleOfflineUpdate(id, updates);
+      console.error("[Online Engine] getDoc failed:", error);
+      throw new Error("تعذر الاتصال بقاعدة البيانات. يرجى التحقق من اتصالك بالإنترنت.");
     }
     
     if (!snap.exists()) {
@@ -2785,16 +2707,16 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
     try {
       await setDoc(docRef, merged);
     } catch (error) {
-      console.warn("[Offline Engine] setDoc failed. Falling back to local update.", error);
-      return handleOfflineUpdate(id, updates);
+      console.error("[Online Engine] setDoc failed:", error);
+      throw new Error("تعذر حفظ تحديث المهمة. يرجى التحقق من اتصالك بالإنترنت.");
     }
     return merged;
   } catch (error: any) {
-    if (error.message && (error.message.includes("خطأ حماية") || error.message.includes("تنبيه"))) {
+    if (error.message && (error.message.includes("خطأ حماية") || error.message.includes("تنبيه") || error.message.includes("اتصال بالإنترنت") || error.message.includes("الاتصال بقاعدة البيانات") || error.message.includes("تعذر حفظ تحديث المهمة"))) {
       throw error;
     }
-    console.warn("[Offline Engine] General failure. Falling back to local update.", error);
-    return handleOfflineUpdate(id, updates);
+    console.error("[Online Engine] General failure in updateTask:", error);
+    throw new Error(error.message || "حدث خطأ غير متوقع أثناء تحديث المهمة.");
   }
 }
 
