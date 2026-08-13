@@ -2024,8 +2024,6 @@ export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
     await setDoc(doc(db, "sop_items", finalItem.id), finalItem);
   }
   
-  // Pregenerate task instances for the next 30 days
-  await pregenerateTaskInstances(finalItem, 30);
   
   // Sync all detail changes to any future pending task instances
   if (item.id) {
@@ -2079,7 +2077,9 @@ export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
             requires_gps: finalItem.requires_gps ?? false,
             requires_signature: finalItem.requires_signature ?? false,
             assigned_to: finalItem.default_assignee_id || ti.assigned_to,
-            due_time: finalItem.scheduled_time || ti.due_time || "09:00",
+            due_time: (finalItem.scheduled_times && finalItem.scheduled_times.length > 0)
+              ? (finalItem.scheduled_times[0] || ti.due_time || "09:00")
+              : (finalItem.scheduled_time || ti.due_time || "09:00"),
             updated_at: new Date().toISOString()
           };
           

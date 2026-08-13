@@ -19,8 +19,8 @@ import {
   X
 } from "lucide-react";
 import { Profile, TaskInstance, Zone, TaskTemplate } from "../types";
-import { getTasks, listenTodayTasks, updateTask, getLocalDateString, deletePhoto, syncOfflineTasks } from "../lib/api";
-import { isOnline, getPendingUpdates } from "../lib/offlineManager";
+import { getTasks, listenTodayTasks, updateTask, getLocalDateString, deletePhoto } from "../lib/api";
+import { isOnline } from "../lib/offlineManager";
 import PhotoCapture from "./PhotoCapture";
 import ProfessorLogo from "./ProfessorLogo";
 import PhotoSyncIntegrityCenter from "./PhotoSyncIntegrityCenter";
@@ -114,8 +114,6 @@ export default function TodayTasksPage({
   
   // Offline & Synchronization state
   const [isOnlineState, setIsOnlineState] = useState<boolean>(isOnline());
-  const [pendingCount, setPendingCount] = useState<number>(0);
-  const [isSyncing, setIsSyncing] = useState<boolean>(false);
   
   // Executing state
   const [executingStep, setExecutingStep] = useState<'details' | 'before_photo' | 'after_photo' | 'signature_and_notes'>('details');
@@ -138,41 +136,11 @@ export default function TodayTasksPage({
   };
 
   useEffect(() => {
-    // Initial fetch of pending count
-    setPendingCount(getPendingUpdates().length);
-
-    const handleOnline = () => {
-      setIsOnlineState(true);
-      // Automatically sync when connection is restored
-      setIsSyncing(true);
-      syncOfflineTasks()
-        .then((count) => {
-          if (count > 0) {
-            showToast(`تمت مزامنة ${count} مهام بنجاح! 🎉`, "success");
-          }
-        })
-        .catch(err => {
-          console.error("Auto sync failed:", err);
-        })
-        .finally(() => {
-          setIsSyncing(false);
-          setPendingCount(getPendingUpdates().length);
-        });
-    };
-
-    const handleOffline = () => {
-      setIsOnlineState(false);
-    };
-
+    const handleOnline = () => setIsOnlineState(true);
+    const handleOffline = () => setIsOnlineState(false);
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
-
-    // Periodically update pending count and online state
-    const interval = setInterval(() => {
-      setPendingCount(getPendingUpdates().length);
-      setIsOnlineState(isOnline());
-    }, 5000);
-
+    const interval = setInterval(() => setIsOnlineState(isOnline()), 5000);
     return () => {
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
@@ -180,24 +148,7 @@ export default function TodayTasksPage({
     };
   }, []);
 
-  const handleSyncClick = async () => {
-    if (isSyncing || !isOnlineState) return;
-    try {
-      setIsSyncing(true);
-      const count = await syncOfflineTasks();
-      if (count > 0) {
-        showToast(`تمت مزامنة ${count} مهام بنجاح! 🎉`, "success");
-      } else {
-        showToast("جميع المهام مزامنة ومحدثة بالكامل 👍", "success");
-      }
-    } catch (err) {
-      console.error(err);
-      showToast("حدث خطأ أثناء المزامنة، يرجى المحاولة لاحقاً", "error");
-    } finally {
-      setIsSyncing(false);
-      setPendingCount(getPendingUpdates().length);
-    }
-  };
+
 
   useEffect(() => {
     setLoading(true);
@@ -611,18 +562,7 @@ export default function TodayTasksPage({
               )}
             </div>
             
-            {pendingCount > 0 && (
-              <div className="flex items-center gap-2">
-                <span className="text-slate-400">({pendingCount} بانتظار المزامنة)</span>
-                <button
-                  onClick={handleSyncClick}
-                  disabled={isSyncing || !isOnlineState}
-                  className={`bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-700 text-white font-bold py-1 px-2.5 rounded-lg flex items-center gap-1 cursor-pointer transition text-[10px] ${isSyncing ? "animate-pulse" : ""}`}
-                >
-                  {isSyncing ? "مزامنة..." : "مزامنة الآن"}
-                </button>
-              </div>
-            )}
+            
           </div>
         </div>
       </div>
