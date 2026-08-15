@@ -624,18 +624,17 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       return;
     }
 
-    if (selectedTemplate.frequency === "مرتين أسبوعيا" && (!selectedTemplate.recurrence_days || selectedTemplate.recurrence_days.length !== 2)) {
-      showToast("يرجى تحديد يومين بالضبط للتكرار مرتين أسبوعياً 📅", "warning");
+    // Strict recurrence validation
+    if (selectedTemplate.frequency === "مرتين أسبوعيا" && (selectedTemplate.recurrence_days || []).length !== 2) {
+      alert("خطأ: يجب تحديد يومين فقط للتكرار «مرتين أسبوعياً»");
       return;
     }
-
-    if (selectedTemplate.frequency === "ثلاث مرات أسبوعيا" && (!selectedTemplate.recurrence_days || selectedTemplate.recurrence_days.length !== 3)) {
-      showToast("يرجى تحديد ثلاثة أيام بالضبط للتكرار ثلاث مرات أسبوعياً 📅", "warning");
+    if (selectedTemplate.frequency === "ثلاث مرات أسبوعيا" && (selectedTemplate.recurrence_days || []).length !== 3) {
+      alert("خطأ: يجب تحديد ثلاثة أيام فقط للتكرار «ثلاث مرات أسبوعياً»");
       return;
     }
-
-    if (selectedTemplate.frequency === "ثلاث مرات يوميا" && (!selectedTemplate.scheduled_times || selectedTemplate.scheduled_times.length !== 3)) {
-      showToast("يرجى تحديد ثلاثة أوقات بالضبط للتكرار ثلاث مرات يومياً ⏰", "warning");
+    if (selectedTemplate.frequency === "ثلاث مرات يوميا" && (selectedTemplate.scheduled_times || []).length !== 3) {
+      alert("خطأ: يجب تحديد ثلاث أوقات جدولة بالضبط للتكرار «ثلاث مرات يومياً»");
       return;
     }
 

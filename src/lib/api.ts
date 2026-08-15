@@ -101,7 +101,7 @@ try {
   console.warn("localStorage is not accessible during project check:", e);
 }
 
-let useLocalFallback = localStorage.getItem("use_local_fallback") === "true";
+let useLocalFallback = false; // Online-only production: local fallback permanently disabled
 
 // --- Memory Cache for Metadata to Reduce Firestore Reads ---
 let cachedProfiles: Profile[] | null = null;
@@ -225,18 +225,6 @@ function initLocalDB() {
           localTemplatesChanged = true;
         }
       }
-
-      // Ensure all valid seeded templates are present in localDB.task_templates & localDB.sop_items
-      seeded.task_templates.forEach(t => {
-        if (!localDB.task_templates[t.id]) {
-          localDB.task_templates[t.id] = t;
-          localTemplatesChanged = true;
-        }
-        if (!localDB.sop_items[t.id]) {
-          localDB.sop_items[t.id] = t;
-          localTemplatesChanged = true;
-        }
-      });
 
       // Auto-recovery for deactivated admin accounts in local storage fallback
       let localUsersChanged = false;
@@ -404,15 +392,7 @@ function saveLocalDB() {
 }
 
 function triggerLocalFallback(error: any) {
-  if (!useLocalFallback) {
-    console.warn("[Local Fallback Triggered] Switching database operations to local storage due to Firestore failure:", error);
-    useLocalFallback = true;
-    try {
-      localStorage.setItem("use_local_fallback", "true");
-    } catch (e) {}
-    // Dispatch custom event to notify React components to update their UI immediately
-    window.dispatchEvent(new Event("local_fallback_changed"));
-  }
+  console.warn("[Local Fallback] Firestore error logged but local fallback is disabled in online-only mode:", error);
 }
 
 export function isUsingLocalFallback(): boolean {
@@ -573,15 +553,7 @@ export async function getDoc(docRef: any): Promise<any> {
     return snap;
   } catch (err: any) {
     triggerLocalFallback(err);
-    initLocalDB();
-    const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
-    const docId = docRef.__doc_id || docRef.id || "";
-    const data = localDB[colName as keyof typeof localDB]?.[docId];
-    return {
-      exists: () => !!data,
-      data: () => data,
-      id: docId
-    };
+    throw err;
   }
 }
 
@@ -613,26 +585,7 @@ export async function getDocs(q: any): Promise<any> {
     return snap;
   } catch (err: any) {
     triggerLocalFallback(err);
-    initLocalDB();
-    const colName = q.__collection_path || (typeof q.path === "string" ? q.path : "");
-    const docs = Object.values(localDB[colName as keyof typeof localDB] || {});
-    const filtered = localFilter(docs, q.__constraints || []);
-    return {
-      empty: filtered.length === 0,
-      size: filtered.length,
-      docs: filtered.map(item => ({
-        id: item.id,
-        data: () => item
-      })),
-      forEach: (cb: any) => {
-        filtered.forEach(item => {
-          cb({
-            id: item.id,
-            data: () => item
-          });
-        });
-      }
-    };
+    throw err;
   }
 }
 
@@ -705,15 +658,11 @@ export async function setDoc(docRef: any, data: any, options?: any) {
     }
   }
 
-  if (useLocalFallback) {
-    triggerSnapshotListeners(colName);
-    return;
-  }
   try {
     await firebaseSetDoc(docRef, cleaned, options);
   } catch (err: any) {
     triggerLocalFallback(err);
-    triggerSnapshotListeners(colName);
+    throw err;
   }
 }
 
@@ -748,15 +697,11 @@ export async function updateDoc(docRef: any, data: any) {
     }
   }
 
-  if (useLocalFallback) {
-    triggerSnapshotListeners(colName);
-    return;
-  }
   try {
     await firebaseUpdateDoc(docRef, cleaned);
   } catch (err: any) {
     triggerLocalFallback(err);
-    triggerSnapshotListeners(colName);
+    throw err;
   }
 }
 
@@ -777,15 +722,11 @@ export async function deleteDoc(docRef: any) {
     console.warn("[Local DB] Failed to sync deleteDoc to local storage:", e);
   }
 
-  if (useLocalFallback) {
-    triggerSnapshotListeners(colName);
-    return;
-  }
   try {
     await firebaseDeleteDoc(docRef);
   } catch (err: any) {
     triggerLocalFallback(err);
-    triggerSnapshotListeners(colName);
+    throw err;
   }
 }
 
@@ -822,20 +763,10 @@ export function onSnapshot(q: any, callback: any, errorCallback?: any): any {
       snapshotListeners.delete(listenerObj);
     };
   } else {
-    try {
-      const realUnsubscribe = firebaseOnSnapshot(q, callback, (err) => {
-        if (err.message && (err.message.toLowerCase().includes("quota") || err.message.toLowerCase().includes("permission") || err.message.toLowerCase().includes("exceeded"))) {
-          triggerLocalFallback(err);
-          const localUnsub = onSnapshot(q, callback, errorCallback);
-          return localUnsub;
-        }
-        if (errorCallback) errorCallback(err);
-      });
-      return realUnsubscribe;
-    } catch (err: any) {
-      triggerLocalFallback(err);
-      return onSnapshot(q, callback, errorCallback);
-    }
+    const realUnsubscribe = firebaseOnSnapshot(q, callback, (err) => {
+      if (errorCallback) errorCallback(err);
+    });
+    return realUnsubscribe;
   }
 }
 
@@ -903,30 +834,6 @@ export async function deduplicateDatabase(): Promise<void> {
         }
       }
 
-      // 2. Deduplicate task_instances
-      const instancesCol = collection(db, "task_instances");
-      const instancesSnap = await getDocs(instancesCol);
-      const seenInstances = new Set<string>(); // Key: title + "_" + zone_id + "_" + due_date
-      
-      for (const docSnap of instancesSnap.docs) {
-        const data = docSnap.data();
-        const title = (data.title || "").trim();
-        const zoneId = data.zone_id || "";
-        const dueDate = data.due_date || "";
-        const key = `${title}_${zoneId}_${dueDate}`;
-        
-        if (seenInstances.has(key)) {
-          // This is a duplicate task instance! Delete it.
-          console.log(`[Deduplicator] Deleting duplicate task_instance: ${data.title} for ${dueDate} (${docSnap.id})`);
-          try {
-            await deleteDoc(doc(db, "task_instances", docSnap.id));
-          } catch (e) {
-            console.error(`[Deduplicator] Failed to delete duplicate instance ${docSnap.id}`, e);
-          }
-        } else {
-          seenInstances.add(key);
-        }
-      }
       console.log("[Firestore Client] Deduplication completed successfully.");
     } catch (err) {
       console.error("[Firestore Client] Deduplication failed:", err);
@@ -940,111 +847,9 @@ export async function deduplicateDatabase(): Promise<void> {
  * Migrates local storage database to the remote Firestore database, clearing any defaults first to prevent duplicates.
  */
 export async function syncLocalDatabaseToFirestore(): Promise<void> {
-  let localDbData: any = null;
-  try {
-    const stored = localStorage.getItem("narisops_local_db");
-    if (stored) {
-      localDbData = JSON.parse(stored);
-    }
-  } catch (e) {
-    console.warn("[Sync Engine] Failed to parse local database:", e);
-    throw new Error("فشل قراءة قاعدة البيانات المحلية من المستعرض.");
-  }
-
-  const hasCustomLocalData = localDbData && (
-    (localDbData.task_templates && Object.keys(localDbData.task_templates).length > 0) || 
-    (localDbData.task_instances && Object.keys(localDbData.task_instances).length > 0)
-  );
-
-  if (!hasCustomLocalData) {
-    throw new Error("لا توجد بيانات مهام أو بنود مخزنة محلياً على هذا الجهاز لنقلها.");
-  }
-
-  console.log(`[Sync Engine] Initializing database migration to project: ${currentProjectId}`);
-  
-  const colNames = [
-    "locations",
-    "zones",
-    "task_templates",
-    "sop_items",
-    "task_instances",
-    "operational_tasks",
-    "notifications",
-    "device_switches",
-    "kpi_snapshots"
-  ];
-
-  // If localDbData.sop_items is missing/empty, populate from task_templates to preserve historical local templates
-  if (localDbData && (!localDbData.sop_items || Object.keys(localDbData.sop_items).length === 0)) {
-    localDbData.sop_items = localDbData.task_templates || {};
-  }
-
-  // 1. Clear existing documents in Firestore to prevent duplicates
-  for (const colName of colNames) {
-    try {
-      const colSnap = await getDocs(collection(db, colName));
-      for (const docSnap of colSnap.docs) {
-        await deleteDoc(doc(db, colName, docSnap.id));
-      }
-      console.log(`[Sync Engine] Cleared Firestore collection: ${colName}`);
-    } catch (e) {
-      console.warn(`[Sync Engine] Failed to clear collection ${colName}:`, e);
-    }
-  }
-
-  // 2. Clear users
-  try {
-    const usersSnap = await getDocs(collection(db, "users"));
-    for (const docSnap of usersSnap.docs) {
-      await deleteDoc(doc(db, "users", docSnap.id));
-    }
-  } catch (e) {
-    console.warn("[Sync Engine] Failed to clear users:", e);
-  }
-
-  // 3. Seed users
-  const seeded = getSeededDB();
-  const usersMap: Record<string, any> = {};
-  for (const p of seeded.profiles) {
-    usersMap[p.id] = p;
-  }
-  if (localDbData.users) {
-    for (const uid of Object.keys(localDbData.users)) {
-      usersMap[uid] = localDbData.users[uid];
-    }
-  }
-  for (const pId of Object.keys(usersMap)) {
-    const profileToSeed = {
-      ...usersMap[pId],
-      password: await normalizePasswordRecord(usersMap[pId].password, usersMap[pId].username === "admin" ? "admin123" : "123456")
-    };
-    await setDoc(doc(db, "users", pId), profileToSeed);
-  }
-
-  // 4. Upload each other collection
-  for (const colName of colNames) {
-    const localItems = localDbData[colName] || {};
-    const localKeys = Object.keys(localItems);
-    
-    if (localKeys.length > 0) {
-      console.log(`[Sync Engine] Uploading ${localKeys.length} items from local database for collection: ${colName}`);
-      for (const key of localKeys) {
-        await setDoc(doc(db, colName, key), localItems[key]);
-      }
-    } else {
-      const defaultList = (seeded as any)[colName] || [];
-      console.log(`[Sync Engine] Local collection ${colName} is empty. Seeding default ${defaultList.length} items.`);
-      for (const item of defaultList) {
-        await setDoc(doc(db, colName, item.id), item);
-      }
-    }
-  }
-
-  localStorage.setItem("naris_local_db_synced_to_firestore", currentProjectId);
-  invalidateMetadataCaches();
-  console.log("[Sync Engine] Synchronization completed successfully.");
+  console.log("[Sync Engine] Local-to-Firestore sync is disabled in online-only production mode.");
+  return;
 }
-
 /**
  * Ensures Firestore is properly seeded with initial data if it's completely empty.
  */
@@ -1058,29 +863,6 @@ async function ensureSeeded(): Promise<void> {
   
   seedingPromise = (async () => {
     try {
-      // 1. Check if we need to do automatic migration/sync of local database first
-      let localDbData: any = null;
-      try {
-        const stored = localStorage.getItem("narisops_local_db");
-        if (stored) {
-          localDbData = JSON.parse(stored);
-        }
-      } catch (e) {
-        console.warn("[Firestore Client] Failed to parse local database during sync check:", e);
-      }
-
-      const hasCustomLocalData = localDbData && (
-        (localDbData.task_templates && Object.keys(localDbData.task_templates).length > 0) || 
-        (localDbData.task_instances && Object.keys(localDbData.task_instances).length > 0)
-      );
-
-      const syncFlag = localStorage.getItem("naris_local_db_synced_to_firestore");
-      if (hasCustomLocalData && syncFlag !== currentProjectId) {
-        console.log(`[Sync Engine] Automatic synchronization detected. Migrating local database to ${currentProjectId}...`);
-        await syncLocalDatabaseToFirestore();
-        return;
-      }
-
       // Check if users collection already has data
       const usersCol = collection(db, "users");
       let usersSnap;
@@ -1093,25 +875,6 @@ async function ensureSeeded(): Promise<void> {
           return;
         }
         throw err;
-      }
-
-      // Ensure the default SOP templates are seeded ONLY if the task_templates collection is completely empty in Firestore
-      const templatesCol = collection(db, "task_templates");
-      const templatesSnap = await getDocs(templatesCol);
-      if (templatesSnap.empty && !useLocalFallback) {
-        console.log("[SOP Template Engine] Firestore task_templates is empty. Seeding 34 default SOP templates...");
-        try {
-          const seededTemplates = getSeededDB().task_templates;
-          for (const template of seededTemplates) {
-            await setDoc(doc(db, "task_templates", template.id), template);
-            console.log(`[SOP Template Engine] Seeded template: ${template.id}`);
-          }
-          const syncFlagKey = "naris_sop_templates_synced_v34_fix";
-          localStorage.setItem(syncFlagKey, "true");
-          invalidateMetadataCaches();
-        } catch (error) {
-          console.error("[SOP Template Engine] Failed to seed SOP templates:", error);
-        }
       }
 
       if (!usersSnap.empty) {
@@ -1155,82 +918,6 @@ async function ensureSeeded(): Promise<void> {
           }
         } catch (e) {
           console.warn("[Auto-Recovery] Failed to auto-reactivate admin accounts:", e);
-        }
-
-        // AUTO-HEALING: If database has users but other critical collections are empty, seed them!
-        try {
-          const locationsSnap = await getDocs(collection(db, "locations"));
-          if (locationsSnap.empty) {
-            console.log("[Firestore Client] Auto-healing: Locations collection is empty. Seeding defaults...");
-            const seeded = getSeededDB();
-            for (const l of seeded.locations) {
-              await setDoc(doc(db, "locations", l.id), l);
-            }
-          }
-        } catch (e) {
-          console.warn("[Firestore Client] Auto-healing: Failed to check/seed locations:", e);
-        }
-
-        try {
-          const zonesSnap = await getDocs(collection(db, "zones"));
-          const seeded = getSeededDB();
-          const existingZoneIds = new Set<string>();
-          zonesSnap.forEach((docSnap) => {
-            existingZoneIds.add(docSnap.id);
-          });
-
-          let healedCount = 0;
-          for (const z of seeded.zones) {
-            if (!existingZoneIds.has(z.id)) {
-              console.log(`[Firestore Client] Auto-healing missing default zone: ${z.name} (${z.id})`);
-              await setDoc(doc(db, "zones", z.id), z);
-              healedCount++;
-            }
-          }
-          if (healedCount > 0) {
-            console.log(`[Firestore Client] Auto-healed ${healedCount} missing zones.`);
-          }
-        } catch (e) {
-          console.warn("[Firestore Client] Auto-healing: Failed to check/seed zones:", e);
-        }
-
-        try {
-          const switchesSnap = await getDocs(collection(db, "device_switches"));
-          if (switchesSnap.empty) {
-            console.log("[Firestore Client] Auto-healing: Device switches collection is empty. Seeding defaults...");
-            const seeded = getSeededDB();
-            for (const sw of seeded.device_switches) {
-              await setDoc(doc(db, "device_switches", sw.id), sw);
-            }
-          }
-        } catch (e) {
-          console.warn("[Firestore Client] Auto-healing: Failed to check/seed device_switches:", e);
-        }
-
-        try {
-          const opTasksSnap = await getDocs(collection(db, "operational_tasks"));
-          if (opTasksSnap.empty) {
-            console.log("[Firestore Client] Auto-healing: Operational tasks collection is empty. Seeding defaults...");
-            const seeded = getSeededDB();
-            for (const ot of seeded.operational_tasks) {
-              await setDoc(doc(db, "operational_tasks", ot.id), ot);
-            }
-          }
-        } catch (e) {
-          console.warn("[Firestore Client] Auto-healing: Failed to check/seed operational_tasks:", e);
-        }
-
-        try {
-          const templatesSnap = await getDocs(collection(db, "task_templates"));
-          if (templatesSnap.empty) {
-            console.log("[Firestore Client] Auto-healing: Templates collection is empty. Seeding defaults...");
-            const seeded = getSeededDB();
-            for (const t of seeded.task_templates) {
-              await setDoc(doc(db, "task_templates", t.id), t);
-            }
-          }
-        } catch (e) {
-          console.warn("[Firestore Client] Auto-healing: Failed to check/seed task_templates:", e);
         }
 
         return;
@@ -1282,7 +969,6 @@ async function ensureSeeded(): Promise<void> {
         // Seed all collections
         await seedCollection("locations", seeded.locations);
         await seedCollection("zones", seeded.zones);
-        await seedCollection("task_templates", seeded.task_templates);
         await seedCollection("task_instances", seeded.task_instances);
         await seedCollection("operational_tasks", seeded.operational_tasks);
         await seedCollection("notifications", seeded.notifications);
@@ -1310,11 +996,6 @@ async function ensureSeeded(): Promise<void> {
         // 3. Seed zones
         for (const z of seeded.zones) {
           await setDoc(doc(db, "zones", z.id), z);
-        }
-        
-        // 4. Seed task_templates
-        for (const t of seeded.task_templates) {
-          await setDoc(doc(db, "task_templates", t.id), t);
         }
         
         // 5. Seed task_instances
@@ -1910,7 +1591,12 @@ export async function pregenerateTaskInstances(tpl: SOPItem, daysCount = 7): Pro
         const instanceId = generateTaskInstanceId(tpl.id, dateStr, occurrence.occurrenceIndex);
         // Check existence with a lightweight getDoc to avoid loading all instances
         const existingSnap = await getDoc(doc(db, "task_instances", instanceId));
-        if (!existingSnap.exists()) {
+        let legacyExists = false;
+        if (occurrence.occurrenceIndex === 0) {
+          const legacySnap = await getDoc(doc(db, "task_instances", `ti_rec_${tpl.id}_${dateStr}`));
+          legacyExists = legacySnap.exists();
+        }
+        if (!existingSnap.exists() && !legacyExists) {
           let assignedTo = tpl.default_assignee_id || "";
           if (!assignedTo) {
             const tplZone = zones.find((z) => z.id === tpl.zone_id);
@@ -2059,7 +1745,7 @@ export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
             requires_gps: finalItem.requires_gps ?? false,
             requires_signature: finalItem.requires_signature ?? false,
             assigned_to: finalItem.default_assignee_id || ti.assigned_to,
-            due_time: ti.due_time || (finalItem.scheduled_times && finalItem.scheduled_times.length > 0 ? finalItem.scheduled_times[0] : finalItem.scheduled_time) || "09:00",
+            due_time: ti.due_time || "09:00",
             updated_at: new Date().toISOString()
           };
           
@@ -2153,8 +1839,9 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
     const occurrences = getSopOccurrencesForDate(tpl, todayStr);
     for (const occurrence of occurrences) {
       const instanceId = generateTaskInstanceId(tpl.id, todayStr, occurrence.occurrenceIndex);
-      const alreadyExists = instances.some((ti) => ti.id === instanceId);
-      if (!alreadyExists) {
+        const alreadyExists = instances.some((ti) => ti.id === instanceId);
+        const legacyExists = occurrence.occurrenceIndex === 0 && instances.some((ti) => ti.id === `ti_rec_${tpl.id}_${todayStr}`);
+        if (!alreadyExists && !legacyExists) {
         if (!generatedAny) {
           console.log(`[Firestore Client] Generating missing recurring SOP tasks for ${todayStr}...`);
           generatedAny = true;

@@ -158,7 +158,7 @@ export default function TodayTasksPage({
       
       setSelectedTask((prevSelected) => {
          if (!prevSelected) return null;
-         const updatedTask = uniqueTasks.find(t => t.id === prevSelected.id);
+        const updatedTask = myTasks.find(t => t.id === prevSelected.id);
          return updatedTask || null;
       });
     });
