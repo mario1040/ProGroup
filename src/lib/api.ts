@@ -35,15 +35,7 @@ import {
 } from "firebase/auth";
 import { initializeApp, deleteApp } from "firebase/app";
 import { getSeededDB } from "../db_default";
-import { 
-  isOnline, 
-  saveCachedTasks, 
-  getCachedTasks, 
-  addPendingUpdate, 
-  getPendingUpdates, 
-  removePendingUpdate,
-  pruneStorageData
-} from "./offlineManager";
+import { isOnline } from "./offlineManager";
 
 // 44--- Clean Undefined Interceptor (Mandatory to prevent Firestore crash) ---
 function cleanUndefined<T extends object>(obj: T): T {
@@ -286,30 +278,11 @@ function initLocalDB() {
 function pruneLocalDBInstances(): boolean {
   if (!localDB || !localDB.task_instances) return false;
   
-  const twoDaysAgo = new Date();
-  twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
-  const twoDaysAgoStr = twoDaysAgo.toISOString().split("T")[0]; // YYYY-MM-DD
-
-  const pendingUpdates = getPendingUpdates();
-  const pendingTaskIds = new Set(pendingUpdates.map(item => item.taskId));
-  
   let changed = false;
   const ids = Object.keys(localDB.task_instances);
   for (const id of ids) {
     const task = localDB.task_instances[id];
     if (!task) continue;
-
-    // Remove base64 strings if the task has already been synced (not in pending queue)
-    if (!pendingTaskIds.has(id)) {
-      if (task.photo_before_url && task.photo_before_url.startsWith("data:")) {
-        task.photo_before_url = "";
-        changed = true;
-      }
-      if (task.photo_after_url && task.photo_after_url.startsWith("data:")) {
-        task.photo_after_url = "";
-        changed = true;
-      }
-    }
 
     // Strip base64 guide/reference images from task instances (they will fall back to template)
     if (task.guide_image_url && task.guide_image_url.startsWith("data:")) {
@@ -318,30 +291,6 @@ function pruneLocalDBInstances(): boolean {
     }
     if (task.reference_image_url && task.reference_image_url.startsWith("data:")) {
       task.reference_image_url = "";
-      changed = true;
-    }
-
-    // Prune completed/approved/rejected tasks older than 2 days
-    if (task.status === "completed" || task.status === "supervisor_approved" || task.status === "rejected") {
-      if (pendingTaskIds.has(id)) continue; // Never delete pending updates!
-      if (task.due_date && task.due_date < twoDaysAgoStr) {
-        delete localDB.task_instances[id];
-        changed = true;
-      }
-    }
-  }
-
-  // Limit total number of completed task instances in localDB
-  const remainingIds = Object.keys(localDB.task_instances);
-  const completedTasks = remainingIds
-    .map(id => localDB.task_instances[id])
-    .filter(t => t && (t.status === "completed" || t.status === "supervisor_approved" || t.status === "rejected") && !pendingTaskIds.has(t.id));
-
-  if (completedTasks.length > 50) {
-    completedTasks.sort((a, b) => (b.due_date || "").localeCompare(a.due_date || ""));
-    const toDelete = completedTasks.slice(50);
-    for (const t of toDelete) {
-      delete localDB.task_instances[t.id];
       changed = true;
     }
   }
@@ -353,41 +302,8 @@ function saveLocalDB() {
   try {
     pruneLocalDBInstances();
     localStorage.setItem("narisops_local_db", JSON.stringify(localDB));
-    if (localDB && localDB.zones) {
-      Object.keys(localDB.zones).forEach(zId => {
-        const zone = localDB.zones[zId];
-        if (zone && zone.cover_image_url) {
-          if (!zone.cover_image_url.startsWith("data:") || zone.cover_image_url.length < 50000) {
-            localStorage.setItem(`naris_zone_image_${zId}`, zone.cover_image_url);
-          }
-        }
-      });
-    }
   } catch (e: any) {
-    console.warn("[Local DB] First setItem failed (potential quota limit). Attempting aggressive prune...", e);
-    try {
-      pruneStorageData();
-      
-      // Even more aggressive localDB prune: strip ALL base64 images from completed tasks
-      if (localDB && localDB.task_instances) {
-        Object.keys(localDB.task_instances).forEach(id => {
-          const t = localDB.task_instances[id];
-          if (t && (t.status === "completed" || t.status === "supervisor_approved" || t.status === "rejected")) {
-            if (t.photo_before_url && t.photo_before_url.startsWith("data:")) {
-              t.photo_before_url = "";
-            }
-            if (t.photo_after_url && t.photo_after_url.startsWith("data:")) {
-              t.photo_after_url = "";
-            }
-          }
-        });
-      }
-      
-      localStorage.setItem("narisops_local_db", JSON.stringify(localDB));
-      console.log("[Local DB] Saved successfully after aggressive pruning.");
-    } catch (err) {
-      console.error("[Local DB] Critical: Failed to save even after aggressive pruning:", err);
-    }
+    console.warn("[Local DB] setItem failed:", e);
   }
 }
 
@@ -589,40 +505,6 @@ export async function getDocs(q: any): Promise<any> {
   }
 }
 
-export function syncTaskAcrossCaches(task: any) {
-  if (typeof localStorage === "undefined") return;
-  if (!task || !task.id) return;
-
-  const id = task.id;
-  const newUserId = task.assigned_to;
-
-  const prefix = "naris_cached_tasks_";
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (key && key.startsWith(prefix)) {
-      const userId = key.replace(prefix, "");
-      if (userId === "all") {
-        const tasks = getCachedTasks("all");
-        const exists = tasks.some(t => t.id === id);
-        const updated = exists ? tasks.map(t => t.id === id ? { ...t, ...task } : t) : [...tasks, task];
-        saveCachedTasks("all", updated);
-      } else if (newUserId && userId === newUserId) {
-        const tasks = getCachedTasks(newUserId);
-        const exists = tasks.some(t => t.id === id);
-        const updated = exists ? tasks.map(t => t.id === id ? { ...t, ...task } : t) : [...tasks, task];
-        saveCachedTasks(newUserId, updated);
-      } else {
-        const tasks = getCachedTasks(userId);
-        const exists = tasks.some(t => t.id === id);
-        if (exists) {
-          const updated = tasks.filter(t => t.id !== id);
-          saveCachedTasks(userId, updated);
-        }
-      }
-    }
-  }
-}
-
 export async function setDoc(docRef: any, data: any, options?: any) {
   const cleaned = cleanUndefined(data);
   const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
@@ -644,18 +526,6 @@ export async function setDoc(docRef: any, data: any, options?: any) {
     }
   } catch (e) {
     console.warn("[Local DB] Failed to sync setDoc to local storage:", e);
-  }
-
-  // Synchronize local cached tasks lists
-  if (colName === "task_instances" && docId) {
-    try {
-      const fullTask = localDB.task_instances[docId];
-      if (fullTask) {
-        syncTaskAcrossCaches(fullTask);
-      }
-    } catch (e) {
-      console.warn("Failed to sync task cache inside setDoc:", e);
-    }
   }
 
   try {
@@ -683,18 +553,6 @@ export async function updateDoc(docRef: any, data: any) {
     }
   } catch (e) {
     console.warn("[Local DB] Failed to sync updateDoc to local storage:", e);
-  }
-
-  // Synchronize local cached tasks lists
-  if (colName === "task_instances" && docId) {
-    try {
-      const fullTask = localDB.task_instances[docId];
-      if (fullTask) {
-        syncTaskAcrossCaches(fullTask);
-      }
-    } catch (e) {
-      console.warn("Failed to sync task cache inside updateDoc:", e);
-    }
   }
 
   try {
@@ -923,111 +781,61 @@ async function ensureSeeded(): Promise<void> {
         return;
       }
       
-      console.log("[Firestore Client] Firestore is empty. Checking for local database to seed...");
+      console.log("[Firestore Client] Firestore is empty. Seeding initial default data across collections...");
+      const seeded = getSeededDB();
       
-      if (hasCustomLocalData) {
-        console.log("[Firestore Client] Seeding from friend's local database to prevent duplication or loss of offline additions!");
-        
-        // 1. Seed users (profiles)
-        // Combine seeded default users with any custom local users
-        const seeded = getSeededDB();
-        const usersMap: Record<string, any> = {};
-        for (const p of seeded.profiles) {
-          usersMap[p.id] = p;
-        }
-        if (localDbData.users) {
-          for (const uid of Object.keys(localDbData.users)) {
-            usersMap[uid] = localDbData.users[uid];
-          }
-        }
-        for (const pId of Object.keys(usersMap)) {
-          const profileToSeed = {
-            ...usersMap[pId],
-            password: await normalizePasswordRecord(usersMap[pId].password, usersMap[pId].username === "admin" ? "admin123" : "123456")
-          };
-          await setDoc(doc(db, "users", pId), profileToSeed);
-        }
-
-        // Helper function to seed from local or fallback to default list
-        const seedCollection = async (colName: string, defaultList: any[]) => {
-          const localItems = localDbData[colName] || {};
-          const localKeys = Object.keys(localItems);
-          
-          if (localKeys.length > 0) {
-            console.log(`[Firestore Client] Seeding ${localKeys.length} items from local database for collection: ${colName}`);
-            for (const key of localKeys) {
-              await setDoc(doc(db, colName, key), localItems[key]);
-            }
-          } else {
-            console.log(`[Firestore Client] Local database is empty for ${colName}. Seeding default ${defaultList.length} items.`);
-            for (const item of defaultList) {
-              await setDoc(doc(db, colName, item.id), item);
-            }
-          }
+      // 1. Seed users (profiles)
+      for (const p of seeded.profiles) {
+        const profileToSeed = {
+          ...p,
+          password: await normalizePasswordRecord((p as any).password, p.username === "admin" ? "admin123" : "123456")
         };
+        await setDoc(doc(db, "users", p.id), profileToSeed);
+      }
+      
+      // 2. Seed locations
+      for (const l of seeded.locations) {
+        await setDoc(doc(db, "locations", l.id), l);
+      }
+      
+      // 3. Seed zones
+      for (const z of seeded.zones) {
+        await setDoc(doc(db, "zones", z.id), z);
+      }
 
-        // Seed all collections
-        await seedCollection("locations", seeded.locations);
-        await seedCollection("zones", seeded.zones);
-        await seedCollection("task_instances", seeded.task_instances);
-        await seedCollection("operational_tasks", seeded.operational_tasks);
-        await seedCollection("notifications", seeded.notifications);
-        await seedCollection("device_switches", seeded.device_switches);
-        await seedCollection("kpi_snapshots", seeded.kpi_snapshots);
-
-      } else {
-        console.log("[Firestore Client] No local database found. Seeding initial default data across collections...");
-        const seeded = getSeededDB();
-        
-        // 1. Seed users (profiles)
-        for (const p of seeded.profiles) {
-          const profileToSeed = {
-            ...p,
-            password: await normalizePasswordRecord((p as any).password, p.username === "admin" ? "admin123" : "123456")
-          };
-          await setDoc(doc(db, "users", p.id), profileToSeed);
-        }
-        
-        // 2. Seed locations
-        for (const l of seeded.locations) {
-          await setDoc(doc(db, "locations", l.id), l);
-        }
-        
-        // 3. Seed zones
-        for (const z of seeded.zones) {
-          await setDoc(doc(db, "zones", z.id), z);
-        }
-        
-        // 5. Seed task_instances
-        for (const ti of seeded.task_instances) {
-          await setDoc(doc(db, "task_instances", ti.id), ti);
-        }
-        
-        // 6. Seed operational_tasks
-        for (const ot of seeded.operational_tasks) {
-          await setDoc(doc(db, "operational_tasks", ot.id), ot);
-        }
-        
-        // 7. Seed notifications
-        for (const n of seeded.notifications) {
-          await setDoc(doc(db, "notifications", n.id), n);
-        }
-        
-        // 8. Seed device_switches
-        for (const sw of seeded.device_switches) {
-          await setDoc(doc(db, "device_switches", sw.id), sw);
-        }
-        
-        // 9. Seed kpi_snapshots
-        for (const k of seeded.kpi_snapshots) {
-          await setDoc(doc(db, "kpi_snapshots", k.id), k);
-        }
+      // 4. Seed task templates
+      for (const tpl of seeded.task_templates) {
+        await setDoc(doc(db, "task_templates", tpl.id), tpl);
+      }
+      
+      // 5. Seed task_instances
+      for (const ti of seeded.task_instances) {
+        await setDoc(doc(db, "task_instances", ti.id), ti);
+      }
+      
+      // 6. Seed operational_tasks
+      for (const ot of seeded.operational_tasks) {
+        await setDoc(doc(db, "operational_tasks", ot.id), ot);
+      }
+      
+      // 7. Seed notifications
+      for (const n of seeded.notifications) {
+        await setDoc(doc(db, "notifications", n.id), n);
+      }
+      
+      // 8. Seed device_switches
+      for (const sw of seeded.device_switches) {
+        await setDoc(doc(db, "device_switches", sw.id), sw);
+      }
+      
+      // 9. Seed kpi_snapshots
+      for (const k of seeded.kpi_snapshots) {
+        await setDoc(doc(db, "kpi_snapshots", k.id), k);
       }
       
       console.log("[Firestore Client] Seeding completed successfully.");
     } catch (err) {
-      console.error("[Firestore Client] Seeding failed, falling back to local database:", err);
-      triggerLocalFallback(err);
+      console.error("[Firestore Client] Seeding failed:", err);
     }
   })();
   
@@ -1610,13 +1418,7 @@ export async function pregenerateTaskInstances(tpl: SOPItem, daysCount = 7): Pro
               let workingCleaners = activeCleaners.filter((p) => !p.work_days || p.work_days.includes(dayNameAr));
               if (workingCleaners.length === 0) workingCleaners = activeCleaners;
               if (workingCleaners.length > 0) {
-                let bestCleaner = workingCleaners[0];
-                let minTasks = Infinity;
-                for (const cleaner of workingCleaners) {
-                  const taskCount = instances.filter((ti) => ti.assigned_to === cleaner.id && ti.due_date === dateStr).length;
-                  if (taskCount < minTasks) { minTasks = taskCount; bestCleaner = cleaner; }
-                }
-                assignedTo = bestCleaner.id;
+                assignedTo = workingCleaners[0].id;
               } else {
                 const firstActive = profiles.find((p) => p.is_active);
                 assignedTo = firstActive ? firstActive.id : "p2";
@@ -1895,25 +1697,6 @@ export function listenTodayTasks(
   callback: (tasks: (TaskInstance & { zone?: Zone; assignee?: Profile; template?: TaskTemplate })[]) => void
 ): () => void {
   const todayStr = getLocalDateString();
-  const cacheKey = userId || "all";
-  
-  // 1. Immediately feed cached tasks to UI for rapid, offline-first loading
-  try {
-    const cached = getCachedTasks(cacheKey);
-    if (cached && cached.length > 0) {
-      const pending = getPendingUpdates();
-      const merged = cached.map(task => {
-        const match = pending.find(p => p.taskId === task.id);
-        if (match) {
-          return { ...task, ...match.updates };
-        }
-        return task;
-      });
-      callback(merged);
-    }
-  } catch (err) {
-    console.error("[Offline Engine] Failed to load cached tasks on start", err);
-  }
   
   // Fire off getTasks in background to generate any missing recurring tasks
   getTasks(todayStr).catch(console.error);
@@ -1955,7 +1738,7 @@ export function listenTodayTasks(
         };
       });
 
-      // Sort by creation time so they appear predictably, or we can sort by due_time
+      // Sort by creation time so they appear predictably, or by due_time
       enrichedTasks.sort((a, b) => {
          if (a.due_time !== b.due_time) {
             return (a.due_time || "").localeCompare(b.due_time || "");
@@ -1963,20 +1746,7 @@ export function listenTodayTasks(
          return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
       });
 
-      // 2. Merge pending local updates that haven't synchronized to the server yet
-      const pending = getPendingUpdates();
-      const synchronizedTasks = enrichedTasks.map(task => {
-        const match = pending.find(p => p.taskId === task.id);
-        if (match) {
-          return { ...task, ...match.updates };
-        }
-        return task;
-      });
-
-      // 3. Save to localStorage cache
-      saveCachedTasks(cacheKey, synchronizedTasks);
-
-      callback(synchronizedTasks);
+      callback(enrichedTasks);
     } catch (error) {
       console.error("Error processing real-time tasks:", error);
     }
@@ -2103,79 +1873,6 @@ function validateTaskInstanceUpdate(merged: TaskInstance, updates: Partial<TaskI
   }
 }
 
-function handleOfflineUpdate(id: string, updates: Partial<TaskInstance>): TaskInstance {
-  console.log(`[Offline Engine] Saving local update for task: ${id}`, updates);
-  
-  // Try to find the task in local cache
-  let cachedTask: any = null;
-  let cachedUserId: string = "";
-  
-  if (typeof localStorage !== "undefined") {
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key && key.startsWith("naris_cached_tasks_")) {
-        const userId = key.replace("naris_cached_tasks_", "");
-        const tasks = getCachedTasks(userId);
-        const found = tasks.find(t => t.id === id);
-        if (found) {
-          cachedTask = found;
-          cachedUserId = userId;
-          break;
-        }
-      }
-    }
-  }
-
-  if (!cachedTask) {
-    cachedTask = { id, status: 'pending', created_at: new Date().toISOString() };
-  }
-
-  const merged = { ...cachedTask, ...updates, updated_at: new Date().toISOString() };
-  
-  // Strict completion contract validation BEFORE saving local task state or queueing updates
-  validateTaskInstanceUpdate(merged, updates);
-
-  if (updates.status === "in_progress" && !cachedTask.started_at) {
-    merged.started_at = new Date().toISOString();
-  }
-  
-  if (updates.status === "completed" && !cachedTask.completed_at) {
-    merged.completed_at = new Date().toISOString();
-    if (!merged.photo_after_taken_at) {
-      merged.photo_after_taken_at = updates.photo_after_taken_at || new Date().toISOString();
-    }
-    merged.photo_after_uploaded_at = updates.photo_after_uploaded_at || new Date().toISOString();
-  }
-
-  // Save the pending update
-  addPendingUpdate(id, updates);
-
-  // Update cached tasks in localStorage across all appropriate user keys
-  syncTaskAcrossCaches(merged);
-
-  return merged;
-}
-
-export async function syncOfflineTasks(): Promise<number> {
-  // Offline sync is completely disabled/deactivated in online-only production mode
-  return 0;
-}
-
-// Background auto-sync listener setup
-if (typeof window !== "undefined") {
-  window.addEventListener('online', () => {
-    console.log("[Offline Engine] Network online detected. Triggering sync...");
-    syncOfflineTasks().catch(console.error);
-  });
-  
-  // Every 15 seconds try to sync if online
-  setInterval(() => {
-    if (isOnline()) {
-      syncOfflineTasks().catch(console.error);
-    }
-  }, 15000);
-}
-
 export async function updateTask(id: string, updates: Partial<TaskInstance>): Promise<TaskInstance> {
   if (!isOnline()) {
     throw new Error("لا يوجد اتصال بالإنترنت. يرجى إعادة الاتصال بالشبكة للمحاولة مرة أخرى.");
@@ -2228,8 +1925,9 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
       ? currentTask.requires_photo_before
       : (template ? template.requires_photo_before : true);
     if (requiresBefore && (updates.status === "in_progress" || updates.status === "completed")) {
-      if (!merged.photo_before_url) {
-        throw new Error("خطأ حماية: لا يمكن بدء أو إكمال هذه المهمة بدون التقاط ورفع صورة إثبات ما قبل البدء (Before Photo).");
+      const beforeUrl = merged.photo_before_url;
+      if (!beforeUrl || beforeUrl.trim() === "" || beforeUrl.startsWith("data:")) {
+        throw new Error("خطأ حماية: لا يمكن بدء أو إكمال هذه المهمة بدون التقاط ورفع صورة إثبات ما قبل البدء (Before Photo) إلى التخزين السحابي.");
       }
     }
 
@@ -2238,8 +1936,9 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
       ? currentTask.requires_photo_after
       : (template ? template.requires_photo_after : true);
     if (requiresAfter && updates.status === "completed") {
-      if (!merged.photo_after_url) {
-        throw new Error("خطأ حماية: لا يمكن إغلاق وإكمال هذه المهمة بدون التقاط ورفع صورة إثبات جودة العمل (After Photo).");
+      const afterUrl = merged.photo_after_url;
+      if (!afterUrl || afterUrl.trim() === "" || afterUrl.startsWith("data:")) {
+        throw new Error("خطأ حماية: لا يمكن إغلاق وإكمال هذه المهمة بدون التقاط ورفع صورة إثبات جودة العمل (After Photo) إلى التخزين السحابي.");
       }
     }
 
@@ -2287,28 +1986,6 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
         merged.supervisor_approved = true;
         merged.supervisor_approved_at = new Date().toISOString();
         merged.quality_grade = "A";
-      }
-    }
-    
-    if (merged.photo_before_url && merged.photo_before_url.startsWith("data:")) {
-      try {
-        console.log(`[updateTaskInstance] Auto-uploading local before photo to Firebase Storage for task ${id}...`);
-        const storagePath = `tasks/${id}/before_${Date.now()}.jpg`;
-        const uploadedUrl = await uploadPhoto(merged.photo_before_url, storagePath);
-        merged.photo_before_url = uploadedUrl;
-      } catch (err) {
-        console.warn(`[updateTaskInstance] Failed to auto-upload photo_before to Firebase Storage:`, err);
-      }
-    }
-
-    if (merged.photo_after_url && merged.photo_after_url.startsWith("data:")) {
-      try {
-        console.log(`[updateTaskInstance] Auto-uploading local after photo to Firebase Storage for task ${id}...`);
-        const storagePath = `tasks/${id}/after_${Date.now()}.jpg`;
-        const uploadedUrl = await uploadPhoto(merged.photo_after_url, storagePath);
-        merged.photo_after_url = uploadedUrl;
-      } catch (err) {
-        console.warn(`[updateTaskInstance] Failed to auto-upload photo_after to Firebase Storage:`, err);
       }
     }
 
@@ -2551,7 +2228,7 @@ export async function getDeviceSwitches(): Promise<DeviceSwitch[]> {
   return switches;
 }
 
-export function compressImage(base64Str: string, maxWidth = 800, maxHeight = 800, quality = 0.6): Promise<string> {
+export function compressImage(base64Str: string, maxWidth = 1600, maxHeight = 1600, quality = 0.75): Promise<string> {
   return new Promise((resolve) => {
     if (typeof window === "undefined" || typeof Image === "undefined") {
       resolve(base64Str);
@@ -2585,6 +2262,8 @@ export function compressImage(base64Str: string, maxWidth = 800, maxHeight = 800
         return;
       }
 
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
       ctx.drawImage(img, 0, 0, width, height);
       const compressed = canvas.toDataURL("image/jpeg", quality);
       resolve(compressed);
@@ -2599,17 +2278,22 @@ export function compressImage(base64Str: string, maxWidth = 800, maxHeight = 800
 }
 
 
-export function base64ToBlob(base64: string): Blob {
-  const arr = base64.split(",");
-  const mimeMatch = arr[0].match(/:(.*?);/);
-  const mime = mimeMatch ? mimeMatch[1] : "image/jpeg";
-  const bstr = atob(arr[1]);
-  let n = bstr.length;
-  const u8arr = new Uint8Array(n);
-  while (n--) {
-    u8arr[n] = bstr.charCodeAt(n);
+export function base64ToBlob(base64: string, defaultMime = "image/jpeg"): Blob {
+  try {
+    const arr = base64.split(",");
+    const mimeMatch = arr[0].match(/:(.*?);/);
+    const mime = mimeMatch ? mimeMatch[1] : defaultMime;
+    const bstr = atob(arr[1]);
+    let n = bstr.length;
+    const u8arr = new Uint8Array(n);
+    while (n--) {
+      u8arr[n] = bstr.charCodeAt(n);
+    }
+    return new Blob([u8arr], { type: mime });
+  } catch (err) {
+    console.error("[Storage] Failed to convert Base64 to Blob:", err);
+    throw new Error("فشل تحويل الصورة إلى صيغة ملف قابلة للرفع.");
   }
-  return new Blob([u8arr], { type: mime });
 }
 
 function waitForUploadTask(task: UploadTask): Promise<string> {
@@ -2617,7 +2301,7 @@ function waitForUploadTask(task: UploadTask): Promise<string> {
     const unsubscribe = task.on(
       "state_changed",
       () => {
-        // Intentionally handled by the caller / component if needed.
+        // Handled by progress listeners in UI components
       },
       (error) => {
         unsubscribe();
@@ -2637,326 +2321,72 @@ function waitForUploadTask(task: UploadTask): Promise<string> {
   });
 }
 
-export async function uploadPhotoTask(base64Image: string, path: string): Promise<{ task: UploadTask }> {
-  const compressedBase64 = await compressImage(base64Image, 800, 800, 0.6);
-  const blob = base64ToBlob(compressedBase64);
+/**
+ * Validates the canonical storage path format and ensures no undefined/null segments exist.
+ */
+export function validateStoragePath(path: string): void {
+  if (!path || typeof path !== "string") {
+    throw new Error("مسار التخزين غير صالح أو مفقود.");
+  }
+  const segments = path.split("/");
+  if (segments.some((seg) => !seg || seg === "undefined" || seg === "null")) {
+    throw new Error(`مسار التخزين غير مكتمل أو يحتوي على قيم غير معرفة: ${path}`);
+  }
+}
+
+export async function uploadPhotoTask(blobOrBase64: Blob | string, path: string): Promise<{ task: UploadTask }> {
+  validateStoragePath(path);
+  
+  let blob: Blob;
+  if (typeof blobOrBase64 === "string") {
+    blob = base64ToBlob(blobOrBase64, "image/jpeg");
+  } else {
+    blob = blobOrBase64;
+  }
+  
   const sRef = storageRef(storage, path);
-  const task = uploadBytesResumable(sRef, blob);
+  const metadata = {
+    contentType: "image/jpeg",
+    customMetadata: {
+      uploadedAt: new Date().toISOString(),
+      app: "naris-ops",
+      version: "production-v1"
+    }
+  };
+  const task = uploadBytesResumable(sRef, blob, metadata);
   return { task };
 }
 
-export async function uploadPhoto(base64Image: string, path: string): Promise<string> {
-  const { task } = await uploadPhotoTask(base64Image, path);
+export async function uploadPhoto(blobOrBase64: Blob | string, path: string): Promise<string> {
+  const { task } = await uploadPhotoTask(blobOrBase64, path);
+  return waitForUploadTask(task);
+}
+
+export async function uploadSignature(signatureBase64: string, path: string): Promise<string> {
+  validateStoragePath(path);
+  const blob = base64ToBlob(signatureBase64, "image/png");
+  const sRef = storageRef(storage, path);
+  const metadata = {
+    contentType: "image/png",
+    customMetadata: {
+      uploadedAt: new Date().toISOString(),
+      type: "employee_signature",
+      app: "naris-ops"
+    }
+  };
+  const task = uploadBytesResumable(sRef, blob, metadata);
   return waitForUploadTask(task);
 }
 
 export async function deletePhoto(path: string): Promise<void> {
   try {
+    if (!path || path.startsWith("data:") || path.startsWith("http")) return;
+    validateStoragePath(path);
     const sRef = storageRef(storage, path);
     await deleteObject(sRef);
     console.log(`[Storage] Rollback successful: deleted ${path}`);
   } catch (err) {
-    console.warn(`[Storage] Rollback failed: couldn't delete ${path}`, err);
-  }
-}
-
-export async function resetDatabase(): Promise<void> {
-  console.log("[Reset Database] Clearing local database and cache in localStorage...");
-  
-  // 1. Clear all data-related keys in localStorage to prevent syncing old or deleted data back
-  if (typeof localStorage !== "undefined") {
-    localStorage.removeItem("narisops_local_db");
-    localStorage.removeItem("naris_local_db_synced_to_firestore");
-    localStorage.removeItem("naris_pending_updates");
-    localStorage.removeItem("naris_schema_version");
-    localStorage.removeItem("naris_inventory_data");
-    localStorage.removeItem("use_base64_storage");
-    
-    // Clear any task cache keys
-    try {
-      const keysToRemove: string[] = [];
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key && (key.startsWith("naris_cached_tasks_") || key.startsWith("narisops_cached_") || key.startsWith("naris_ops_"))) {
-          keysToRemove.push(key);
-        }
-      }
-      keysToRemove.forEach((k) => localStorage.removeItem(k));
-    } catch (e) {
-      console.warn("[Reset Database] Failed to clear cached task keys:", e);
-    }
-  }
-
-  // Reset the in-memory localDB
-  localDB = {
-    users: {},
-    locations: {},
-    zones: {},
-    task_templates: {},
-    sop_items: {},
-    task_instances: {},
-    operational_tasks: {},
-    notifications: {},
-    device_switches: {},
-    kpi_snapshots: {}
-  };
-  localDBInitialized = false;
-
-  if (useLocalFallback) {
-    initLocalDB();
-    invalidateMetadataCaches();
-    console.log("[Local DB] Local database cleared and re-seeded successfully.");
-    return;
-  }
-
-  // 1. Backup existing zone cover images if any
-  const zoneImageBackup: Record<string, string> = {};
-  if (!useLocalFallback) {
-    try {
-      const zonesCol = collection(db, "zones");
-      const snap = await getDocs(zonesCol);
-      snap.forEach(docSnap => {
-        const data = docSnap.data();
-        if (data && data.cover_image_url) {
-          zoneImageBackup[docSnap.id] = data.cover_image_url;
-        }
-      });
-    } catch (e) {
-      console.warn("[Reset Database] Failed to backup zone cover images:", e);
-    }
-  }
-
-  const collectionsToClear = [
-    "users",
-    "locations",
-    "zones",
-    "task_templates",
-    "task_instances",
-    "operational_tasks",
-    "notifications",
-    "device_switches",
-    "kpi_snapshots"
-  ];
-
-  console.log("[Firestore Client] Resetting and testing database...");
-  for (const colName of collectionsToClear) {
-    try {
-      const colRef = collection(db, colName);
-      const snapshot = await getDocs(colRef);
-      for (const d of snapshot.docs) {
-        await firebaseDeleteDoc(doc(db, colName, d.id));
-      }
-    } catch (err) {
-      console.error(`[Firestore Client] Error clearing collection ${colName}:`, err);
-    }
-  }
-
-  // Clear seeding promise and re-seed clean, compliant templates
-  clearSeedingPromise();
-  await ensureSeeded();
-
-  // Restore backed up zone cover images
-  if (Object.keys(zoneImageBackup).length > 0 && !useLocalFallback) {
-    console.log("[Reset Database] Restoring backed up zone cover images...");
-    for (const zId of Object.keys(zoneImageBackup)) {
-      try {
-        const docRef = doc(db, "zones", zId);
-        const zDoc = await getDoc(docRef);
-        if (zDoc.exists()) {
-          await setDoc(docRef, { ...zDoc.data(), cover_image_url: zoneImageBackup[zId] });
-        }
-      } catch (e) {
-        console.error(`[Reset Database] Failed to restore cover image for zone ${zId}:`, e);
-      }
-    }
-  }
-
-  invalidateMetadataCaches();
-  console.log("[Firestore Client] Database cleared and re-seeded successfully.");
-}
-
-export async function reseedSopTemplatesAndResetTasks(): Promise<void> {
-  console.log("[Reseed SOP] Clearing existing templates and tasks...");
-  
-  // 1. Clear caches
-  invalidateMetadataCaches();
-  if (typeof localStorage !== "undefined") {
-    localStorage.removeItem("naris_sop_templates_synced_v34_fix");
-    localStorage.removeItem("naris_sop_templates_synced");
-    try {
-      const keysToRemove: string[] = [];
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key && (key.startsWith("naris_cached_tasks_") || key.startsWith("narisops_cached_") || key.startsWith("naris_ops_"))) {
-          keysToRemove.push(key);
-        }
-      }
-      keysToRemove.forEach((k) => localStorage.removeItem(k));
-    } catch (e) {
-      console.warn("[Reseed SOP] Failed to clear cached keys:", e);
-    }
-  }
-
-  // 2. Clear from memory localDB if using local fallback
-  if (useLocalFallback) {
-    const existingZoneImages: Record<string, string> = {};
-    Object.keys(localDB.zones).forEach(zId => {
-      if (localDB.zones[zId]?.cover_image_url) {
-        existingZoneImages[zId] = localDB.zones[zId].cover_image_url;
-      }
-    });
-
-    const existingTemplateImages: Record<string, { guide?: string; ref?: string }> = {};
-    Object.keys(localDB.task_templates || {}).forEach(tId => {
-      if (localDB.task_templates[tId]?.guide_image_url || localDB.task_templates[tId]?.reference_image_url) {
-        existingTemplateImages[tId] = {
-          guide: localDB.task_templates[tId].guide_image_url,
-          ref: localDB.task_templates[tId].reference_image_url
-        };
-      }
-    });
-
-    localDB.task_templates = {};
-    localDB.sop_items = {};
-    localDB.task_instances = {};
-    localDB.zones = {};
-    const seeded = getSeededDB();
-    seeded.task_templates.forEach((t: any) => {
-      const backup = existingTemplateImages[t.id];
-      const resItem = {
-        ...t,
-        guide_image_url: backup?.guide || t.guide_image_url || "",
-        reference_image_url: backup?.ref || t.reference_image_url || ""
-      };
-      localDB.task_templates[t.id] = resItem;
-      localDB.sop_items[t.id] = resItem;
-    });
-    seeded.zones.forEach((z) => {
-      const restoredUrl = existingZoneImages[z.id] || z.cover_image_url || "";
-      localDB.zones[z.id] = { ...z, cover_image_url: restoredUrl };
-    });
-    if (typeof localStorage !== "undefined") {
-      localStorage.setItem("narisops_local_db", JSON.stringify(localDB));
-    }
-    console.log("[Local DB] Local templates and zones re-seeded successfully with preserved images.");
-    return;
-  }
-
-  // 3. Firestore delete and insert
-  try {
-    // Backup existing zone cover images if any before clearing
-    const zoneImageBackup: Record<string, string> = {};
-    try {
-      const zonesCol = firebaseCollection(db, "zones");
-      const snap = await firebaseGetDocs(zonesCol);
-      snap.forEach(docSnap => {
-        const data = docSnap.data();
-        if (data && data.cover_image_url) {
-          zoneImageBackup[docSnap.id] = data.cover_image_url;
-        }
-      });
-    } catch (e) {
-      console.warn("[Reseed SOP] Failed to backup zone cover images before clearing:", e);
-    }
-
-    // Backup existing template guide & reference images if any before clearing
-    const templateImageBackup: Record<string, { guide?: string; ref?: string }> = {};
-    try {
-      const templatesCol = firebaseCollection(db, "task_templates");
-      const snap = await firebaseGetDocs(templatesCol);
-      snap.forEach(docSnap => {
-        const data = docSnap.data();
-        if (data && (data.guide_image_url || data.reference_image_url)) {
-          templateImageBackup[docSnap.id] = {
-            guide: data.guide_image_url,
-            ref: data.reference_image_url
-          };
-        }
-      });
-
-      // Also backup from sop_items if any
-      const sopCol = firebaseCollection(db, "sop_items");
-      const sopSnap = await firebaseGetDocs(sopCol);
-      sopSnap.forEach(docSnap => {
-        const data = docSnap.data();
-        if (data && (data.guide_image_url || data.reference_image_url) && !templateImageBackup[docSnap.id]) {
-          templateImageBackup[docSnap.id] = {
-            guide: data.guide_image_url,
-            ref: data.reference_image_url
-          };
-        }
-      });
-    } catch (e) {
-      console.warn("[Reseed SOP] Failed to backup template images before clearing:", e);
-    }
-
-    // A. Delete existing task_instances
-    const instancesCol = firebaseCollection(db, "task_instances");
-    const instancesSnap = await firebaseGetDocs(instancesCol);
-    for (const d of instancesSnap.docs) {
-      await firebaseDeleteDoc(firebaseDoc(db, "task_instances", d.id));
-    }
-    console.log(`[Firestore Client] Cleared ${instancesSnap.size} task instances.`);
-
-    // B. Delete existing task_templates and sop_items
-    const templatesCol = firebaseCollection(db, "task_templates");
-    const templatesSnap = await firebaseGetDocs(templatesCol);
-    for (const d of templatesSnap.docs) {
-      await firebaseDeleteDoc(firebaseDoc(db, "task_templates", d.id));
-    }
-    console.log(`[Firestore Client] Cleared ${templatesSnap.size} task templates.`);
-
-    try {
-      const sopCol = firebaseCollection(db, "sop_items");
-      const sopSnap = await firebaseGetDocs(sopCol);
-      for (const d of sopSnap.docs) {
-        await firebaseDeleteDoc(firebaseDoc(db, "sop_items", d.id));
-      }
-      console.log(`[Firestore Client] Cleared ${sopSnap.size} SOP items.`);
-    } catch (e) {
-      console.warn("[Reseed SOP] Failed to clear sop_items:", e);
-    }
-
-    // C. Delete existing zones
-    const zonesCol = firebaseCollection(db, "zones");
-    const zonesSnap = await firebaseGetDocs(zonesCol);
-    for (const d of zonesSnap.docs) {
-      await firebaseDeleteDoc(firebaseDoc(db, "zones", d.id));
-    }
-    console.log(`[Firestore Client] Cleared ${zonesSnap.size} zones.`);
-
-    // D. Seed zones and task_templates
-    const seededDB = getSeededDB();
-    const seededZones = seededDB.zones;
-    const seededTemplates = seededDB.task_templates;
-
-    console.log(`[Firestore Client] Inserting ${seededZones.length} clean zones with restored images if any...`);
-    for (const zone of seededZones) {
-      const restoredUrl = zoneImageBackup[zone.id] || zone.cover_image_url || "";
-      const updatedZone = { ...zone, cover_image_url: restoredUrl };
-      await firebaseSetDoc(firebaseDoc(db, "zones", zone.id), updatedZone);
-    }
-
-    console.log(`[Firestore Client] Inserting ${seededTemplates.length} clean templates and SOP items...`);
-    for (const template of seededTemplates as any[]) {
-      const backup = templateImageBackup[template.id];
-      const updatedTemplate = {
-        ...template,
-        guide_image_url: backup?.guide || template.guide_image_url || "",
-        reference_image_url: backup?.ref || template.reference_image_url || ""
-      };
-      await firebaseSetDoc(firebaseDoc(db, "task_templates", template.id), updatedTemplate);
-      await firebaseSetDoc(firebaseDoc(db, "sop_items", template.id), updatedTemplate);
-    }
-
-    if (typeof localStorage !== "undefined") {
-      localStorage.setItem("naris_sop_templates_synced_v34_fix", "true");
-    }
-    
-    console.log("[Reseed SOP] Reseed and sync completed successfully!");
-  } catch (err) {
-    console.error("[Reseed SOP] Failed to reseed templates/tasks in Firestore:", err);
-    throw err;
+    console.warn(`[Storage] Rollback warning: couldn't delete ${path}`, err);
   }
 }
 
@@ -3168,402 +2598,4 @@ export async function validateDatabase(): Promise<DatabaseValidationReport> {
   }
 
   return report;
-}
-
-export interface RecoveryLogItem {
-  id: string;
-  type: "zone" | "task";
-  name: string;
-  action: "restored_missing" | "merged_updates" | "no_change_needed" | "error";
-  details: string;
-  timestamp: string;
-}
-
-export async function recoverAndReconcileLocalData(): Promise<RecoveryLogItem[]> {
-  const log: RecoveryLogItem[] = [];
-  const nowStr = new Date().toISOString();
-
-  try {
-    console.log("[Data Recovery] Querying Firestore for existing zones...");
-    const zonesSnap = await getDocs(collection(db, "zones"));
-    const existingZoneIds = new Set<string>();
-    const existingZones: Record<string, any> = {};
-    zonesSnap.forEach(docSnap => {
-      existingZoneIds.add(docSnap.id);
-      existingZones[docSnap.id] = docSnap.data();
-    });
-
-    const localZonesMap: Record<string, any> = {};
-    
-    // Seeded zones defaults
-    const seeded = getSeededDB();
-    seeded.zones.forEach(z => {
-      localZonesMap[z.id] = z;
-    });
-
-    // Merge zones from localDB
-    if (localDB && localDB.zones) {
-      Object.keys(localDB.zones).forEach(id => {
-        localZonesMap[id] = { ...localZonesMap[id], ...localDB.zones[id] };
-      });
-    }
-
-    // Process zone restoration
-    for (const [zoneId, zone] of Object.entries(localZonesMap)) {
-      if (!existingZoneIds.has(zoneId)) {
-        try {
-          await setDoc(doc(db, "zones", zoneId), zone);
-          if (localDB && localDB.zones) {
-            localDB.zones[zoneId] = zone;
-          }
-          log.push({
-            id: zoneId,
-            type: "zone",
-            name: zone.name || zoneId,
-            action: "restored_missing",
-            details: `تم استعادة المنطقة '${zone.name || zoneId}' إلى السيرفر بنجاح للتصحيح التلقائي.`,
-            timestamp: nowStr
-          });
-        } catch (err: any) {
-          log.push({
-            id: zoneId,
-            type: "zone",
-            name: zone.name || zoneId,
-            action: "error",
-            details: `فشل استعادة المنطقة: ${err.message || err}`,
-            timestamp: nowStr
-          });
-        }
-      } else {
-        const serverZone = existingZones[zoneId];
-        if (!serverZone.name || !serverZone.id) {
-          try {
-            await setDoc(doc(db, "zones", zoneId), zone);
-            log.push({
-              id: zoneId,
-              type: "zone",
-              name: zone.name || zoneId,
-              action: "merged_updates",
-              details: "تم دمج ومعالجة الحقول غير المكتملة للمنطقة على السيرفر.",
-              timestamp: nowStr
-            });
-          } catch (err: any) {
-            console.error(`Failed to repair zone ${zoneId}`, err);
-          }
-        }
-      }
-    }
-
-    // Task Reconciliation
-    console.log("[Data Recovery] Querying Firestore for existing task instances...");
-    const taskInstancesSnap = await getDocs(collection(db, "task_instances"));
-    const existingTaskIds = new Set<string>();
-    const existingTasks: Record<string, any> = {};
-    taskInstancesSnap.forEach(docSnap => {
-      existingTaskIds.add(docSnap.id);
-      existingTasks[docSnap.id] = docSnap.data();
-    });
-
-    const localTasksMap: Record<string, any> = {};
-
-    if (localDB && localDB.task_instances) {
-      Object.keys(localDB.task_instances).forEach(id => {
-        localTasksMap[id] = localDB.task_instances[id];
-      });
-    }
-
-    if (typeof localStorage !== "undefined") {
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key && key.startsWith("naris_cached_tasks_")) {
-          try {
-            const dataStr = localStorage.getItem(key);
-            if (dataStr) {
-              const parsedTasks = JSON.parse(dataStr);
-              if (Array.isArray(parsedTasks)) {
-                parsedTasks.forEach(task => {
-                  if (task && task.id) {
-                    const existingLocal = localTasksMap[task.id];
-                    if (!existingLocal || (task.updated_at && (!existingLocal.updated_at || task.updated_at > existingLocal.updated_at))) {
-                      localTasksMap[task.id] = task;
-                    }
-                  }
-                });
-              }
-            }
-          } catch (err) {
-            console.warn("Failed parsing cached task key during recovery:", key, err);
-          }
-        }
-      }
-    }
-
-    for (const [taskId, localTask] of Object.entries(localTasksMap)) {
-      if (!existingTaskIds.has(taskId)) {
-        try {
-          await setDoc(doc(db, "task_instances", taskId), localTask);
-          if (localDB && localDB.task_instances) {
-            localDB.task_instances[taskId] = localTask;
-          }
-          log.push({
-            id: taskId,
-            type: "task",
-            name: localTask.title || taskId,
-            action: "restored_missing",
-            details: `تم العثور على مهمة محلية مفقودة على السيرفر (حالة: ${localTask.status}). تم رفعها واستعادتها بالكامل.`,
-            timestamp: nowStr
-          });
-        } catch (err: any) {
-          log.push({
-            id: taskId,
-            type: "task",
-            name: localTask.title || taskId,
-            action: "error",
-            details: `فشل إعادة مزامنة المهمة المفقودة: ${err.message || err}`,
-            timestamp: nowStr
-          });
-        }
-      } else {
-        const serverTask = existingTasks[taskId];
-        const isLocalCompleted = localTask.status === "completed" && serverTask.status !== "completed";
-        const isLocalInProgress = localTask.status === "in_progress" && serverTask.status === "pending";
-        const isLocalNewer = localTask.updated_at && serverTask.updated_at && localTask.updated_at > serverTask.updated_at;
-
-        if (isLocalCompleted || isLocalInProgress || isLocalNewer) {
-          try {
-            const mergedTask = {
-              ...serverTask,
-              ...localTask,
-              updated_at: nowStr
-            };
-            await setDoc(doc(db, "task_instances", taskId), mergedTask);
-            if (localDB && localDB.task_instances) {
-              localDB.task_instances[taskId] = mergedTask;
-            }
-            log.push({
-              id: taskId,
-              type: "task",
-              name: localTask.title || taskId,
-              action: "merged_updates",
-              details: `تم دمج تحديثات محلية أحدث لحالة المهمة بنجاح (الحالة المحلية: ${localTask.status}).`,
-              timestamp: nowStr
-            });
-          } catch (err: any) {
-            log.push({
-              id: taskId,
-              type: "task",
-              name: localTask.title || taskId,
-              action: "error",
-              details: `فشل دمج تحديثات المهمة: ${err.message || err}`,
-              timestamp: nowStr
-            });
-          }
-        }
-      }
-    }
-
-    if (typeof localStorage !== "undefined" && localDB) {
-      localStorage.setItem("narisops_local_db", JSON.stringify(localDB));
-    }
-
-    await syncOfflineTasks();
-
-  } catch (err: any) {
-    console.error("[Data Recovery] Fatal error during reconciliation:", err);
-    log.push({
-      id: "fatal_system",
-      type: "task",
-      name: "محرك المعالجة التلقائية",
-      action: "error",
-      details: `حدث خطأ عام غير متوقع أثناء الفحص والاستعادة: ${err.message || err}`,
-      timestamp: nowStr
-    });
-  }
-
-  return log;
-}
-
-export interface ImageRecoveryLogItem {
-  id: string;
-  zoneName: string;
-  sourceKey: string;
-  imageUrl: string;
-  status: "restored" | "already_exists" | "skipped";
-}
-
-export async function recoverZoneImagesFromCaches(): Promise<ImageRecoveryLogItem[]> {
-  const recovered: ImageRecoveryLogItem[] = [];
-  if (typeof localStorage === "undefined") return recovered;
-
-  const seeded = getSeededDB();
-  const zoneIds = seeded.zones.map(z => z.id);
-  const zoneNames = seeded.zones.reduce((acc, z) => ({ ...acc, [z.id]: z.name }), {} as Record<string, string>);
-
-  initLocalDB();
-  const activeZones = { ...localDB.zones };
-
-  let firestoreZones: Record<string, any> = {};
-  if (!useLocalFallback) {
-    try {
-      const snap = await getDocs(collection(db, "zones"));
-      snap.forEach(docSnap => {
-        firestoreZones[docSnap.id] = docSnap.data();
-      });
-    } catch (e) {
-      console.warn("Could not load firestore zones during image recovery:", e);
-    }
-  }
-
-  const saveRecovered = async (zId: string, imgUrl: string, keyName: string) => {
-    if (!localDB.zones[zId]) {
-      localDB.zones[zId] = { id: zId, ...getSeededDB().zones.find(z => z.id === zId) };
-    }
-    localDB.zones[zId].cover_image_url = imgUrl;
-    saveLocalDB();
-
-    if (!useLocalFallback) {
-      try {
-        const docRef = doc(db, "zones", zId);
-        const activeSnap = await getDoc(docRef);
-        const activeData = activeSnap.exists() ? activeSnap.data() : { id: zId, ...getSeededDB().zones.find(z => z.id === zId) };
-        await setDoc(docRef, { ...activeData, cover_image_url: imgUrl });
-      } catch (err) {
-        console.warn(`[Image Recovery] Failed to sync recovered image for ${zId} to Firestore:`, err);
-      }
-    }
-
-    recovered.push({
-      id: zId,
-      zoneName: zoneNames[zId] || zId,
-      sourceKey: keyName,
-      imageUrl: imgUrl,
-      status: "restored"
-    });
-
-    activeZones[zId] = { ...activeZones[zId], cover_image_url: imgUrl };
-    firestoreZones[zId] = { ...firestoreZones[zId], cover_image_url: imgUrl };
-  };
-
-  // 1. Scan localStorage for any JSON value that looks like our database structures or custom templates containing cover_image_url
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (!key) continue;
-    if (key === "naris_ops_session" || key === "naris_ops_user") continue;
-
-    try {
-      const value = localStorage.getItem(key);
-      if (!value) continue;
-
-      if (value.startsWith("{") || value.startsWith("[")) {
-        const parsed = JSON.parse(value);
-        
-        const searchInObject = async (obj: any, keyName: string) => {
-          if (!obj || typeof obj !== "object") return;
-
-          if (obj.id && zoneIds.includes(obj.id) && obj.cover_image_url) {
-            const zId = obj.id;
-            const imgUrl = obj.cover_image_url;
-            const currentActiveImg = activeZones[zId]?.cover_image_url || firestoreZones[zId]?.cover_image_url || "";
-            if (!currentActiveImg && imgUrl) {
-              await saveRecovered(zId, imgUrl, keyName);
-            }
-          }
-
-          if (obj.zones && typeof obj.zones === "object") {
-            for (const zId of Object.keys(obj.zones)) {
-              if (zoneIds.includes(zId) && obj.zones[zId]?.cover_image_url) {
-                const imgUrl = obj.zones[zId].cover_image_url;
-                const currentActiveImg = activeZones[zId]?.cover_image_url || firestoreZones[zId]?.cover_image_url || "";
-                if (!currentActiveImg && imgUrl) {
-                  await saveRecovered(zId, imgUrl, keyName);
-                }
-              }
-            }
-          }
-
-          for (const k of Object.keys(obj)) {
-            if (obj[k] && typeof obj[k] === "object") {
-              await searchInObject(obj[k], keyName);
-            }
-          }
-        };
-
-        await searchInObject(parsed, key);
-      }
-    } catch (err) {
-      // Ignore parse/traversal errors
-    }
-  }
-
-  // 2. Scan for specific standalone zone image backups
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (key && key.startsWith("naris_zone_image_")) {
-      const zId = key.replace("naris_zone_image_", "");
-      if (zoneIds.includes(zId)) {
-        const imgUrl = localStorage.getItem(key);
-        if (imgUrl) {
-          const currentActiveImg = activeZones[zId]?.cover_image_url || firestoreZones[zId]?.cover_image_url || "";
-          if (!currentActiveImg) {
-            await saveRecovered(zId, imgUrl, key);
-          }
-        }
-      }
-    }
-  }
-
-  return recovered;
-}
-
-export interface ImageSyncResult {
-  id: string;
-  zoneName: string;
-  status: "success" | "skipped" | "error";
-  details: string;
-}
-
-export async function syncLocalZoneImagesToCloud(): Promise<ImageSyncResult[]> {
-  const results: ImageSyncResult[] = [];
-  initLocalDB();
-
-  const seeded = getSeededDB();
-  const zoneNames = seeded.zones.reduce((acc, z) => ({ ...acc, [z.id]: z.name }), {} as Record<string, string>);
-
-  const localZones = { ...localDB.zones };
-
-  for (const zId of Object.keys(localZones)) {
-    const zone = localZones[zId];
-    if (zone && zone.cover_image_url && zone.cover_image_url.startsWith("data:image/")) {
-      try {
-        console.log(`[Image Sync] Syncing local base64 image for zone ${zId} to Cloud Storage...`);
-        const storagePath = `zones/${zId}/cover_synced_${Date.now()}.jpg`;
-        const uploadedUrl = await uploadPhoto(zone.cover_image_url, storagePath);
-
-        zone.cover_image_url = uploadedUrl;
-        await saveZone({
-          id: zId,
-          cover_image_url: uploadedUrl
-        });
-
-        localStorage.setItem(`naris_zone_image_${zId}`, uploadedUrl);
-
-        results.push({
-          id: zId,
-          zoneName: zoneNames[zId] || zone.name || zId,
-          status: "success",
-          details: "تم رفع الصورة وضغطها وتعيين رابطها السحابي الدائم بنجاح بنسبة 100%."
-        });
-      } catch (err: any) {
-        console.error(`[Image Sync] Failed to sync zone ${zId} cover image:`, err);
-        results.push({
-          id: zId,
-          zoneName: zoneNames[zId] || zone.name || zId,
-          status: "error",
-          details: `فشل الرفع السحابي: ${err.message || err}`
-        });
-      }
-    }
-  }
-
-  return results;
 }

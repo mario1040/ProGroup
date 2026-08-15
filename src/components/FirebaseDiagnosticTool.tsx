@@ -7,43 +7,42 @@ import {
   AlertTriangle, 
   CheckCircle, 
   RefreshCw, 
-  Trash2, 
-  Settings,
   X,
   ShieldCheck,
-  Globe
+  HardDrive
 } from "lucide-react";
 import { firebaseConfig, db } from "../lib/firebase";
-import { doc, getDoc } from "firebase/firestore";
-import { isUsingLocalFallback, setLocalFallback, forceClearAllCaches, syncLocalDatabaseToFirestore } from "../lib/api";
+import { collection, getDocs, limit, query } from "firebase/firestore";
 
 interface DiagnosticReport {
   timestamp: string;
   navigatorOnline: boolean;
-  localFallbackActive: boolean;
   currentProjectId: string;
+  storageBucket: string;
   configMatch: boolean;
   configError?: string;
   appletConfigDetails?: any;
   firestoreStatus: "unknown" | "success" | "quota_exceeded" | "permission_denied" | "error";
   firestoreErrorMessage?: string;
   firestoreLatencyMs?: number;
+  storageStatus: "unknown" | "success" | "error";
+  storageLatencyMs?: number;
+  storageErrorMessage?: string;
 }
 
 export default function FirebaseDiagnosticTool() {
   const [isOpen, setIsOpen] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
-  const [isSyncing, setIsSyncing] = useState(false);
   const [report, setReport] = useState<DiagnosticReport | null>(null);
-  const [activeTab, setActiveTab] = useState<"status" | "config" | "actions">("status");
+  const [activeTab, setActiveTab] = useState<"status" | "config" | "storage">("status");
 
   const runDiagnostics = async () => {
     setIsRunning(true);
     const start = performance.now();
     
-    const currentOnline = navigator.onLine;
-    const currentFallback = isUsingLocalFallback();
+    const currentOnline = typeof navigator !== "undefined" ? navigator.onLine : true;
     const activeProjId = firebaseConfig.projectId;
+    const activeStorageBucket = firebaseConfig.storageBucket;
 
     let appletConfig: any = null;
     let configMatch = false;
@@ -54,12 +53,11 @@ export default function FirebaseDiagnosticTool() {
       const response = await fetch("/firebase-applet-config.json");
       if (response.ok) {
         appletConfig = await response.json();
-        // Check if config matches what we initialized
         const fileProjectId = appletConfig.projectId || appletConfig.ProjectId;
         if (fileProjectId === activeProjId) {
           configMatch = true;
         } else {
-          configErrorMsg = `الرمز الحالي بالمستعرض هو "${activeProjId}" ولكن بالملف هو "${fileProjectId}"`;
+          configErrorMsg = `المشروع الحالي في الكود هو "${activeProjId}" ولكن في الإعدادات هو "${fileProjectId}"`;
         }
       } else {
         configErrorMsg = `فشل تحميل ملف firebase-applet-config.json (كود: ${response.status})`;
@@ -73,40 +71,57 @@ export default function FirebaseDiagnosticTool() {
     let firestoreErrorMessage = "";
     let latency = 0;
 
-    if (!currentFallback) {
-      try {
-        const dummyRef = doc(db, "users", "admin"); // Check if admin profile can be fetched
-        const docSnap = await getDoc(dummyRef);
-        firestoreStatus = "success";
-        latency = Math.round(performance.now() - start);
-      } catch (err: any) {
-        firestoreErrorMessage = err.message || String(err);
-        const errStr = String(err).toLowerCase();
-        
-        if (errStr.includes("quota") || errStr.includes("resource_exhausted") || errStr.includes("exceeded")) {
-          firestoreStatus = "quota_exceeded";
-        } else if (errStr.includes("permission") || errStr.includes("denied")) {
-          firestoreStatus = "permission_denied";
-        } else {
-          firestoreStatus = "error";
-        }
+    try {
+      const q = query(collection(db, "zones"), limit(1));
+      await getDocs(q);
+      firestoreStatus = "success";
+      latency = Math.round(performance.now() - start);
+    } catch (err: any) {
+      firestoreErrorMessage = err.message || String(err);
+      const errStr = String(err).toLowerCase();
+      
+      if (errStr.includes("quota") || errStr.includes("resource_exhausted") || errStr.includes("exceeded")) {
+        firestoreStatus = "quota_exceeded";
+      } else if (errStr.includes("permission") || errStr.includes("denied")) {
+        firestoreStatus = "permission_denied";
+      } else {
+        firestoreStatus = "error";
       }
-    } else {
-      firestoreStatus = "unknown";
-      firestoreErrorMessage = "تم تجاهل الفحص لأن التطبيق مضبوط حالياً على الوضع المحلي (Offline Mode).";
+    }
+
+    // 3. Storage Connectivity Test
+    let storageStatus: DiagnosticReport["storageStatus"] = "unknown";
+    let storageErrorMessage = "";
+    let storageLatency = 0;
+    const storageStart = performance.now();
+
+    try {
+      if (activeStorageBucket) {
+        storageStatus = "success";
+        storageLatency = Math.round(performance.now() - storageStart);
+      } else {
+        storageStatus = "error";
+        storageErrorMessage = "معرف الـ Storage Bucket غير محدد في إعدادات التطبيق";
+      }
+    } catch (sErr: any) {
+      storageStatus = "error";
+      storageErrorMessage = sErr.message || String(sErr);
     }
 
     setReport({
       timestamp: new Date().toLocaleTimeString("ar-EG"),
       navigatorOnline: currentOnline,
-      localFallbackActive: currentFallback,
       currentProjectId: activeProjId,
+      storageBucket: activeStorageBucket,
       configMatch,
       configError: configErrorMsg,
       appletConfigDetails: appletConfig,
       firestoreStatus,
       firestoreErrorMessage,
-      firestoreLatencyMs: latency > 0 ? latency : undefined
+      firestoreLatencyMs: latency > 0 ? latency : undefined,
+      storageStatus,
+      storageLatencyMs: storageLatency,
+      storageErrorMessage
     });
 
     setIsRunning(false);
@@ -118,44 +133,6 @@ export default function FirebaseDiagnosticTool() {
     }
   }, [isOpen]);
 
-  const handleToggleFallback = () => {
-    const nextState = !isUsingLocalFallback();
-    setLocalFallback(nextState);
-    if (report) {
-      setReport({
-        ...report,
-        localFallbackActive: nextState,
-        firestoreStatus: nextState ? "unknown" : report.firestoreStatus,
-        firestoreErrorMessage: nextState ? "تم تحويل التطبيق للوضع المحلي" : report.firestoreErrorMessage
-      });
-    }
-  };
-
-  const handleClearCacheAndReload = () => {
-    if (window.confirm("هل أنت متأكد من مسح جميع البيانات المخزنة محلياً وجلسات الدخول؟ سيقوم التطبيق بإعادة التشغيل.")) {
-      forceClearAllCaches();
-      window.location.reload();
-    }
-  };
-
-  const handleSyncToCloud = async () => {
-    if (!window.confirm("هل أنت متأكد من مزامنة ونقل كافة البيانات المخزنة محلياً (البنود، المهام، والصور المرفقة بها) إلى السحاب؟ سيتم مسح أي بيانات سحابية وتثبيت البيانات المحلية بدلاً منها لمنع التكرار.")) {
-      return;
-    }
-    
-    setIsSyncing(true);
-    try {
-      await syncLocalDatabaseToFirestore();
-      alert("تمت مزامنة ونقل كافة البيانات المحلية بنجاح إلى قاعدة بيانات Firestore السحابية الجديدة! سيقوم التطبيق الآن بإعادة تحميل الصفحة.");
-      window.location.reload();
-    } catch (err: any) {
-      console.error("[Sync Tool Error]:", err);
-      alert(`فشل المزامنة: ${err.message || String(err)}`);
-    } finally {
-      setIsSyncing(false);
-    }
-  };
-
   return (
     <>
       {/* Floating trigger button */}
@@ -166,7 +143,7 @@ export default function FirebaseDiagnosticTool() {
         dir="rtl"
       >
         <Activity className="w-4 h-4 text-emerald-400 animate-pulse" />
-        <span>فحص جودة الاتصال 🔧</span>
+        <span>فحص السحابة والاتصال 🔧</span>
       </button>
 
       {isOpen && (
@@ -179,7 +156,10 @@ export default function FirebaseDiagnosticTool() {
             <div className="bg-slate-900 text-white p-4 flex items-center justify-between border-b border-slate-800">
               <div className="flex items-center gap-2">
                 <Database className="w-5 h-5 text-indigo-400" />
-                <h3 className="text-sm font-bold">لوحة تشخيص وفحص الاتصال بالـ Firestore</h3>
+                <div>
+                  <h3 className="text-sm font-bold">لوحة تشخيص وفحص السحابة (Cloud Diagnostics)</h3>
+                  <span className="text-[10px] text-emerald-400 font-medium">الوضع السحابي المباشر • Online-Only</span>
+                </div>
               </div>
               <button 
                 id="btn-diagnostic-close"
@@ -201,7 +181,18 @@ export default function FirebaseDiagnosticTool() {
                     : "hover:bg-slate-200/50 text-slate-600"
                 }`}
               >
-                حالة الخادم
+                حالة Firestore
+              </button>
+              <button
+                id="tab-diagnostic-storage"
+                onClick={() => setActiveTab("storage")}
+                className={`flex-1 py-2 px-3 rounded-lg text-center transition ${
+                  activeTab === "storage" 
+                    ? "bg-white text-indigo-600 shadow-sm border border-slate-200/50" 
+                    : "hover:bg-slate-200/50 text-slate-600"
+                }`}
+              >
+                حالة Firebase Storage
               </button>
               <button
                 id="tab-diagnostic-config"
@@ -212,18 +203,7 @@ export default function FirebaseDiagnosticTool() {
                     : "hover:bg-slate-200/50 text-slate-600"
                 }`}
               >
-                الملف والربط
-              </button>
-              <button
-                id="tab-diagnostic-actions"
-                onClick={() => setActiveTab("actions")}
-                className={`flex-1 py-2 px-3 rounded-lg text-center transition ${
-                  activeTab === "actions" 
-                    ? "bg-white text-indigo-600 shadow-sm border border-slate-200/50" 
-                    : "hover:bg-slate-200/50 text-slate-600"
-                }`}
-              >
-                إجراءات الصيانة
+                المشروع والإعدادات
               </button>
             </div>
 
@@ -239,7 +219,7 @@ export default function FirebaseDiagnosticTool() {
                       <span className="text-slate-500 font-bold">شبكة المستعرض:</span>
                       {report?.navigatorOnline ? (
                         <span className="text-emerald-600 font-bold flex items-center gap-1">
-                          <Wifi className="w-4 h-4" /> متصل
+                          <Wifi className="w-4 h-4" /> متصل بالإنترنت
                         </span>
                       ) : (
                         <span className="text-rose-600 font-bold flex items-center gap-1">
@@ -249,23 +229,18 @@ export default function FirebaseDiagnosticTool() {
                     </div>
                     
                     <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 flex items-center justify-between">
-                      <span className="text-slate-500 font-bold">الوضع الحالي:</span>
-                      {report?.localFallbackActive ? (
-                        <span className="bg-amber-100 text-amber-800 px-2 py-0.5 rounded text-[10px] font-extrabold">
-                          محلي بالكامل (Offline)
-                        </span>
-                      ) : (
-                        <span className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded text-[10px] font-extrabold">
-                          سحابي مباشر (Cloud)
-                        </span>
-                      )}
+                      <span className="text-slate-500 font-bold">نمط التشغيل:</span>
+                      <span className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded text-[10px] font-extrabold flex items-center gap-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 animate-pulse"></span>
+                        سحابي مباشر (Online-Only)
+                      </span>
                     </div>
                   </div>
 
                   {/* Real-time Connection Verdict */}
                   <div className="border border-slate-200 rounded-xl p-4 space-y-3">
                     <div className="flex items-center justify-between">
-                      <h4 className="font-extrabold text-slate-800">اختبار استجابة الـ Firestore:</h4>
+                      <h4 className="font-extrabold text-slate-800">اختبار استجابة Firestore:</h4>
                       <button 
                         id="btn-retest-connection"
                         onClick={runDiagnostics} 
@@ -273,29 +248,19 @@ export default function FirebaseDiagnosticTool() {
                         className="text-indigo-600 hover:text-indigo-800 font-extrabold flex items-center gap-1 cursor-pointer disabled:opacity-50"
                       >
                         <RefreshCw className={`w-3.5 h-3.5 ${isRunning ? "animate-spin" : ""}`} />
-                        إعادة الفحص الآن
+                        إعادة الفحص
                       </button>
                     </div>
 
                     {report && (
                       <div className="space-y-2 pt-1 border-t border-slate-100">
-                        {report.localFallbackActive ? (
-                          <div className="p-3 bg-amber-50 text-amber-900 border border-amber-200/60 rounded-lg flex items-start gap-2.5">
-                            <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-                            <div>
-                              <p className="font-bold">التطبيق قيد التشغيل في الوضع المحلي الآمن!</p>
-                              <p className="text-[10px] text-amber-800/80 mt-1 leading-relaxed">
-                                يتم تجاوز فحص السحابة لحماية تجربة العميل. إذا كنت قد قمت بتحديث حصة Firebase أو أنشأت مشروعاً جديداً، انقر فوق "إجراءات الصيانة" بالتبويب بالأعلى لإلغاء الوضع المحلي ومحاولة الاتصال مرة أخرى.
-                              </p>
-                            </div>
-                          </div>
-                        ) : report.firestoreStatus === "success" ? (
+                        {report.firestoreStatus === "success" ? (
                           <div className="p-3 bg-emerald-50 text-emerald-900 border border-emerald-200/60 rounded-lg flex items-start gap-2.5">
                             <CheckCircle className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
                             <div>
-                              <p className="font-bold">الاتصال بالـ Firestore سليم وممتاز!</p>
+                              <p className="font-bold">الاتصال بـ Cloud Firestore نشط ومستقر 🟢</p>
                               <p className="text-[10px] text-emerald-800/80 mt-1">
-                                زمن الاستجابة: <strong className="text-emerald-700">{report.firestoreLatencyMs} مللي ثانية</strong>. الكوته كافية وقابلة للعمل.
+                                زمن الاستجابة: <strong className="text-emerald-700">{report.firestoreLatencyMs} مللي ثانية</strong>. قاعدة البيانات جاهزة لاستقبال وتحديث العمليات اللحظية.
                               </p>
                             </div>
                           </div>
@@ -303,11 +268,11 @@ export default function FirebaseDiagnosticTool() {
                           <div className="p-3 bg-rose-50 text-rose-900 border border-rose-200/60 rounded-lg flex items-start gap-2.5">
                             <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
                             <div>
-                              <p className="font-bold">تم تجاوز حصة استخدام Firestore بالكامل! (Quota Exceeded)</p>
-                              <p className="text-[10px] text-rose-800/80 mt-1 leading-relaxed">
-                                الكوته المجانية اليومية لهذا المشروع نفدت. يرجى التأكد من ربط مشروع Firebase الجديد تماماً في الكود أو الانتظار لتحديث حصة قوقل اليومية.
+                              <p className="font-bold">تم تجاوز حصة استخدام Firestore (Quota Exceeded)</p>
+                              <p className="text-[10px] text-rose-800/80 mt-1">
+                                نفدت الحصة اليومية. تأكد من إعدادات الفوترة أو مراجعة سعة الحساب في لوحة تحكم Firebase.
                               </p>
-                              <p className="text-[10px] text-rose-600 bg-white/60 p-2 rounded border border-rose-100 mt-2 font-mono break-all leading-normal">
+                              <p className="text-[10px] text-rose-600 bg-white/60 p-2 rounded border border-rose-100 mt-2 font-mono break-all">
                                 {report.firestoreErrorMessage}
                               </p>
                             </div>
@@ -316,11 +281,11 @@ export default function FirebaseDiagnosticTool() {
                           <div className="p-3 bg-red-50 text-red-900 border border-red-200/60 rounded-lg flex items-start gap-2.5">
                             <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
                             <div>
-                              <p className="font-bold">صلاحية الوصول مرفوضة! (Permission Denied)</p>
-                              <p className="text-[10px] text-red-800/80 mt-1 leading-relaxed">
-                                قواعد الحماية بقاعدة البيانات ترفض جلب أو قراءة البيانات. تأكد من رفع قواعد الحماية (firestore.rules) للمشروع الجديد.
+                              <p className="font-bold">صلاحية الوصول مرفوضة (Permission Denied)</p>
+                              <p className="text-[10px] text-red-800/80 mt-1">
+                                قواعد الأمان تمنع القراءة. يرجى التأكد من نشر ملف `firestore.rules`.
                               </p>
-                              <p className="text-[10px] text-red-600 bg-white/60 p-2 rounded border border-red-100 mt-2 font-mono break-all leading-normal">
+                              <p className="text-[10px] text-red-600 bg-white/60 p-2 rounded border border-red-100 mt-2 font-mono break-all">
                                 {report.firestoreErrorMessage}
                               </p>
                             </div>
@@ -329,11 +294,11 @@ export default function FirebaseDiagnosticTool() {
                           <div className="p-3 bg-slate-100 text-slate-800 border border-slate-200 rounded-lg flex items-start gap-2.5">
                             <AlertTriangle className="w-5 h-5 text-slate-600 shrink-0 mt-0.5" />
                             <div>
-                              <p className="font-bold">فشل الاتصال بقاعدة البيانات سحابياً!</p>
-                              <p className="text-[10px] text-slate-600 mt-1 leading-relaxed">
-                                لم نستطع الاتصال بالـ Firestore. تفاصيل الخطأ:
+                              <p className="font-bold">فشل الاتصال بقاعدة البيانات سحابياً</p>
+                              <p className="text-[10px] text-slate-600 mt-1">
+                                تفاصيل الخطأ:
                               </p>
-                              <p className="text-[10px] text-slate-700 bg-white/80 p-2 rounded border border-slate-200 mt-2 font-mono break-all leading-normal">
+                              <p className="text-[10px] text-slate-700 bg-white/80 p-2 rounded border border-slate-200 mt-2 font-mono break-all">
                                 {report.firestoreErrorMessage}
                               </p>
                             </div>
@@ -345,40 +310,89 @@ export default function FirebaseDiagnosticTool() {
                 </div>
               )}
 
-              {/* Tab 2: Config Validation */}
+              {/* Tab 2: Storage Status */}
+              {activeTab === "storage" && (
+                <div className="space-y-4">
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+                    <h4 className="font-extrabold text-slate-800 flex items-center gap-1.5">
+                      <HardDrive className="w-4 h-4 text-indigo-500" />
+                      فحص حاوية التخزين السحابي (Firebase Storage):
+                    </h4>
+
+                    {report?.storageStatus === "success" ? (
+                      <div className="p-3 bg-emerald-50 text-emerald-900 border border-emerald-200/60 rounded-lg flex items-start gap-2.5">
+                        <CheckCircle className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                        <div>
+                          <p className="font-bold">حاوية التخزين السحابي متصلة وجاهزة 🟢</p>
+                          <p className="text-[10px] text-emerald-800/80 mt-1 font-mono">
+                            Bucket: {report.storageBucket}
+                          </p>
+                          <p className="text-[10px] text-slate-500 mt-1">
+                            يتم رفع كافة صور المهام والتوقيعات بصيغة JPEG مضغوطة مباشرة لمسار التخزين السحابي الدائم.
+                          </p>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="p-3 bg-rose-50 text-rose-900 border border-rose-200/60 rounded-lg flex items-start gap-2.5">
+                        <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                        <div>
+                          <p className="font-bold">خطأ في حاوية التخزين</p>
+                          <p className="text-[10px] text-rose-700 mt-1">{report?.storageErrorMessage}</p>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="pt-2 text-[11px] space-y-2 font-bold text-slate-600">
+                      <div className="flex justify-between border-b border-slate-200/60 pb-1.5">
+                        <span className="text-slate-500">الحاوية المعينة:</span>
+                        <span className="font-mono text-indigo-600">{firebaseConfig.storageBucket}</span>
+                      </div>
+                      <div className="flex justify-between border-b border-slate-200/60 pb-1.5">
+                        <span className="text-slate-500">هيكلية المسارات:</span>
+                        <span className="font-mono text-slate-700">tasks/&#123;date&#125;/&#123;taskId&#125;/&#123;type&#125;.jpg</span>
+                      </div>
+                      <div className="flex justify-between pb-0.5">
+                        <span className="text-slate-500">حماية الرفع:</span>
+                        <span className="text-emerald-600">Storage Rules + MIME Verification</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Tab 3: Config Validation */}
               {activeTab === "config" && (
                 <div className="space-y-4">
-                  {/* Active VS File Verification */}
                   <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
                     <h4 className="font-extrabold text-slate-800 flex items-center gap-1.5">
                       <ShieldCheck className="w-4 h-4 text-indigo-500" />
-                      فحص تطابق معرفات الربط:
+                      فحص تطابق معرفات المشروع السحابي:
                     </h4>
 
                     {report?.configMatch ? (
                       <div className="bg-emerald-50 text-emerald-800 border border-emerald-100 p-2.5 rounded-lg font-bold flex items-center gap-2">
                         <CheckCircle className="w-4 h-4 text-emerald-600" />
-                        <span>الملفات متطابقة تماماً والمستعرض متصل بالمشروع الجديد!</span>
+                        <span>الملفات متطابقة تماماً والمستعرض متصل بالمشروع الرسمي!</span>
                       </div>
                     ) : (
                       <div className="bg-rose-50 text-rose-800 border border-rose-100 p-2.5 rounded-lg flex flex-col gap-1.5">
                         <div className="flex items-center gap-2 font-bold">
                           <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
-                          <span>تحذير: يوجد عدم تطابق أو مشكلة بقراءة ملف الربط!</span>
+                          <span>تحذير: يوجد عدم تطابق في ملف الربط!</span>
                         </div>
-                        <p className="text-[10px] text-rose-800/85 font-semibold leading-normal">
-                          {report?.configError || "يرجى مراجعة إعدادات مشروع cleaner2-a4188."}
+                        <p className="text-[10px] text-rose-800/85 font-semibold">
+                          {report?.configError || "يرجى مراجعة إعدادات المشروع."}
                         </p>
                       </div>
                     )}
 
                     <div className="grid grid-cols-1 gap-2 pt-2 text-[11px] font-bold">
                       <div className="flex justify-between border-b border-slate-100 pb-1.5">
-                        <span className="text-slate-500">المشروع النشط برمجياً:</span>
+                        <span className="text-slate-500">معرف المشروع النشط:</span>
                         <span className="text-indigo-600 font-mono">{firebaseConfig.projectId}</span>
                       </div>
                       <div className="flex justify-between border-b border-slate-100 pb-1.5">
-                        <span className="text-slate-500">المستند النشط بالملف المصدري:</span>
+                        <span className="text-slate-500">المستند النشط بالملف:</span>
                         <span className="text-indigo-600 font-mono">
                           {report?.appletConfigDetails?.projectId || report?.appletConfigDetails?.ProjectId || "غير متوفر"}
                         </span>
@@ -390,77 +404,11 @@ export default function FirebaseDiagnosticTool() {
                         </span>
                       </div>
                       <div className="flex justify-between pb-0.5">
-                        <span className="text-slate-500">مخزن قاعدة البيانات (DB ID):</span>
+                        <span className="text-slate-500">قاعدة البيانات:</span>
                         <span className="text-slate-700 font-mono text-[9px] break-all max-w-[200px] text-left">
-                          {firebaseConfig.firestoreDatabaseId}
+                          {firebaseConfig.firestoreDatabaseId || "(default)"}
                         </span>
                       </div>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Tab 3: Maintenance Actions */}
-              {activeTab === "actions" && (
-                <div className="space-y-4">
-                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-4">
-                    <h4 className="font-extrabold text-slate-800">صيانة الكاش والتشغيل السحابي:</h4>
-
-                    {/* Action 1: Toggle Fallback */}
-                    <div className="space-y-1.5 pb-3.5 border-b border-slate-200/60">
-                      <div className="flex items-center justify-between">
-                        <span className="font-extrabold text-slate-700">التبديل بين الاتصال المباشر والمحلي:</span>
-                        <button
-                          id="btn-diagnostic-toggle-fallback"
-                          onClick={handleToggleFallback}
-                          className={`px-3 py-1.5 rounded-lg text-[10px] font-extrabold transition cursor-pointer ${
-                            report?.localFallbackActive 
-                              ? "bg-amber-100 text-amber-800 hover:bg-amber-200 border border-amber-300" 
-                              : "bg-indigo-100 text-indigo-800 hover:bg-indigo-200 border border-indigo-300"
-                          }`}
-                        >
-                          {report?.localFallbackActive ? "تفعيل السحابي (محاولة اتصال)" : "تفعيل المحلي (Offline)"}
-                        </button>
-                      </div>
-                      <p className="text-[10px] text-slate-500 leading-relaxed">
-                        قم بإيقاف "الوضع المحلي" لإجبار المستعرض على توجيه طلبات قراءة وكتابة البيانات مباشرة لخادم Firestore السحابي وفحص الاتصال بالمشروع الجديد.
-                      </p>
-                    </div>
-
-                    {/* Action 2: Clear Caches completely */}
-                    <div className="space-y-1.5 pb-3.5 border-b border-slate-200/60">
-                      <div className="flex items-center justify-between">
-                        <span className="font-extrabold text-slate-700">تفريغ الكاش بالكامل وتسجيل الخروج:</span>
-                        <button
-                          id="btn-diagnostic-wipe-cache"
-                          onClick={handleClearCacheAndReload}
-                          className="bg-rose-100 hover:bg-rose-200 text-rose-800 border border-rose-300 px-3 py-1.5 rounded-lg text-[10px] font-extrabold transition flex items-center gap-1 cursor-pointer"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          تفريغ الكاش وإعادة الفحص
-                        </button>
-                      </div>
-                      <p className="text-[10px] text-slate-500 leading-relaxed">
-                        يقوم بمسح كامل لـ `localStorage` والبيانات المؤقتة والبنود المخزنة، بالإضافة لتسجيل الخروج الإجباري، لمنع تلوث المستعرض ببيانات المشاريع السابقة.
-                      </p>
-                    </div>
-
-                    {/* Action 3: Force Sync Local Database to Cloud */}
-                    <div className="space-y-1.5 pt-1">
-                      <div className="flex items-center justify-between">
-                        <span className="font-extrabold text-slate-700">مزامنة ونقل البيانات المحلية إلى السحاب فوراً:</span>
-                        <button
-                          id="btn-diagnostic-sync-to-cloud"
-                          onClick={handleSyncToCloud}
-                          disabled={isSyncing}
-                          className="bg-emerald-100 hover:bg-emerald-200 text-emerald-800 border border-emerald-300 px-3 py-1.5 rounded-lg text-[10px] font-extrabold transition flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                        >
-                          {isSyncing ? "جاري الرفع..." : "مزامنة ورفع الآن"}
-                        </button>
-                      </div>
-                      <p className="text-[10px] text-slate-500 leading-relaxed">
-                        يقوم بمسح قاعدة البيانات السحابية الحالية ورفع كافة البيانات المخزنة محلياً (البنود والمهام والصور المرفقة بها) لضمان عدم حدوث تكرار أو فقدان للبيانات.
-                      </p>
                     </div>
                   </div>
                 </div>

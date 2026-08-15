@@ -37,9 +37,9 @@ export const db = dbInstance;
 export const auth = getAuth(app);
 export const storage = getStorage(app);
 
-// Enable standard retry behavior for uploads (reduced to 15s to avoid long hangs on CORS/Network errors)
-storage.maxUploadRetryTime = 15000;
-storage.maxOperationRetryTime = 15000;
+// Standard robust retry behavior for Firebase Storage uploads (120s)
+storage.maxUploadRetryTime = 120000;
+storage.maxOperationRetryTime = 120000;
 
 // --- Custom Firestore Error Handler (Mandatory as per Firebase Skill Guidelines) ---
 export enum OperationType {

@@ -48,8 +48,6 @@ import {
   saveTemplate, 
   deleteTemplate,
   saveProfile,
-  resetDatabase,
-  reseedSopTemplatesAndResetTasks,
   validateDatabase,
   DatabaseValidationReport,
   provisionEmployeeAuth,
@@ -58,13 +56,7 @@ import {
   getTasksForRange,
   uploadPhoto,
   compressImage,
-  recoverAndReconcileLocalData,
-  RecoveryLogItem,
-  saveZone,
-  recoverZoneImagesFromCaches,
-  syncLocalZoneImagesToCloud,
-  ImageRecoveryLogItem,
-  ImageSyncResult
+  saveZone
 } from "../lib/api";
 import { Profile, Zone, TaskTemplate, TaskInstance, OperationalTask, DeviceSwitch } from "../types";
 import InventoryManager from "./InventoryManager";
@@ -109,33 +101,9 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   const [loadingProfiles, setLoadingProfiles] = useState(false);
   const [isSavingTemplate, setIsSavingTemplate] = useState(false);
   const [isSavingTask, setIsSavingTask] = useState(false);
-  const [isResettingDb, setIsResettingDb] = useState(false);
-  const [isReseedingSop, setIsReseedingSop] = useState(false);
-  const [confirmResetActive, setConfirmResetActive] = useState(false);
   const [validationReport, setValidationReport] = useState<DatabaseValidationReport | null>(null);
   const [isValidatingDb, setIsValidatingDb] = useState(false);
-  const [isRecoveringData, setIsRecoveringData] = useState(false);
-  const [recoveryLog, setRecoveryLog] = useState<RecoveryLogItem[] | null>(null);
   const [isUploadingZoneImg, setIsUploadingZoneImg] = useState(false);
-  const [isRecoveringImages, setIsRecoveringImages] = useState(false);
-  const [imageRecoveryLog, setImageRecoveryLog] = useState<ImageRecoveryLogItem[] | null>(null);
-  const [isSyncingImages, setIsSyncingImages] = useState(false);
-  const [imageSyncLog, setImageSyncLog] = useState<ImageSyncResult[] | null>(null);
-  const [useBase64Storage, setUseBase64Storage] = useState<boolean>(() => {
-    if (typeof window !== "undefined") {
-      const stored = localStorage.getItem("use_base64_storage");
-      if (stored !== null) {
-        return stored === "true";
-      }
-      // Default to true in AI Studio preview environment to avoid CORS errors
-      const isStudio = window.location.hostname.includes("ai.studio") || window.location.hostname.includes("run.app") || window.location.hostname.includes("localhost");
-      if (isStudio) {
-        localStorage.setItem("use_base64_storage", "true");
-        return true;
-      }
-    }
-    return false;
-  });
   const [selectedDate, setSelectedDate] = useState<string>(getLocalDateString());
   
   // Monthly Reports & Archive States
@@ -527,28 +495,14 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       reader.onloadend = async () => {
         const base64String = reader.result as string;
         try {
-          if (useBase64Storage) {
-            console.log("[AdminDashboard] useBase64Storage is active. Compressing and saving directly...");
-            const superCompressed = await compressImage(base64String, 400, 400, 0.45);
-            setSelectedTemplate(prev => prev ? { ...prev, guide_image_url: superCompressed } : null);
-            showToast("تم رفع وحفظ الصورة الإرشادية بنجاح (نمط التخزين السريع)! 📸✅", "success");
-          } else {
-            const pathId = selectedTemplate?.id || `temp_${Math.random().toString(36).substring(7)}`;
-            const storagePath = `templates/guide_${pathId}.jpg`;
-            try {
-              const uploadedUrl = await uploadPhoto(base64String, storagePath);
-              setSelectedTemplate(prev => prev ? { ...prev, guide_image_url: uploadedUrl } : null);
-              showToast("تم رفع الصورة الإرشادية بنجاح! 📸✅", "success");
-            } catch (uploadErr) {
-              console.warn("[AdminDashboard] Cloud Storage failed. Falling back to compressed Base64...", uploadErr);
-              const superCompressed = await compressImage(base64String, 400, 400, 0.45);
-              setSelectedTemplate(prev => prev ? { ...prev, guide_image_url: superCompressed } : null);
-              showToast("تم حفظ الصورة الإرشادية بنجاح (نمط التخزين البديل) 📸✅", "success");
-            }
-          }
-        } catch (err) {
+          const pathId = selectedTemplate?.id || `temp_${Date.now()}`;
+          const storagePath = `templates/guide_${pathId}.jpg`;
+          const uploadedUrl = await uploadPhoto(base64String, storagePath);
+          setSelectedTemplate(prev => prev ? { ...prev, guide_image_url: uploadedUrl } : null);
+          showToast("تم رفع الصورة الإرشادية بنجاح إلى التخزين السحابي! 📸✅", "success");
+        } catch (err: any) {
           console.error("Error processing guide image:", err);
-          showToast("فشل معالجة أو رفع الصورة الإرشادية", "error");
+          showToast(`فشل رفع الصورة الإرشادية: ${err?.message || "خطأ في الاتصال"}`, "error");
         } finally {
           setUploadingGuide(false);
         }
@@ -577,28 +531,14 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       reader.onloadend = async () => {
         const base64String = reader.result as string;
         try {
-          if (useBase64Storage) {
-            console.log("[AdminDashboard] useBase64Storage is active. Compressing and saving directly...");
-            const superCompressed = await compressImage(base64String, 400, 400, 0.45);
-            setSelectedTemplate(prev => prev ? { ...prev, reference_image_url: superCompressed } : null);
-            showToast("تم رفع وحفظ صورة بند العمل المرجعية بنجاح (نمط التخزين السريع)! 📸✅", "success");
-          } else {
-            const pathId = selectedTemplate?.id || `temp_${Math.random().toString(36).substring(7)}`;
-            const storagePath = `templates/ref_${pathId}.jpg`;
-            try {
-              const uploadedUrl = await uploadPhoto(base64String, storagePath);
-              setSelectedTemplate(prev => prev ? { ...prev, reference_image_url: uploadedUrl } : null);
-              showToast("تم رفع صورة بند العمل المرجعية بنجاح! 📸✅", "success");
-            } catch (uploadErr) {
-              console.warn("[AdminDashboard] Cloud Storage failed. Falling back to compressed Base64...", uploadErr);
-              const superCompressed = await compressImage(base64String, 400, 400, 0.45);
-              setSelectedTemplate(prev => prev ? { ...prev, reference_image_url: superCompressed } : null);
-              showToast("تم حفظ الصورة المرجعية بنجاح (نمط التخزين البديل) 📸✅", "success");
-            }
-          }
-        } catch (err) {
+          const pathId = selectedTemplate?.id || `temp_${Date.now()}`;
+          const storagePath = `templates/ref_${pathId}.jpg`;
+          const uploadedUrl = await uploadPhoto(base64String, storagePath);
+          setSelectedTemplate(prev => prev ? { ...prev, reference_image_url: uploadedUrl } : null);
+          showToast("تم رفع صورة بند العمل المرجعية بنجاح! 📸✅", "success");
+        } catch (err: any) {
           console.error("Error processing reference image:", err);
-          showToast("فشل معالجة أو رفع الصورة المرجعية", "error");
+          showToast(`فشل رفع الصورة المرجعية: ${err?.message || "خطأ في الاتصال"}`, "error");
         } finally {
           setUploadingReference(false);
         }
@@ -697,34 +637,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
     }
   };
 
-  const handleRecoverAndReconcile = async () => {
-    try {
-      setIsRecoveringData(true);
-      const log = await recoverAndReconcileLocalData();
-      setRecoveryLog(log);
-      
-      const restoredZones = log.filter(item => item.type === 'zone' && item.action === 'restored_missing').length;
-      const restoredTasks = log.filter(item => item.type === 'task' && item.action === 'restored_missing').length;
-      const mergedTasks = log.filter(item => item.type === 'task' && item.action === 'merged_updates').length;
-
-      if (restoredZones > 0 || restoredTasks > 0 || mergedTasks > 0) {
-        showToast(
-          `اكتملت المعالجة بنجاح! تم استعادة (${restoredZones}) مناطق و (${restoredTasks}) مهام مفقودة، ودمج (${mergedTasks}) تحديثات لحالات المهام 🛡️✅`,
-          "success"
-        );
-      } else {
-        showToast("جميع البيانات والمناطق متطابقة ومتزامنة بالكامل مع السيرفر! 🟢✨", "success");
-      }
-      
-      loadAllData();
-    } catch (err) {
-      console.error(err);
-      showToast("فشل أثناء تشغيل نظام استرداد ومعالجة البيانات", "error");
-    } finally {
-      setIsRecoveringData(false);
-    }
-  };
-
   const handleZoneImageUpload = async (zoneId: string, file: File) => {
     try {
       setIsUploadingZoneImg(true);
@@ -764,65 +676,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       showToast(`فشل في رفع صورة المكان: ${err.message || err}`, "error");
     } finally {
       setIsUploadingZoneImg(false);
-    }
-  };
-
-  const handleRecoverZoneImages = async () => {
-    try {
-      setIsRecoveringImages(true);
-      showToast("جاري البحث في جميع سجلات المتصفح وقاعدة البيانات المحلية عن صور الأماكن...", "warning");
-      const log = await recoverZoneImagesFromCaches();
-      setImageRecoveryLog(log);
-      
-      const restoredCount = log.filter(item => item.status === 'restored').length;
-      if (restoredCount > 0) {
-        showToast(`اكتمل الاسترداد! تم استعادة وتصحيح عدد (${restoredCount}) صور للأماكن من سجلات المتصفح بنجاح! 🎉📸`, "success");
-      } else {
-        showToast("فحص المتصفح مكتمل: جميع الصور متطابقة بالفعل ولا توجد صور مفقودة في السجلات المحلية. ✨", "success");
-      }
-      loadAllData();
-    } catch (err: any) {
-      console.error("[Recover Zone Images Error]", err);
-      showToast("فشل أثناء البحث واستعادة صور الأماكن المفقودة", "error");
-    } finally {
-      setIsRecoveringImages(false);
-    }
-  };
-
-  const handleSyncZoneImagesToCloud = async () => {
-    try {
-      setIsSyncingImages(true);
-      showToast("جاري ترحيل ورفع صور الأماكن المحلية ومزامنتها سحابياً...", "warning");
-      const log = await syncLocalZoneImagesToCloud();
-      setImageSyncLog(log);
-      
-      const successCount = log.filter(item => item.status === 'success').length;
-      if (successCount > 0) {
-        showToast(`تمت المزامنة السحابية بنجاح! تم رفع ومزامنة عدد (${successCount}) صور مع السيرفر السحابي لحمايتها بشكل دائم! ☁️✨`, "success");
-      } else {
-        showToast("جميع صور الأماكن الحالية مرفوعة ومؤمنة سحابياً بالفعل! لا توجد صور محلية تحتاج لمزامنة. 🟢", "success");
-      }
-      loadAllData();
-    } catch (err: any) {
-      console.error("[Sync Zone Images Error]", err);
-      showToast("فشل أثناء مزامنة صور الأماكن مع السحابة", "error");
-    } finally {
-      setIsSyncingImages(false);
-    }
-  };
-
-  const handleReseedSop = async () => {
-    showToast("عذراً، تم تعطيل ميزة إعادة تهيئة ومزامنة الـ SOP لحماية السجلات التاريخية للعميل ومنع فقدان البيانات. 🔒⚠️", "error");
-    return;
-  };
-
-  const handleToggleBase64 = (enabled: boolean) => {
-    localStorage.setItem("use_base64_storage", enabled ? "true" : "false");
-    setUseBase64Storage(enabled);
-    if (enabled) {
-      showToast("نشط: تخزين الصور المباشر بقاعدة البيانات لتفادي مشاكل الـ CORS في المتصفح! 📸⚡", "success");
-    } else {
-      showToast("تم تفعيل نمط التخزين الافتراضي على خوادم Google Cloud Storage. ✅", "success");
     }
   };
 
@@ -1247,40 +1100,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
             {toast.type === "warning" && <AlertTriangle className="w-5 h-5 text-amber-600" />}
           </div>
           <span className="text-sm font-bold">{toast.message}</span>
-        </div>
-      )}
-
-      {/* Full screen Resetting / Syncing Loading Overlay */}
-      {isResettingDb && (
-        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md z-[9999] flex flex-col items-center justify-center text-white p-6 transition-all duration-500">
-          <div className="bg-slate-900 border border-slate-800 p-8 rounded-2xl shadow-2xl max-w-lg w-full text-center flex flex-col items-center gap-5">
-            {/* Elegant spinning rings loader */}
-            <div className="relative w-20 h-20 flex items-center justify-center">
-              <div className="absolute inset-0 rounded-full border-4 border-slate-800" />
-              <div className="absolute inset-0 rounded-full border-4 border-t-indigo-500 border-r-indigo-500 animate-spin" />
-              <div className="text-2xl">🔄</div>
-            </div>
-            
-            <div className="space-y-2">
-              <h3 className="text-lg font-black text-white tracking-wide">جاري فحص وإعادة تهيئة الداتابيز بالكامل...</h3>
-              <p className="text-xs text-indigo-400 font-bold">يرجى الانتظار وعدم إغلاق هذه الصفحة ⚠️</p>
-            </div>
-            
-            <p className="text-xs text-slate-400 leading-relaxed max-w-sm">
-              نقوم الآن بمسح الجداول بالكامل من السيرفر، وإعادة بناء الهياكل وتوليد بنود المهام والمقاييس المعيارية الرسمية (SOP) من البداية لضمان تطابقها بنسبة 100% مع لوائح التشغيل وتفادي أي تعارض في البيانات.
-            </p>
-            
-            <div className="w-full space-y-2.5 mt-2">
-              <div className="flex justify-between items-center text-[10px] text-slate-500 font-bold px-1">
-                <span>تحديث الفهارس</span>
-                <span className="text-indigo-400">جاري الإجراء...</span>
-                <span>توليد المهام</span>
-              </div>
-              <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden relative">
-                <div className="bg-indigo-500 h-full w-4/5 rounded-full animate-pulse transition-all duration-1000" style={{ width: '85%' }} />
-              </div>
-            </div>
-          </div>
         </div>
       )}
 
@@ -2700,11 +2519,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
-                      {/* Database Reset and Re-seed Tool */}
-                      <div className="bg-slate-100 text-slate-500 text-xs font-bold py-2 px-3 rounded-xl border border-slate-200 flex items-center gap-1.5" title="تم تعطيل هذه الميزة مؤقتاً لحماية السجلات التاريخية من الحذف">
-                        🔒 ميزة إعادة التهيئة معطلة لحماية البيانات
-                      </div>
-
                       <button
                         type="button"
                         onClick={() => {
@@ -2813,262 +2627,59 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                     </table>
                   </div>
 
-                  {/* مركز جودة وصحة البيانات (Database Validation & Diagnostics) */}
+                  {/* مركز جودة وصحة البيانات السحابية (Database Validation & Cloud Health) */}
                   <div className="mt-8 pt-6 border-t border-slate-200">
                     <div className="bg-slate-50 border border-slate-200 rounded-2xl p-6 text-right">
                       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-4">
                         <div>
                           <h4 className="text-sm font-bold text-slate-800 flex items-center gap-1.5 justify-end">
-                            ⚙️ مركز مراقبة جودة الداتابيز ومزامنة الصور (CORS Diagnostics)
+                            ⚙️ فحص صحة وتطابق البيانات السحابية (Firestore & Storage Health)
                           </h4>
-                          <p className="text-xs text-slate-400 mt-1">
-                            أداة تفتيش شاملة للتحقق من سلامة الجداول في Firestore ومطابقتها للمقاييس الفنية، مع معالجة ذكية لمشاكل رفع الصور (CORS).
+                          <p className="text-xs text-slate-500 mt-1">
+                            أداة تفتيش شاملة للتحقق من سلامة الجداول في Firestore ومطابقتها للمقاييس الفنية للتشغيل الدائم.
                           </p>
                         </div>
                         
-                        <div className="flex flex-wrap items-center gap-3">
+                        <div className="flex items-center gap-3">
                           <button
                             type="button"
                             disabled={isValidatingDb}
                             onClick={handleRunValidation}
-                            className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold py-2 px-4 rounded-xl shadow cursor-pointer transition flex items-center gap-1.5"
+                            className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white text-xs font-bold py-2.5 px-4 rounded-xl shadow cursor-pointer transition flex items-center gap-1.5"
                           >
                             {isValidatingDb ? (
                               <span className="flex items-center gap-1">
-                                <span className="animate-spin text-white">⏳</span> جاري التحقق...
+                                <Loader2 className="w-3.5 h-3.5 animate-spin text-white" /> جاري التحقق...
                               </span>
                             ) : (
-                              "🔍 تشغيل فحص الداتابيز الشامل"
+                              "🔍 تشغيل فحص الداتابيز السحابية"
                             )}
-                          </button>
-
-                          <button
-                            type="button"
-                            disabled
-                            className="bg-slate-200 text-slate-400 text-xs font-bold py-2 px-4 rounded-xl cursor-not-allowed flex items-center gap-1.5"
-                            title="تم تعطيل التهيئة لسلامة البيانات التاريخية"
-                          >
-                            🔒 إعادة مزامنة الـ SOP معطلة لحماية البيانات
                           </button>
                         </div>
                       </div>
 
-                      {/* CORS Self-Healing Settings */}
-                      <div className="bg-white border border-slate-100 p-4 rounded-xl mb-4 shadow-sm flex flex-col md:flex-row justify-between items-start md:items-center gap-4 text-right">
-                        <div className="flex items-start gap-3">
-                          <div className="bg-amber-50 p-2 rounded-lg text-amber-600 font-bold text-lg">
-                            📸
-                          </div>
-                          <div>
-                            <span className="text-xs font-bold text-slate-700 block">
-                              حل مشكلة تحميل الصور وتخطي قيود الـ CORS الفنية في المتصفح
-                            </span>
-                            <span className="text-[11px] text-slate-400 block mt-0.5 leading-relaxed">
-                              إذا كنت تواجه خطأ <code className="bg-slate-100 px-1 py-0.5 rounded text-rose-600 font-mono text-[10px]">CORS policy: blocked by preflight</code> أو فشل في رفع الصور، فقم بتنشيط هذا النمط. ستقوم المنصة تلقائياً بضغط الصور لتقليل حجمها (أقل من 30KB) وحفظها مباشرة داخل مستند Firestore بشكل آمن، مما يضمن ظهورها فوراً وتفادي مشاكل خوادم Google Cloud Storage تماماً!
-                            </span>
-                          </div>
+                      {/* Production Cloud Indicators */}
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4 text-xs font-bold">
+                        <div className="bg-white p-3 rounded-xl border border-slate-200 flex items-center justify-between">
+                          <span className="text-slate-500">سحابة Firestore:</span>
+                          <span className="text-emerald-600 flex items-center gap-1">
+                            <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                            نشطة ومتزامنة 🟢
+                          </span>
                         </div>
-
-                        <div className="flex items-center gap-2 self-end md:self-auto bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200">
-                          <span className="text-xs font-bold text-slate-600">تخزين آمن ومباشر (Base64 Mode)</span>
-                          <button
-                            type="button"
-                            onClick={() => handleToggleBase64(!useBase64Storage)}
-                            className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${useBase64Storage ? 'bg-indigo-600' : 'bg-slate-300'}`}
-                          >
-                            <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${useBase64Storage ? 'translate-x-5' : 'translate-x-0'}`} />
-                          </button>
+                        <div className="bg-white p-3 rounded-xl border border-slate-200 flex items-center justify-between">
+                          <span className="text-slate-500">حاوية Storage:</span>
+                          <span className="text-emerald-600 flex items-center gap-1">
+                            <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                            متصلة ومباشرة ☁️
+                          </span>
                         </div>
-                      </div>
-
-                      {/* مركز استرداد البيانات والدمج الذكي (Data Recovery & Local Sync Integration Center) */}
-                      <div className="bg-gradient-to-l from-indigo-50/50 to-white border border-indigo-100 p-5 rounded-xl mb-4 shadow-sm text-right">
-                        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-                          <div className="flex items-start gap-3">
-                            <div className="bg-indigo-100 p-2.5 rounded-lg text-indigo-700 font-bold text-lg">
-                              🛡️
-                            </div>
-                            <div>
-                              <span className="text-xs font-bold text-slate-800 block">
-                                نظام الاسترداد المتقدم وتدقيق المزامنة المحلية (Data Recovery Engine)
-                              </span>
-                              <span className="text-[11px] text-slate-500 block mt-1 leading-relaxed">
-                                يفحص هذا النظام سجلات وقاعدة بيانات المتصفح المحلية <code className="bg-slate-100 px-1 py-0.5 rounded text-indigo-700 font-mono text-[10px]">IndexedDB/localStorage</code> ويقارنها مع Firestore لاسترجاع أي مهام أو مناطق مفقودة أو متأثرة بضعف اتصال الشبكة، ثم يقوم بإعادة دمجها تلقائياً بدون تكرار!
-                              </span>
-                            </div>
-                          </div>
-
-                          <button
-                            type="button"
-                            disabled={isRecoveringData}
-                            onClick={handleRecoverAndReconcile}
-                            className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white text-xs font-bold py-2.5 px-4 rounded-xl shadow cursor-pointer transition flex items-center gap-2 self-end md:self-auto"
-                          >
-                            {isRecoveringData ? (
-                              <>
-                                <Loader2 className="w-4 h-4 animate-spin text-white" />
-                                جاري استيراد وتصحيح البيانات...
-                              </>
-                            ) : (
-                              "🔄 فحص واستعادة السجلات والمناطق المفقودة"
-                            )}
-                          </button>
+                        <div className="bg-white p-3 rounded-xl border border-slate-200 flex items-center justify-between">
+                          <span className="text-slate-500">نمط المعمارية:</span>
+                          <span className="text-indigo-600 font-extrabold">
+                            سحابي حصرياً (Online-Only)
+                          </span>
                         </div>
-
-                        {recoveryLog && (
-                          <div className="mt-4 border-t border-indigo-100 pt-4 space-y-2">
-                            <h5 className="text-xs font-bold text-indigo-800 mb-2">سجل عمليات المعالجة والاستعادة الأخير:</h5>
-                            {recoveryLog.length === 0 ? (
-                              <p className="text-[11px] text-slate-400 italic">كل البيانات والمناطق والمهام متزامنة بشكل مثالي مع السيرفر. لا توجد تغييرات مفقودة أو معلقة! ✨</p>
-                            ) : (
-                              <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1 text-[11px]">
-                                {recoveryLog.map((logItem, index) => (
-                                  <div
-                                    key={index}
-                                    className={`flex items-start justify-between p-2 rounded-lg border text-right gap-2 ${
-                                      logItem.action === 'restored_missing' 
-                                        ? 'bg-emerald-50/50 border-emerald-100 text-emerald-800'
-                                        : logItem.action === 'merged_updates'
-                                        ? 'bg-blue-50/50 border-blue-100 text-blue-800'
-                                        : 'bg-rose-50/50 border-rose-100 text-rose-800'
-                                    }`}
-                                  >
-                                    <div className="flex-1">
-                                      <div className="flex items-center gap-2 mb-0.5">
-                                        <span className="font-bold">
-                                          [{logItem.type === 'zone' ? 'منطقة تشغيلية' : 'مهمة / SOP'}]
-                                        </span>
-                                        <span className="font-semibold text-slate-800">{logItem.name}</span>
-                                      </div>
-                                      <p className="text-slate-600 text-[10.5px] leading-relaxed">{logItem.details}</p>
-                                    </div>
-                                    <span className="text-[9px] text-slate-400 font-mono shrink-0">
-                                      {new Date(logItem.timestamp).toLocaleTimeString("ar-EG")}
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-
-                      {/* مركز استرداد ومزامنة صور الأماكن (Zone Image Recovery & Cloud Sync Center) */}
-                      <div className="bg-gradient-to-l from-emerald-50/50 to-white border border-emerald-100 p-5 rounded-xl mb-4 shadow-sm text-right">
-                        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
-                          <div className="flex items-start gap-3">
-                            <div className="bg-emerald-100 p-2.5 rounded-lg text-emerald-700 font-bold text-lg">
-                              🖼️
-                            </div>
-                            <div>
-                              <span className="text-xs font-bold text-slate-800 block">
-                                مركز استرداد ومزامنة صور الأماكن (Zone Image Recovery & Cloud Sync)
-                              </span>
-                              <span className="text-[11px] text-slate-500 block mt-1 leading-relaxed">
-                                يفحص هذا القسم كافة مخازن المتصفح المحلية التاريخية والاحتياطية لاستعادة صور الأماكن التي قمت برفعها يدوياً سابقاً من اللابتوب الخاص بك، ويسمح لك بترحيلها ومزامنتها سحابياً لضمان بقائها متاحة حتى عند مسح كاش المتصفح أو تغيير الجهاز!
-                              </span>
-                            </div>
-                          </div>
-
-                          <div className="flex flex-wrap items-center gap-3 self-end lg:self-auto shrink-0">
-                            <button
-                              type="button"
-                              disabled={isRecoveringImages}
-                              onClick={handleRecoverZoneImages}
-                              className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-300 text-white text-xs font-bold py-2 px-3.5 rounded-xl shadow cursor-pointer transition flex items-center gap-1.5"
-                            >
-                              {isRecoveringImages ? (
-                                <>
-                                  <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
-                                  جاري فحص الذاكرة...
-                                </>
-                              ) : (
-                                "🔍 البحث واستعادة الصور من الكاش"
-                              )}
-                            </button>
-
-                            <button
-                              type="button"
-                              disabled={isSyncingImages}
-                              onClick={handleSyncZoneImagesToCloud}
-                              className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white text-xs font-bold py-2 px-3.5 rounded-xl shadow cursor-pointer transition flex items-center gap-1.5"
-                            >
-                              {isSyncingImages ? (
-                                <>
-                                  <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
-                                  جاري الرفع والدمج...
-                                </>
-                              ) : (
-                                "☁️ ترحيل ومزامنة الصور مع السحابة"
-                              )}
-                            </button>
-                          </div>
-                        </div>
-
-                        {/* Image Recovery Logs */}
-                        {imageRecoveryLog && (
-                          <div className="mt-4 border-t border-emerald-100 pt-4">
-                            <h5 className="text-xs font-bold text-emerald-800 mb-2">نتائج فحص واستعادة صور الأماكن من كاش المتصفح:</h5>
-                            {imageRecoveryLog.length === 0 ? (
-                              <p className="text-[11px] text-slate-500 bg-slate-50 p-3 rounded-lg border border-slate-100">
-                                🟢 لم يتم العثور على أي صور مفقودة جديدة في مخازن المتصفح الاحتياطية. جميع الأماكن متزامنة ولديها صور مفعّلة بالفعل، أو لم يتم حفظ نسخ محلية احتياطية بعد.
-                              </p>
-                            ) : (
-                              <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-48 overflow-y-auto pr-1">
-                                {imageRecoveryLog.map((logItem, idx) => (
-                                  <div key={idx} className="flex items-center gap-2 p-2 bg-emerald-50/50 border border-emerald-100 rounded-lg text-right">
-                                    {logItem.imageUrl && (
-                                      <img 
-                                        src={logItem.imageUrl} 
-                                        alt={logItem.zoneName} 
-                                        className="w-10 h-10 rounded object-cover border border-emerald-200 shrink-0"
-                                        referrerPolicy="no-referrer"
-                                      />
-                                    )}
-                                    <div className="flex-1 min-w-0">
-                                      <p className="text-xs font-bold text-emerald-900 truncate">{logItem.zoneName}</p>
-                                      <p className="text-[9px] text-slate-500 truncate">المصدر: مفتاح <code className="bg-emerald-100 text-emerald-800 px-1 py-0.2 rounded font-mono">{logItem.sourceKey}</code></p>
-                                      <span className="inline-block mt-0.5 px-1.5 py-0.2 text-[9px] font-bold bg-emerald-100 text-emerald-800 rounded">تمت استعادة الصورة وحفظها محلياً وبالمزامنة السحابية! ✅</span>
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        )}
-
-                        {/* Image Sync Logs */}
-                        {imageSyncLog && (
-                          <div className="mt-4 border-t border-indigo-100 pt-4">
-                            <h5 className="text-xs font-bold text-indigo-800 mb-2">نتائج مزامنة الصور المحلية سحابياً (Cloud Sync Log):</h5>
-                            {imageSyncLog.length === 0 ? (
-                              <p className="text-[11px] text-slate-500 bg-slate-50 p-3 rounded-lg border border-slate-100">
-                                🟢 لا توجد أي صور محلية غير متزامنة (بصيغة base64) في النظام حالياً. جميع صور الأماكن مرفوعة ومؤمنة على سيرفرات جوجل السحابية!
-                              </p>
-                            ) : (
-                              <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
-                                {imageSyncLog.map((syncItem, idx) => (
-                                  <div 
-                                    key={idx} 
-                                    className={`flex items-start justify-between p-2 rounded-lg border text-right gap-2 text-xs ${
-                                      syncItem.status === 'success' 
-                                        ? 'bg-emerald-50/50 border-emerald-100 text-emerald-800' 
-                                        : 'bg-rose-50/50 border-rose-100 text-rose-800'
-                                    }`}
-                                  >
-                                    <div>
-                                      <span className="font-bold">[{syncItem.zoneName}]</span>
-                                      <p className="text-[10px] mt-0.5">{syncItem.details}</p>
-                                    </div>
-                                    <span className="text-[9px] font-bold px-1.5 py-0.2 bg-white/60 border border-current rounded">
-                                      {syncItem.status === 'success' ? 'نجحت المزامنة ☁️' : 'فشلت المزامنة ⚠️'}
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        )}
                       </div>
 
                       {/* Validation results section */}
@@ -3094,7 +2705,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                                 </span>
                               ) : (
                                 <span className="bg-rose-100 text-rose-800 text-[10px] font-bold py-1 px-2.5 rounded-full border border-rose-200">
-                                  ⚠️ بحاجة للمزامنة
+                                  ⚠️ تنبيهات بالهياكل
                                 </span>
                               )}
                             </div>
@@ -3149,12 +2760,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                               );
                             })}
                           </div>
-
-                          {!validationReport.isPassed && (
-                            <div className="bg-rose-50 border border-rose-100 p-3 rounded-lg text-rose-700 text-xs leading-relaxed font-bold text-right">
-                              💡 ينصح بالضغط على زر <strong>🔄 فحص وإعادة تهيئة قاعدة البيانات</strong> في شريط الأدوات العلوي. سيقوم السيرفر بمسح الهياكل القديمة، وبناء جداول جديدة خالية من العيوب تماماً، وتوليد مهام تشغيلية مرجعية تلتزم بنظام الـ SOP وجاهزة لاستقبال الصور قبل وبعد العمل!
-                            </div>
-                          )}
                         </div>
                       )}
                     </div>

@@ -19,11 +19,10 @@ import {
   X
 } from "lucide-react";
 import { Profile, TaskInstance, Zone, TaskTemplate } from "../types";
-import { getTasks, listenTodayTasks, updateTask, getLocalDateString, deletePhoto } from "../lib/api";
+import { getTasks, listenTodayTasks, updateTask, getLocalDateString, deletePhoto, uploadSignature } from "../lib/api";
 import { isOnline } from "../lib/offlineManager";
 import PhotoCapture from "./PhotoCapture";
 import ProfessorLogo from "./ProfessorLogo";
-import PhotoSyncIntegrityCenter from "./PhotoSyncIntegrityCenter";
 
 const TaskTimer = ({ task }: { task: TaskInstance & { zone?: Zone; template?: TaskTemplate } }) => {
   const [elapsed, setElapsed] = useState<number>(0);
@@ -78,20 +77,14 @@ const TaskTimer = ({ task }: { task: TaskInstance & { zone?: Zone; template?: Ta
 };
 
 export const checkPhotoStatus = (url: string | null | undefined): {
-  status: 'synced' | 'local_base64' | 'not_uploaded';
+  status: 'synced' | 'not_uploaded';
   label: string;
   color: string;
 } => {
   if (!url) {
     return { status: 'not_uploaded', label: 'غير مرفوع', color: 'text-slate-400 bg-slate-100 border-slate-200' };
   }
-  if (url.startsWith('data:image/')) {
-    return { status: 'local_base64', label: 'محفوظ محلياً (Base64) 📱', color: 'text-amber-700 bg-amber-50 border-amber-200' };
-  }
-  if (url.startsWith('http://') || url.startsWith('https://')) {
-    return { status: 'synced', label: 'مرفوع ومزامن سحابياً ☁️', color: 'text-emerald-700 bg-emerald-50 border-emerald-200' };
-  }
-  return { status: 'not_uploaded', label: 'غير معروف', color: 'text-slate-400 bg-slate-100 border-slate-200' };
+  return { status: 'synced', label: 'مرفوع سحابياً ☁️', color: 'text-emerald-700 bg-emerald-50 border-emerald-200' };
 };
 
 interface TodayTasksPageProps {
@@ -284,30 +277,69 @@ export default function TodayTasksPage({
       setExecutingStep('after_photo');
     } else {
       // Skip photo after and go to signature or submit directly
-      goToSignatureOrSubmit(undefined);
+      goToSignatureOrSubmit();
     }
   };
 
   const handlePhotoAfterSubmitted = (meta: { url: string; size: number; mimeType: string; takenAt: string }) => {
+    if (!meta.url || !meta.url.startsWith("http")) {
+      showToast("رابط صورة بعد العمل غير صالح.", "error");
+      return;
+    }
     setPhotoAfter(meta.url);
     setPhotoAfterMeta(meta);
-    goToSignatureOrSubmit(meta.url);
+    goToSignatureOrSubmit();
   };
 
-  const goToSignatureOrSubmit = (afterUrl?: string) => {
+  const goToSignatureOrSubmit = () => {
     if (!selectedTask) return;
     setExecutingStep('signature_and_notes');
   };
 
-  const submitTaskCompleted = async (signatureUrl?: string, afterUrl?: string) => {
+  const submitTaskCompleted = async () => {
     if (!selectedTask) return;
+    if (!isOnline()) {
+      showToast("لا يمكن تسليم المهمة بدون اتصال نشط بالإنترنت", "error");
+      return;
+    }
+
+    const requiresPhotoAfter = selectedTask.requires_photo_after !== undefined
+      ? selectedTask.requires_photo_after
+      : true;
+
+    if (requiresPhotoAfter && (!photoAfter || !photoAfter.startsWith("http"))) {
+      showToast("صورة ما بعد التنظيف مطلوبة لإتمام هذه المهمة. يرجى التقاطها وتأكيد رفعها أولاً.", "warning");
+      setExecutingStep('after_photo');
+      return;
+    }
+
+    if (selectedTask.requires_signature && !hasSigned) {
+      showToast("التوقيع إلزامي لإتمام هذه المهمة. يرجى التوقيع أولاً بالرسم في المربع.", "warning");
+      return;
+    }
+
     setIsSubmitting(true);
+    let signatureUrl: string | undefined = undefined;
+
+    // If employee signed on canvas, upload signature to Storage
+    if (hasSigned && canvasRef.current) {
+      try {
+        const signatureDataUrl = canvasRef.current.toDataURL("image/png");
+        const signaturePath = `task-photos/${selectedTask.zone_id}/${selectedTask.id}/signature.png`;
+        signatureUrl = await uploadSignature(signatureDataUrl, signaturePath);
+      } catch (uploadErr) {
+        console.error("[TodayTasksPage] Failed uploading signature:", uploadErr);
+        showToast("فشل رفع التوقيع السحابي. يرجى المحاولة مرة أخرى.", "error");
+        setIsSubmitting(false);
+        return;
+      }
+    }
     
     try {
       const updates: Partial<TaskInstance> = {
         status: 'completed',
-        employee_notes: notes,
-        photo_after_url: afterUrl || photoAfter || undefined,
+        employee_notes: notes ? notes.trim() : undefined,
+        photo_after_url: photoAfter || undefined,
         employee_signature_url: signatureUrl || undefined
       };
 
@@ -342,13 +374,13 @@ export default function TodayTasksPage({
       showToast("فشل تسليم المهمة. يرجى المحاولة لاحقاً.", "error");
       
       // Rollback the uploaded photo after from Storage
-      if (afterUrl || photoAfter) {
+      if (photoAfter) {
         const path = `task-photos/${selectedTask.zone_id}/${selectedTask.id}/after.jpg`;
         await deletePhoto(path);
       }
       // Rollback the signature from Storage
       if (signatureUrl) {
-        const path = `task-photos/${selectedTask.zone_id}/${selectedTask.id}/signature.jpg`;
+        const path = `task-photos/${selectedTask.zone_id}/${selectedTask.id}/signature.png`;
         await deletePhoto(path);
       }
     } finally {
@@ -428,9 +460,7 @@ export default function TodayTasksPage({
       return;
     }
 
-    // Export canvas as data URI
-    const signatureDataUrl = canvas.toDataURL("image/png");
-    submitTaskCompleted(signatureDataUrl);
+    submitTaskCompleted();
   };
 
   return (
@@ -537,23 +567,22 @@ export default function TodayTasksPage({
             </div>
           </div>
 
-          {/* Offline / Online Status Bar */}
+          {/* Cloud Online Status Bar */}
           <div className="mt-4 flex items-center justify-between bg-slate-800 border border-slate-700/50 py-2 px-3 rounded-xl text-xs">
             <div className="flex items-center gap-2">
               {isOnlineState ? (
                 <>
                   <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
-                  <span className="font-semibold text-slate-200">متصل بالإنترنت</span>
+                  <span className="font-semibold text-slate-200">متصل بالسحابة (مباشر)</span>
                 </>
               ) : (
                 <>
-                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse" />
-                  <span className="font-semibold text-amber-300">وضع العمل دون اتصال 🌐</span>
+                  <span className="w-2.5 h-2.5 rounded-full bg-rose-500 animate-pulse" />
+                  <span className="font-semibold text-rose-300">لا يوجد اتصال بالإنترنت ⚠️</span>
                 </>
               )}
             </div>
-            
-            
+            <span className="text-[10px] text-slate-400 font-mono">Firebase Online Mode</span>
           </div>
         </div>
       </div>
@@ -567,8 +596,6 @@ export default function TodayTasksPage({
             {getLocalDateString()}
           </span>
         </div>
-
-        <PhotoSyncIntegrityCenter tasks={tasks} />
 
         {/* Categories / Filter Tabs */}
         <div className="flex gap-1.5 overflow-x-auto pb-3 scrollbar-none px-1">
@@ -659,11 +686,7 @@ export default function TodayTasksPage({
                       <span className="text-[9px] font-semibold text-slate-400 bg-slate-100 py-0.5 px-1.5 rounded flex items-center gap-1">
                         <Camera className="w-3 h-3 text-slate-500" /> صورة قبل
                         {task.photo_before_url ? (
-                          task.photo_before_url.startsWith("data:") ? (
-                            <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse border border-amber-300" title="محفوظة محلياً مؤقتاً" />
-                          ) : (
-                            <span className="w-2 h-2 rounded-full bg-emerald-500 border border-emerald-300" title="مرفوعة ومضمونة سحابياً" />
-                          )
+                          <span className="w-2 h-2 rounded-full bg-emerald-500 border border-emerald-300" title="مرفوعة ومضمونة سحابياً ☁️" />
                         ) : null}
                       </span>
                     )}
@@ -671,11 +694,7 @@ export default function TodayTasksPage({
                       <span className="text-[9px] font-semibold text-slate-400 bg-slate-100 py-0.5 px-1.5 rounded flex items-center gap-1">
                         <Camera className="w-3 h-3 text-slate-500" /> صورة بعد
                         {task.photo_after_url ? (
-                          task.photo_after_url.startsWith("data:") ? (
-                            <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse border border-amber-300" title="محفوظة محلياً مؤقتاً" />
-                          ) : (
-                            <span className="w-2 h-2 rounded-full bg-emerald-500 border border-emerald-300" title="مرفوعة ومضمونة سحابياً" />
-                          )
+                          <span className="w-2 h-2 rounded-full bg-emerald-500 border border-emerald-300" title="مرفوعة ومضمونة سحابياً ☁️" />
                         ) : null}
                       </span>
                     )}
@@ -1031,21 +1050,63 @@ export default function TodayTasksPage({
                 </div>
               )}
 
-              {/* STEP 4: Optional Notes */}
+              {/* STEP 4: Signature & Notes */}
               {executingStep === 'signature_and_notes' && (
                 <div className="flex flex-col gap-4">
                   <div>
-                    <h3 className="text-sm font-bold text-slate-800">الخطوة الأخيرة: الملاحظات (اختياري)</h3>
-                    <p className="text-xs text-slate-400 mt-0.5">هل تود إضافة أي ملاحظات للمشرف قبل تسليم المهمة؟</p>
+                    <h3 className="text-sm font-bold text-slate-800">الخطوة الأخيرة: التوقيع والملاحظات</h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      {selectedTask.requires_signature ? "التوقيع إلزامي قبل تسليم المهمة للمشرف" : "يمكنك التوقيع وإضافة أي ملاحظات قبل تسليم المهمة"}
+                    </p>
+                  </div>
+
+                  {/* Signature Canvas Pad */}
+                  <div className="flex flex-col gap-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                        <PenTool className="w-3.5 h-3.5 text-blue-600" />
+                        {selectedTask.requires_signature ? "التوقيع الحي بإصبعك (إلزامي)" : "التوقيع الحي بإصبعك (اختياري)"}
+                      </span>
+                      {hasSigned && (
+                        <button
+                          type="button"
+                          onClick={clearCanvas}
+                          className="text-[11px] text-rose-600 font-bold hover:underline cursor-pointer"
+                        >
+                          مسح التوقيع
+                        </button>
+                      )}
+                    </div>
+                    <div className="relative border-2 border-dashed border-slate-300 rounded-xl bg-white overflow-hidden touch-none h-32 flex items-center justify-center">
+                      <canvas
+                        ref={canvasRef}
+                        width={400}
+                        height={128}
+                        onMouseDown={startDrawing}
+                        onMouseMove={draw}
+                        onMouseUp={stopDrawing}
+                        onMouseLeave={stopDrawing}
+                        onTouchStart={startDrawing}
+                        onTouchMove={draw}
+                        onTouchEnd={stopDrawing}
+                        className="w-full h-full cursor-crosshair"
+                      />
+                      {!hasSigned && (
+                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none text-slate-300 text-xs font-bold select-none">
+                          ✍️ ارسم توقيعك هنا بإصبعك أو الماوس
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   {/* Notes */}
                   <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-bold text-slate-700">ملاحظات إضافية (اختياري)</label>
                     <textarea
                       value={notes}
                       onChange={(e) => setNotes(e.target.value)}
-                      placeholder="مثال: تم مسح الموقع بالكامل وملء مناديل الديتول..."
-                      rows={4}
+                      placeholder="مثال: تم مسح الموقع بالكامل وتطهير الأسطح..."
+                      rows={3}
                       className="w-full text-xs p-3 border border-slate-200 rounded-xl focus:border-slate-400 focus:ring-0 resize-none outline-none"
                     ></textarea>
                   </div>
@@ -1053,7 +1114,7 @@ export default function TodayTasksPage({
                   <button
                     type="button"
                     onClick={() => submitTaskCompleted()}
-                    disabled={isSubmitting || !isOnlineState}
+                    disabled={isSubmitting || !isOnlineState || (Boolean(selectedTask.requires_signature) && !hasSigned)}
                     className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:bg-slate-300 text-white font-bold py-3.5 rounded-xl transition shadow flex items-center justify-center gap-2 cursor-pointer mt-2 disabled:cursor-not-allowed"
                   >
                     {isSubmitting ? (

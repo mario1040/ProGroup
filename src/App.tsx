@@ -11,10 +11,8 @@ import {
 } from "lucide-react";
 import {
   getCurrentUserProfile,
-  isUsingLocalFallback,
   loginUser,
   logoutUser,
-  setLocalFallback,
 } from "./lib/api";
 import type { Profile } from "./types";
 import TodayTasksPage from "./components/TodayTasksPage";
@@ -77,20 +75,20 @@ export default function App() {
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   const [cleanerView, setCleanerView] = useState<"tasks" | "kpis" | "switch_guide">("tasks");
-  const [offlineMode, setOfflineMode] = useState(isUsingLocalFallback());
+  const [isOnline, setIsOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine : true);
 
   useEffect(() => {
-    const handleFallbackChange = () => {
-      setOfflineMode(isUsingLocalFallback());
-    };
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
     const handleProjectChangedSignOut = () => {
       setUser(null);
-      setOfflineMode(false);
     };
-    window.addEventListener("local_fallback_changed", handleFallbackChange);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
     window.addEventListener("project_changed_sign_out", handleProjectChangedSignOut);
     return () => {
-      window.removeEventListener("local_fallback_changed", handleFallbackChange);
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
       window.removeEventListener("project_changed_sign_out", handleProjectChangedSignOut);
     };
   }, []);
@@ -205,22 +203,19 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans antialiased rtl-grid text-right flex flex-col">
-      {offlineMode && (
-        <div className="bg-amber-500 text-slate-900 px-4 py-2.5 text-xs md:text-sm font-bold flex items-center justify-between shadow-md border-b border-amber-600 gap-4 z-50">
+      {!isOnline && (
+        <div className="bg-rose-600 text-white px-4 py-2.5 text-xs md:text-sm font-bold flex items-center justify-between shadow-md border-b border-rose-700 gap-4 z-50">
           <div className="flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-slate-950 shrink-0 animate-pulse" />
+            <AlertTriangle className="w-4 h-4 text-white shrink-0 animate-pulse" />
             <span>
-              <strong>تنبيه الاستخدام:</strong> تم تجاوز حصة الاستخدام المجانية لـ Cloud Firestore. يعمل تطبيق <strong>Naris Ops</strong> الآن بالكامل في <strong>الوضع المحلي الآمن (Offline Fallback Mode)</strong>. جميع بياناتك ومهماتك وصورك يتم حفظها محلياً على جهازك ولن تفقد أي تقدم.
+              <strong>انقطاع الاتصال بالإنترنت:</strong> النظام يعمل بنمط السحابة المباشر (Online-Only). يرجى التحقق من اتصال شبكة الإنترنت لضمان إرسال وتحديث المهام والصور.
             </span>
           </div>
           <button
-            onClick={() => {
-              setLocalFallback(false);
-              window.location.reload();
-            }}
+            onClick={() => window.location.reload()}
             className="bg-slate-900 hover:bg-slate-800 text-white px-2.5 py-1 rounded-lg text-[10px] md:text-xs transition font-bold shrink-0 cursor-pointer"
           >
-            تحديث ومحاولة الاتصال بالخادم
+            إعادة المحاولة
           </button>
         </div>
       )}
