@@ -961,7 +961,7 @@ function buildTaskInstanceSnapshot(
     requires_photo_after: sop.requires_photo_after ?? true,
     requires_supervisor_approval: sop.requires_supervisor_approval ?? true,
     requires_gps: sop.requires_gps ?? false,
-    requires_signature: sop.requires_signature || false,
+    requires_signature: false,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString()
   };
@@ -1332,15 +1332,14 @@ export async function saveZone(zone: Partial<Zone>): Promise<Zone> {
   }
   if (finalZone.cover_image_url && finalZone.cover_image_url.startsWith("data:")) {
     try {
-      console.log(`[saveZone] Auto-uploading local base64 image to Firebase Storage for zone ${finalZone.id}...`);
-      const storagePath = `zones/${finalZone.id}/cover_${Date.now()}.jpg`;
-      const uploadedUrl = await uploadPhoto(finalZone.cover_image_url, storagePath);
+      console.log(`[saveZone] Auto-uploading cover image to Cloudinary for zone ${finalZone.id}...`);
+      const uploadedUrl = await uploadPhoto(finalZone.cover_image_url, `zones/${finalZone.id}/cover.jpg`);
       finalZone.cover_image_url = uploadedUrl;
       if (typeof localStorage !== "undefined") {
         localStorage.setItem(`naris_zone_image_${finalZone.id}`, uploadedUrl);
       }
     } catch (err) {
-      console.warn(`[saveZone] Failed to auto-upload cover image to Firebase Storage:`, err);
+      console.warn(`[saveZone] Failed to auto-upload cover image to Cloudinary:`, err);
     }
   }
   await setDoc(doc(db, "zones", finalZone.id), finalZone);
@@ -1468,9 +1467,8 @@ export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
   
   if (finalItem.guide_image_url && finalItem.guide_image_url.startsWith("data:")) {
     try {
-      console.log(`[saveSopItem] Auto-uploading guide image to Firebase Storage for SOP item ${finalItem.id}...`);
-      const storagePath = `sop_items/guide_${finalItem.id}_${Date.now()}.jpg`;
-      const uploadedUrl = await uploadPhoto(finalItem.guide_image_url, storagePath);
+      console.log(`[saveSopItem] Auto-uploading guide image to Cloudinary for SOP item ${finalItem.id}...`);
+      const uploadedUrl = await uploadPhoto(finalItem.guide_image_url, `sop_items/${finalItem.id}/guide.jpg`);
       finalItem.guide_image_url = uploadedUrl;
     } catch (err) {
       console.warn(`[saveSopItem] Failed to auto-upload guide image:`, err);
@@ -1479,9 +1477,8 @@ export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
 
   if (finalItem.reference_image_url && finalItem.reference_image_url.startsWith("data:")) {
     try {
-      console.log(`[saveSopItem] Auto-uploading reference image to Firebase Storage for SOP item ${finalItem.id}...`);
-      const storagePath = `sop_items/ref_${finalItem.id}_${Date.now()}.jpg`;
-      const uploadedUrl = await uploadPhoto(finalItem.reference_image_url, storagePath);
+      console.log(`[saveSopItem] Auto-uploading reference image to Cloudinary for SOP item ${finalItem.id}...`);
+      const uploadedUrl = await uploadPhoto(finalItem.reference_image_url, `sop_items/${finalItem.id}/ref.jpg`);
       finalItem.reference_image_url = uploadedUrl;
     } catch (err) {
       console.warn(`[saveSopItem] Failed to auto-upload reference image:`, err);
@@ -1546,7 +1543,7 @@ export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
             requires_photo_after: finalItem.requires_photo_after ?? true,
             requires_supervisor_approval: finalItem.requires_supervisor_approval ?? true,
             requires_gps: finalItem.requires_gps ?? false,
-            requires_signature: finalItem.requires_signature ?? false,
+            requires_signature: false,
             assigned_to: finalItem.default_assignee_id || ti.assigned_to,
             due_time: ti.due_time || "09:00",
             updated_at: new Date().toISOString()
@@ -1865,13 +1862,7 @@ function validateTaskInstanceUpdate(merged: TaskInstance, updates: Partial<TaskI
     throw new Error("خطأ حماية: لا يمكن رفع صورة الإثبات بعد العمل قبل رفع صورة الإثبات قبل العمل.");
   }
 
-  // 3. Enforce "signature" requirement
-  const requiresSignature = merged.requires_signature === true;
-  if (requiresSignature && (updates.status === "completed" || merged.status === "completed")) {
-    if (!merged.employee_signature_url) {
-      throw new Error("خطأ حماية: لا يمكن إكمال هذه المهمة بدون التوقيع الإلكتروني المطلوب.");
-    }
-  }
+  // Signature requirement disabled globally
 }
 
 export async function updateTask(id: string, updates: Partial<TaskInstance>): Promise<TaskInstance> {
@@ -2279,131 +2270,28 @@ export function compressImage(base64Str: string, maxWidth = 1600, maxHeight = 16
 }
 
 
-export function base64ToBlob(base64: string, defaultMime = "image/jpeg"): Blob {
-  try {
-    const arr = base64.split(",");
-    const mimeMatch = arr[0].match(/:(.*?);/);
-    const mime = mimeMatch ? mimeMatch[1] : defaultMime;
-    const bstr = atob(arr[1]);
-    let n = bstr.length;
-    const u8arr = new Uint8Array(n);
-    while (n--) {
-      u8arr[n] = bstr.charCodeAt(n);
-    }
-    return new Blob([u8arr], { type: mime });
-  } catch (err) {
-    console.error("[Storage] Failed to convert Base64 to Blob:", err);
-    throw new Error("فشل تحويل الصورة إلى صيغة ملف قابلة للرفع.");
-  }
-}
 
-function waitForUploadTask(task: UploadTask): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const unsubscribe = task.on(
-      "state_changed",
-      () => {
-        // Handled by progress listeners in UI components
-      },
-      (error) => {
-        unsubscribe();
-        reject(error);
-      },
-      async () => {
-        try {
-          const downloadUrl = await getDownloadURL(task.snapshot.ref);
-          unsubscribe();
-          resolve(downloadUrl);
-        } catch (err) {
-          unsubscribe();
-          reject(err);
-        }
-      }
-    );
-  });
-}
 
 /**
  * Validates the canonical storage path format and ensures no undefined/null segments exist.
  */
-export function validateStoragePath(path: string): void {
-  if (!path || typeof path !== "string") {
-    throw new Error("مسار التخزين غير صالح أو مفقود.");
-  }
-  const segments = path.split("/");
-  if (segments.some((seg) => !seg || seg === "undefined" || seg === "null")) {
-    throw new Error(`مسار التخزين غير مكتمل أو يحتوي على قيم غير معرفة: ${path}`);
-  }
-}
 
-// NEW: Cloudinary upload
-const CLOUDINARY_CLOUD_NAME = "kcs6fxei";  // من Cloudinary Dashboard
-const CLOUDINARY_UPLOAD_PRESET = "naris_ops_unsigned";  // unsigned upload preset
-
-export async function uploadPhotoTaskCloudinary(
-  blobOrBase64: Blob | string, 
-  folder: string = "task_photos"
-): Promise<{ url: string; secure_url: string }> {
-  let file: File | Blob;
-  
-  if (typeof blobOrBase64 === "string") {
-    file = base64ToBlob(blobOrBase64, "image/jpeg");
-  } else {
-    file = blobOrBase64;
-  }
-
-  const formData = new FormData();
-  formData.append("file", file);
-  formData.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
-  formData.append("folder", folder);
-  formData.append("tags", "naris-ops,production");
-
-  const response = await fetch(
-    `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`,
-    {
-      method: "POST",
-      body: formData,
-    }
-  );
-
-  if (!response.ok) {
-    const errorData = await response.json();
-    throw new Error(`Cloudinary upload failed: ${errorData.error?.message || response.statusText}`);
-  }
-
-  const data = await response.json();
-  return { url: data.url, secure_url: data.secure_url };
-}
 
 export async function uploadPhoto(blobOrBase64: Blob | string, path: string): Promise<string> {
-  const { task } = await uploadPhotoTask(blobOrBase64, path);
-  return waitForUploadTask(task);
+  const folder = path.split("/").slice(0, -1).join("/") || "naris_ops";
+  const result = await uploadToCloudinary(blobOrBase64, folder);
+  return result.secure_url;
 }
 
 export async function uploadSignature(signatureBase64: string, path: string): Promise<string> {
-  validateStoragePath(path);
-  const blob = base64ToBlob(signatureBase64, "image/png");
-  const sRef = storageRef(storage, path);
-  const metadata = {
-    contentType: "image/png",
-    customMetadata: {
-      uploadedAt: new Date().toISOString(),
-      type: "employee_signature",
-      app: "naris-ops"
-    }
-  };
-  const task = uploadBytesResumable(sRef, blob, metadata);
-  return waitForUploadTask(task);
+  const folder = path.split("/").slice(0, -1).join("/") || "signatures";
+  const result = await uploadToCloudinary(signatureBase64, folder);
+  return result.secure_url;
 }
 
 export async function deletePhoto(path: string): Promise<void> {
-  try {
-    if (!path || path.startsWith("data:") || path.startsWith("http")) return;
-    validateStoragePath(path);
-    const sRef = storageRef(storage, path);
-    await deleteObject(sRef);
-    console.log(`[Storage] Rollback successful: deleted ${path}`);
-  } catch (err) {
-    console.warn(`[Storage] Rollback warning: couldn't delete ${path}`, err);
+  if (path && !path.startsWith("data:")) {
+    console.warn(`[Cloudinary] Client-side deletion not supported. Path to clean manually: ${path}`);
   }
 }
 

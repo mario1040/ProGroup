@@ -3,7 +3,6 @@ import {
   CheckCircle2, 
   Clock, 
   Camera, 
-  PenTool, 
   MapPin, 
   Play, 
   Check, 
@@ -313,34 +312,19 @@ export default function TodayTasksPage({
       return;
     }
 
-    if (selectedTask.requires_signature && !hasSigned) {
-      showToast("التوقيع إلزامي لإتمام هذه المهمة. يرجى التوقيع أولاً بالرسم في المربع.", "warning");
-      return;
-    }
+    // Signature requirement disabled globally
 
     setIsSubmitting(true);
     let signatureUrl: string | undefined = undefined;
 
-    // If employee signed on canvas, upload signature to Storage
-    if (hasSigned && canvasRef.current) {
-      try {
-        const signatureDataUrl = canvasRef.current.toDataURL("image/png");
-        const signaturePath = `task-photos/${selectedTask.zone_id}/${selectedTask.id}/signature.png`;
-        signatureUrl = await uploadSignature(signatureDataUrl, signaturePath);
-      } catch (uploadErr) {
-        console.error("[TodayTasksPage] Failed uploading signature:", uploadErr);
-        showToast("فشل رفع التوقيع السحابي. يرجى المحاولة مرة أخرى.", "error");
-        setIsSubmitting(false);
-        return;
-      }
-    }
+    // Signature upload disabled globally
     
     try {
       const updates: Partial<TaskInstance> = {
         status: 'completed',
         employee_notes: notes ? notes.trim() : undefined,
         photo_after_url: photoAfter || undefined,
-        employee_signature_url: signatureUrl || undefined
+        employee_signature_url: undefined
       };
 
       if (photoAfterMeta) {
@@ -378,11 +362,7 @@ export default function TodayTasksPage({
         const path = `task-photos/${selectedTask.zone_id}/${selectedTask.id}/after.jpg`;
         await deletePhoto(path);
       }
-      // Rollback the signature from Storage
-      if (signatureUrl) {
-        const path = `task-photos/${selectedTask.zone_id}/${selectedTask.id}/signature.png`;
-        await deletePhoto(path);
-      }
+      // Signature rollback disabled globally
     } finally {
       setIsSubmitting(false);
     }
@@ -1050,53 +1030,14 @@ export default function TodayTasksPage({
                 </div>
               )}
 
-              {/* STEP 4: Signature & Notes */}
+              {/* STEP 4: Notes & Submit */}
               {executingStep === 'signature_and_notes' && (
                 <div className="flex flex-col gap-4">
                   <div>
-                    <h3 className="text-sm font-bold text-slate-800">الخطوة الأخيرة: التوقيع والملاحظات</h3>
+                    <h3 className="text-sm font-bold text-slate-800">الخطوة الأخيرة: الملاحظات والتسليم</h3>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      {selectedTask.requires_signature ? "التوقيع إلزامي قبل تسليم المهمة للمشرف" : "يمكنك التوقيع وإضافة أي ملاحظات قبل تسليم المهمة"}
+                      أضف أي ملاحظات قبل تسليم المهمة للمشرف
                     </p>
-                  </div>
-
-                  {/* Signature Canvas Pad */}
-                  <div className="flex flex-col gap-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
-                        <PenTool className="w-3.5 h-3.5 text-blue-600" />
-                        {selectedTask.requires_signature ? "التوقيع الحي بإصبعك (إلزامي)" : "التوقيع الحي بإصبعك (اختياري)"}
-                      </span>
-                      {hasSigned && (
-                        <button
-                          type="button"
-                          onClick={clearCanvas}
-                          className="text-[11px] text-rose-600 font-bold hover:underline cursor-pointer"
-                        >
-                          مسح التوقيع
-                        </button>
-                      )}
-                    </div>
-                    <div className="relative border-2 border-dashed border-slate-300 rounded-xl bg-white overflow-hidden touch-none h-32 flex items-center justify-center">
-                      <canvas
-                        ref={canvasRef}
-                        width={400}
-                        height={128}
-                        onMouseDown={startDrawing}
-                        onMouseMove={draw}
-                        onMouseUp={stopDrawing}
-                        onMouseLeave={stopDrawing}
-                        onTouchStart={startDrawing}
-                        onTouchMove={draw}
-                        onTouchEnd={stopDrawing}
-                        className="w-full h-full cursor-crosshair"
-                      />
-                      {!hasSigned && (
-                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none text-slate-300 text-xs font-bold select-none">
-                          ✍️ ارسم توقيعك هنا بإصبعك أو الماوس
-                        </div>
-                      )}
-                    </div>
                   </div>
 
                   {/* Notes */}
@@ -1114,7 +1055,7 @@ export default function TodayTasksPage({
                   <button
                     type="button"
                     onClick={() => submitTaskCompleted()}
-                    disabled={isSubmitting || !isOnlineState || (Boolean(selectedTask.requires_signature) && !hasSigned)}
+                    disabled={isSubmitting || !isOnlineState}
                     className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:bg-slate-300 text-white font-bold py-3.5 rounded-xl transition shadow flex items-center justify-center gap-2 cursor-pointer mt-2 disabled:cursor-not-allowed"
                   >
                     {isSubmitting ? (
