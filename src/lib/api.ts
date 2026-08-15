@@ -18,7 +18,7 @@ import {
   query as firebaseQuery, 
   where as firebaseWhere,
   onSnapshot as firebaseOnSnapshot
-} from "firebase/firestore";
+} from "firebase/firestore"; 
 import { 
   ref as storageRef, 
   uploadString, 
@@ -27,6 +27,7 @@ import {
   UploadTask,
   deleteObject
 } from "firebase/storage";
+import { uploadToCloudinary } from "./cloudinary";
 import { 
   signInWithEmailAndPassword, 
   createUserWithEmailAndPassword, 
@@ -2334,27 +2335,43 @@ export function validateStoragePath(path: string): void {
   }
 }
 
-export async function uploadPhotoTask(blobOrBase64: Blob | string, path: string): Promise<{ task: UploadTask }> {
-  validateStoragePath(path);
+// NEW: Cloudinary upload
+const CLOUDINARY_CLOUD_NAME = "kcs6fxei";  // من Cloudinary Dashboard
+const CLOUDINARY_UPLOAD_PRESET = "naris_ops_unsigned";  // unsigned upload preset
+
+export async function uploadPhotoTaskCloudinary(
+  blobOrBase64: Blob | string, 
+  folder: string = "task_photos"
+): Promise<{ url: string; secure_url: string }> {
+  let file: File | Blob;
   
-  let blob: Blob;
   if (typeof blobOrBase64 === "string") {
-    blob = base64ToBlob(blobOrBase64, "image/jpeg");
+    file = base64ToBlob(blobOrBase64, "image/jpeg");
   } else {
-    blob = blobOrBase64;
+    file = blobOrBase64;
   }
-  
-  const sRef = storageRef(storage, path);
-  const metadata = {
-    contentType: "image/jpeg",
-    customMetadata: {
-      uploadedAt: new Date().toISOString(),
-      app: "naris-ops",
-      version: "production-v1"
+
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
+  formData.append("folder", folder);
+  formData.append("tags", "naris-ops,production");
+
+  const response = await fetch(
+    `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`,
+    {
+      method: "POST",
+      body: formData,
     }
-  };
-  const task = uploadBytesResumable(sRef, blob, metadata);
-  return { task };
+  );
+
+  if (!response.ok) {
+    const errorData = await response.json();
+    throw new Error(`Cloudinary upload failed: ${errorData.error?.message || response.statusText}`);
+  }
+
+  const data = await response.json();
+  return { url: data.url, secure_url: data.secure_url };
 }
 
 export async function uploadPhoto(blobOrBase64: Blob | string, path: string): Promise<string> {

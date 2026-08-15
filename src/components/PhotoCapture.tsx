@@ -1,13 +1,13 @@
 import React, { useState, useRef, useEffect } from "react";
 import { Camera, RefreshCw, Upload, CheckCircle, Loader2, AlertCircle, Trash2, ShieldCheck } from "lucide-react";
-import { uploadPhotoTask, compressImage } from "../lib/api";
-import { getDownloadURL, UploadTask } from "firebase/storage";
+import { uploadToCloudinary } from "../lib/cloudinary";
+import { compressImage } from "../lib/api";
 
 interface PhotoCaptureProps {
   label: string;
   onPhotoUploaded: (metadata: { url: string; size: number; mimeType: string; takenAt: string }) => void;
   required?: boolean;
-  storagePath: string; // Structured path for Firebase Storage: e.g. task-photos/{zoneId}/{taskInstanceId}/after.jpg
+  storagePath: string;
   disabled?: boolean;
 }
 
@@ -22,35 +22,20 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
   const [uploadedUrl, setUploadedUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   
-  // Concurrency lock ref to prevent rapid multi-click/multi-touch duplicates
   const isUploadingRef = useRef(false);
-  const activeTaskRef = useRef<UploadTask | null>(null);
   const previewUrlRef = useRef<string | null>(null);
-  const isCanceledByUserRef = useRef(false);
 
-  // Metadata states
   const [originalSize, setOriginalSize] = useState<number>(0);
   const [compressedSize, setCompressedSize] = useState<number>(0);
   const [mimeType, setMimeType] = useState<string>("image/jpeg");
   const [takenAt, setTakenAt] = useState<string>("");
-  const [activeTask, setActiveTask] = useState<UploadTask | null>(null);
-  const [isPaused, setIsPaused] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Run cleanup only when component unmounts
   useEffect(() => {
     return () => {
       if (previewUrlRef.current) {
         URL.revokeObjectURL(previewUrlRef.current);
-      }
-      if (activeTaskRef.current) {
-        try {
-          activeTaskRef.current.cancel();
-        } catch {
-          // Ignore
-        }
-        activeTaskRef.current = null;
       }
     };
   }, []);
@@ -78,8 +63,7 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
     setUploadedUrl(null);
     setProgress(0);
     
-    // File Validation
-    const maxSize = 15 * 1024 * 1024; // 15MB
+    const maxSize = 15 * 1024 * 1024;
     if (file.size > maxSize) {
       setError("حجم الصورة كبير جداً. الحد الأقصى المسموح به هو 15 ميجابايت.");
       return;
@@ -98,7 +82,6 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
     setMimeType("image/jpeg");
     setTakenAt(timeStr);
 
-    // Create immediate local blob URL preview for responsiveness
     if (previewUrlRef.current) {
       URL.revokeObjectURL(previewUrlRef.current);
     }
@@ -107,7 +90,6 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
     setPreviewUrl(localUrl);
     setIsCompressing(true);
 
-    // Read and compress image client-side to target max 1600x1600 @ 0.75 JPEG
     const reader = new FileReader();
     reader.onloadend = async () => {
       const base64Str = reader.result as string;
@@ -117,7 +99,6 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
         const compressed = await compressImage(base64Str, 1600, 1600, 0.75);
         setCompressedBase64(compressed);
         
-        // Calculate compressed payload size in bytes
         const base64Data = compressed.split(",")[1] || "";
         const compSize = Math.round((base64Data.length * 3) / 4);
         setCompressedSize(compSize);
@@ -153,148 +134,59 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
       return;
     }
 
-    // 1. Verify storagePath
-    const pathSegments = storagePath.split("/");
-    const zoneId = pathSegments[1];
-    const taskInstanceId = pathSegments[2];
+    // Derive folder from storagePath (e.g. task-photos/{zoneId}/{taskId}/after.jpg)
+    const folder = storagePath.split("/").slice(0, -1).join("/") || "task_photos";
 
-    if (!zoneId || zoneId === "undefined" || zoneId === "null" || !taskInstanceId || taskInstanceId === "undefined" || taskInstanceId === "null") {
-      const errorMsg = `خطأ في مسار التخزين السحابي: معرّف المنطقة (${zoneId}) أو معرّف المهمة (${taskInstanceId}) غير صالح.`;
-      console.error(`[PhotoCapture] ❌ Validation failed: ${errorMsg}`);
-      setError(errorMsg);
-      return;
-    }
-
-    // Acquire concurrency lock
     isUploadingRef.current = true;
     setUploading(true);
     setProgress(0);
     setError(null);
 
-    console.log("[PhotoCapture] 🚀 Starting upload to Firebase Storage:", {
-      storagePath,
+    console.log("[PhotoCapture] 🚀 Starting upload to Cloudinary:", {
+      folder,
       originalSize,
       compressedSize,
       mimeType: "image/jpeg"
     });
 
-    isCanceledByUserRef.current = false;
-
     try {
-      const { task: uploadTask } = await uploadPhotoTask(payload, storagePath);
-      activeTaskRef.current = uploadTask;
-      setActiveTask(uploadTask);
+      // Cloudinary unsigned uploads don't support real progress — simulate it
+      const progressInterval = setInterval(() => {
+        setProgress((prev) => {
+          if (prev >= 90) return prev;
+          return prev + Math.floor(Math.random() * 15) + 5;
+        });
+      }, 300);
 
-      uploadTask.on(
-        "state_changed",
-        (snapshot) => {
-          if (snapshot.totalBytes > 0) {
-            const p = Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100);
-            setProgress(Math.min(p, 99)); // Keep 99 until downloadURL verified
-          }
-        },
-        (err: any) => {
-          activeTaskRef.current = null;
-          isUploadingRef.current = false;
-          setActiveTask(null);
-          setUploading(false);
+      const result = await uploadToCloudinary(payload, folder);
+      
+      clearInterval(progressInterval);
+      setProgress(100);
+      setUploadedUrl(result.secure_url);
+      
+      const finalSize = result.bytes || compressedSize || originalSize || 0;
+      const finalMimeType = "image/jpeg";
+      const finalTakenAt = takenAt || new Date().toISOString();
 
-          if (err?.code === "storage/canceled") {
-            if (isCanceledByUserRef.current) {
-              console.log("[PhotoCapture] Upload canceled by user.");
-              setError("تم إلغاء عملية الرفع.");
-            }
-            return;
-          }
+      const metadata = {
+        url: result.secure_url,
+        size: finalSize,
+        mimeType: finalMimeType,
+        takenAt: finalTakenAt
+      };
 
-          console.error("[PhotoCapture] ❌ Storage Upload Error:", err);
-          
-          let errorMsg = "تعذر رفع الصورة إلى خوادم التخزين السحابي. يرجى التأكد من جودة الإنترنت والمحاولة مرة أخرى.";
-          if (err?.code === "storage/retry-limit-exceeded") {
-            errorMsg = "استغرقت عملية الرفع وقتاً طويلاً بسبب بطء الاتصال. يرجى الضغط على زر 'إعادة المحاولة'.";
-          } else if (err?.code === "storage/unauthorized") {
-            errorMsg = "تم رفض صلاحية الوصول للتخزين السحابي لهذا المسار.";
-          } else if (err?.message) {
-            errorMsg = `فشل الرفع السحابي: ${err.message}`;
-          }
-          setError(errorMsg);
-        },
-        async () => {
-          try {
-            const imageUrl = await getDownloadURL(uploadTask.snapshot.ref);
-            if (!imageUrl || !imageUrl.startsWith("http")) {
-              throw new Error("رابط تنزيل الصورة السحابية غير صالح.");
-            }
-
-            // Important: Clear task ref before invoking onPhotoUploaded so parent unmount won't cancel
-            activeTaskRef.current = null;
-            setActiveTask(null);
-            isUploadingRef.current = false;
-            setUploading(false);
-            setProgress(100);
-            setUploadedUrl(imageUrl);
-            
-            const finalSize = compressedSize || originalSize || 0;
-            const finalMimeType = "image/jpeg";
-            const finalTakenAt = takenAt || new Date().toISOString();
-
-            const metadata = {
-              url: imageUrl,
-              size: finalSize,
-              mimeType: finalMimeType,
-              takenAt: finalTakenAt
-            };
-
-            console.log("[PhotoCapture] ✅ Photo uploaded successfully to Storage:", metadata);
-            onPhotoUploaded(metadata);
-          } catch (err: any) {
-            console.error("[PhotoCapture] Failed to get download URL:", err);
-            setError("تم رفع الصورة ولكن تعذر الحصول على الرابط السحابي. يرجى الضغط على إعادة المحاولة.");
-          } finally {
-            activeTaskRef.current = null;
-            isUploadingRef.current = false;
-            setActiveTask(null);
-            setUploading(false);
-          }
-        }
-      );
+      console.log("[PhotoCapture] ✅ Photo uploaded successfully to Cloudinary:", metadata);
+      onPhotoUploaded(metadata);
     } catch (err: any) {
-      activeTaskRef.current = null;
+      console.error("[PhotoCapture] ❌ Cloudinary upload failed:", err);
+      let errorMsg = "تعذر رفع الصورة إلى خوادم التخزين السحابي. يرجى التأكد من جودة الإنترنت والمحاولة مرة أخرى.";
+      if (err?.message) {
+        errorMsg = `فشل الرفع السحابي: ${err.message}`;
+      }
+      setError(errorMsg);
+    } finally {
       isUploadingRef.current = false;
-      setActiveTask(null);
       setUploading(false);
-      console.error("[PhotoCapture] ❌ Upload initialization failed:", err);
-      setError(err?.message || "تعذر بدء عملية رفع الصورة. يرجى التحقق من اتصال الإنترنت.");
-    }
-  };
-
-  const handleCancelUpload = () => {
-    isCanceledByUserRef.current = true;
-    if (activeTaskRef.current) {
-      try {
-        activeTaskRef.current.cancel();
-      } catch {
-        // Ignore
-      }
-      activeTaskRef.current = null;
-    }
-    isUploadingRef.current = false;
-    setActiveTask(null);
-    setUploading(false);
-    setProgress(0);
-    setError("تم إلغاء عملية الرفع.");
-  };
-
-  const handlePauseResume = () => {
-    const task = activeTaskRef.current || activeTask;
-    if (task) {
-      if (isPaused) {
-        task.resume();
-        setIsPaused(false);
-      } else {
-        task.pause();
-        setIsPaused(true);
-      }
     }
   };
 
@@ -314,7 +206,6 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
     setCompressedSize(0);
     setTakenAt("");
     isUploadingRef.current = false;
-    activeTaskRef.current = null;
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
@@ -326,7 +217,6 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
         {label} {required && <span className="text-red-500">*</span>}
       </span>
 
-      {/* Hidden native input with camera capture for mobile and file picker for desktop */}
       <input
         ref={fileInputRef}
         type="file"
@@ -368,31 +258,15 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
 
             {uploading && (
               <div className="absolute inset-0 bg-slate-900/85 flex flex-col items-center justify-center text-white p-6 backdrop-blur-xs">
-                <Loader2 className={`w-8 h-8 text-blue-400 mb-2 ${isPaused ? '' : 'animate-spin'}`} />
+                <Loader2 className="w-8 h-8 text-blue-400 mb-2 animate-spin" />
                 <span className="text-sm font-bold">
-                  {isPaused ? 'متوقف مؤقتاً...' : 'جاري رفع الصورة إلى Firebase Storage...'} {progress}%
+                  جاري رفع الصورة إلى Cloudinary... {progress}%
                 </span>
                 <div className="w-full bg-slate-800 h-2.5 rounded-full mt-3 overflow-hidden border border-slate-700 max-w-xs">
                   <div 
-                    className={`h-full transition-all duration-200 rounded-full shadow-[0_0_8px_rgba(59,130,246,0.5)] ${isPaused ? 'bg-slate-400' : 'bg-blue-500'}`}
+                    className="h-full transition-all duration-200 rounded-full shadow-[0_0_8px_rgba(59,130,246,0.5)] bg-blue-500"
                     style={{ width: `${progress}%` }}
                   ></div>
-                </div>
-                <div className="flex gap-2 mt-4">
-                  <button 
-                    type="button"
-                    onClick={handlePauseResume}
-                    className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg text-xs font-bold transition-colors cursor-pointer"
-                  >
-                    {isPaused ? 'استئناف' : 'إيقاف مؤقت'}
-                  </button>
-                  <button 
-                    type="button"
-                    onClick={handleCancelUpload}
-                    className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 rounded-lg text-xs font-bold transition-colors cursor-pointer"
-                  >
-                    إلغاء
-                  </button>
                 </div>
               </div>
             )}
@@ -406,7 +280,6 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
             )}
           </div>
 
-          {/* Forensic / metadata dashboard */}
           <div className="bg-slate-50 rounded-xl p-3 text-right text-xs text-slate-600 border border-slate-100 flex flex-col gap-1.5 font-mono">
             <div className="flex justify-between items-center">
               <span className="font-semibold text-slate-500">حجم الملف الأصلي:</span>
@@ -454,7 +327,7 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
               <div className="w-full flex flex-col gap-2">
                 <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl p-3 text-xs font-bold flex items-center justify-center gap-2">
                   <ShieldCheck className="w-5 h-5 text-emerald-500 shrink-0" />
-                  <span>تم الرفع والتثبيت بنجاح في Firebase Storage</span>
+                  <span>تم الرفع والتثبيت بنجاح في Cloudinary</span>
                 </div>
                 <button
                   type="button"
