@@ -219,7 +219,13 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
         return true;
       });
 
-      setTasks(uniqueTasks);
+      const enrichedTasks = uniqueTasks.map(task => ({
+        ...task,
+        zone: allZones.find(z => z.id === task.zone_id),
+        assignee: allProfiles.find(p => p.id === task.assigned_to),
+        template: allTemplates.find(t => t.id === task.template_id)
+      }));
+      setTasks(enrichedTasks);
       setProfiles(allProfiles);
       setZones(allZones);
       setKpis(allKpis);
@@ -255,7 +261,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
     // A task is late if status is late OR (completed and delay_minutes > 0)
     return t.status === "late" || (t.status === "completed" && (t.delay_minutes || 0) > 0);
   }).length;
-  const statsPendingApproval = tasks.filter(t => t.status === "completed" && !t.supervisor_approved).length;
+  const statsPendingApproval = tasks.filter(t => t.status === "completed" && t.supervisor_approved !== true).length;
 
   const totalTasksCount = tasks.length;
   const completionPercentage = totalTasksCount > 0 ? Math.round((statsCompleted / totalTasksCount) * 100) : 0;
@@ -361,7 +367,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       else if (tasksSubFilter === "one_time") matchSubTab = task.task_type === "one_time";
       else if (tasksSubFilter === "rework") matchSubTab = task.task_type === "rework";
       else if (tasksSubFilter === "late") matchSubTab = task.status === "late" || (task.status === "completed" && (task.delay_minutes || 0) > 0);
-      else if (tasksSubFilter === "pending_approval") matchSubTab = task.status === "completed" && !task.supervisor_approved;
+      else if (tasksSubFilter === "pending_approval") matchSubTab = task.status === "completed" && task.supervisor_approved !== true;
 
       return matchQuery && matchEmployee && matchZone && matchSubTab;
     });
@@ -2054,14 +2060,14 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                     </div>
 
                     <div className="flex flex-col gap-2.5">
-                      {tasks.filter(t => t.status === "completed" && !t.supervisor_approved).length === 0 ? (
+                      {tasks.filter(t => t.status === "completed" && t.supervisor_approved !== true).length === 0 ? (
                         <div className="text-center py-12 text-slate-400">
                           <CheckCircle className="w-10 h-10 text-slate-300 mx-auto mb-2" />
                           <span className="text-xs font-bold block">لا توجد مهام تنتظر الاعتماد حالياً</span>
                           <span className="text-[10px] text-slate-400 block mt-1">المهام إما مكتملة معتمدة تلقائياً أو لم تكتمل بعد.</span>
                         </div>
                       ) : (
-                        tasks.filter(t => t.status === "completed" && !t.supervisor_approved).map((task) => (
+                        tasks.filter(t => t.status === "completed" && t.supervisor_approved !== true).map((task) => (
                           <div
                             key={task.id}
                             onClick={() => {
@@ -2146,8 +2152,8 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-2">
                             {/* Guide / Reference Image */}
                             {(() => {
-                              const primaryImg = reviewingTask.reference_image_url || reviewingTask.guide_image_url || reviewingTask.zone?.cover_image_url;
-                              const hasRefImg = !!reviewingTask.reference_image_url;
+                              const primaryImg = reviewingTask.reference_image_url || reviewingTask.guide_image_url || (reviewingTask as any).photos?.reference || reviewingTask.zone?.cover_image_url;
+                              const hasRefImg = !!(reviewingTask.reference_image_url || (reviewingTask as any).photos?.reference);
                               return (
                                 <div className="flex flex-col gap-1 text-center">
                                   <span className="text-[10px] font-bold text-indigo-500 block">
@@ -2176,13 +2182,13 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                             <div className="flex flex-col gap-1 text-center">
                               <span className="text-[10px] font-bold text-slate-400 block">قبل التنظيف 📷</span>
                               <div className="aspect-video bg-slate-900 border border-slate-200 rounded-lg overflow-hidden">
-                                {reviewingTask.photo_before_url ? (
+                                {(reviewingTask.photo_before_url || (reviewingTask as any).photos?.before) ? (
                                   <img 
-                                    src={reviewingTask.photo_before_url} 
+                                    src={reviewingTask.photo_before_url || (reviewingTask as any).photos?.before} 
                                     alt="قبل" 
                                     className="w-full h-full object-contain cursor-zoom-in" 
                                     referrerPolicy="no-referrer"
-                                    onClick={() => window.open(reviewingTask.photo_before_url!, '_blank')}
+                                    onClick={() => window.open((reviewingTask.photo_before_url || (reviewingTask as any).photos?.before)!, '_blank')}
                                   />
                                 ) : (
                                   <div className="w-full h-full flex items-center justify-center text-slate-500 text-[10px] font-semibold">
@@ -2196,13 +2202,13 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                             <div className="flex flex-col gap-1 text-center">
                               <span className="text-[10px] font-bold text-emerald-500 block">بعد تلميع الموقع 📸</span>
                               <div className="aspect-video bg-slate-900 border border-slate-200 rounded-lg overflow-hidden">
-                                {reviewingTask.photo_after_url ? (
+                                {(reviewingTask.photo_after_url || (reviewingTask as any).photos?.after) ? (
                                   <img 
-                                    src={reviewingTask.photo_after_url} 
+                                    src={reviewingTask.photo_after_url || (reviewingTask as any).photos?.after} 
                                     alt="بعد" 
                                     className="w-full h-full object-contain cursor-zoom-in" 
                                     referrerPolicy="no-referrer"
-                                    onClick={() => window.open(reviewingTask.photo_after_url!, '_blank')}
+                                    onClick={() => window.open((reviewingTask.photo_after_url || (reviewingTask as any).photos?.after)!, '_blank')}
                                   />
                                 ) : (
                                   <div className="w-full h-full flex items-center justify-center text-slate-500 text-[10px] font-semibold">
