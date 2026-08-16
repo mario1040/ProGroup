@@ -36,6 +36,8 @@ import {
   getTasks, 
   listenTasksForDate,
   getProfiles, 
+  getEligibleCleaners,
+  isEligibleCleaner,
   getZones, 
   getKpis, 
   getTemplates, 
@@ -412,9 +414,9 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
         requires_supervisor_approval: true
       });
       loadAllData();
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      showToast("حدث خطأ أثناء إسناد المهمة الجديدة", "error");
+      showToast(err?.message || "حدث خطأ أثناء إسناد المهمة الجديدة", "error");
     } finally {
       setLoading(false);
       setIsSavingTask(false);
@@ -555,9 +557,9 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       setIsSopModalOpen(false);
       setSelectedTemplate(null);
       loadAllData();
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      showToast("فشل حفظ البند المعياري", "error");
+      showToast(err?.message || "فشل حفظ البند المعياري", "error");
     } finally {
       setLoading(false);
       setIsSavingTemplate(false);
@@ -1555,7 +1557,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                               className="text-xs p-2 border border-slate-200 rounded-lg outline-none cursor-pointer bg-white"
                             >
                               <option value="">اختر موظف...</option>
-                              {profiles.filter(p => p.role === "cleaner").map(p => (
+                              {getEligibleCleaners(profiles).map(p => (
                                 <option key={p.id} value={p.id}>{p.full_name}</option>
                               ))}
                             </select>
@@ -1854,7 +1856,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                                   className="p-1.5 text-xs border border-slate-200 rounded-lg bg-white outline-none font-bold text-slate-700 cursor-pointer focus:border-slate-400"
                                 >
                                   <option value="">غير محدد</option>
-                                  {profiles.filter(p => p.role === "cleaner").map(p => (
+                                  {getEligibleCleaners(profiles).map(p => (
                                     <option key={p.id} value={p.id}>{p.full_name}</option>
                                   ))}
                                 </select>
@@ -2087,7 +2089,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                                 className="p-1 border border-slate-200 rounded-lg bg-white text-xs font-bold text-slate-700 focus:outline-none cursor-pointer"
                               >
                                 <option value="">غير محدد</option>
-                                {profiles.filter(p => p.role === "cleaner").map(p => (
+                                {getEligibleCleaners(profiles).map(p => (
                                   <option key={p.id} value={p.id}>{p.full_name}</option>
                                 ))}
                               </select>
@@ -3480,7 +3482,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                     className="p-2 border border-slate-200 rounded-lg bg-white disabled:bg-slate-50 disabled:text-slate-400"
                   >
                     <option value="">اختر الموظف...</option>
-                    {profiles.filter(p => p.role === "cleaner").map(p => (
+                    {getEligibleCleaners(profiles).map(p => (
                       <option key={p.id} value={p.id}>{p.full_name}</option>
                     ))}
                   </select>
@@ -3673,7 +3675,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                     className="p-2 border border-slate-200 rounded-lg bg-white disabled:bg-slate-50 disabled:text-slate-400"
                   >
                     <option value="">توزيع تلقائي مرن</option>
-                    {profiles.filter(p => p.role === "cleaner").map(p => (
+                    {getEligibleCleaners(profiles).map(p => (
                       <option key={p.id} value={p.id}>{p.full_name}</option>
                     ))}
                   </select>

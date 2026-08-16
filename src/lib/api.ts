@@ -1012,6 +1012,43 @@ export async function getProfiles(): Promise<Profile[]> {
   return profiles;
 }
 
+export function isEligibleCleaner(profile: Profile | Partial<Profile>): boolean {
+  return profile.role === "cleaner" && profile.is_active !== false;
+}
+
+export function getEligibleCleaners(profiles: Profile[]): Profile[] {
+  return profiles.filter((p) => isEligibleCleaner(p));
+}
+
+export function selectFlexibleAssignee(
+  eligibleCleaners: Profile[],
+  existingInstances: TaskInstance[],
+  dateStr?: string
+): Profile {
+  if (!eligibleCleaners || eligibleCleaners.length === 0) {
+    throw new Error("لا يوجد موظفون نشطون متاحون لإسناد المهمة.");
+  }
+
+  let bestCleaner = eligibleCleaners[0];
+  let minTasks = Infinity;
+
+  for (const cleaner of eligibleCleaners) {
+    const taskCount = existingInstances.filter(
+      (ti) => ti.assigned_to === cleaner.id && (!dateStr || ti.due_date === dateStr)
+    ).length;
+
+    if (taskCount < minTasks) {
+      minTasks = taskCount;
+      bestCleaner = cleaner;
+    } else if (taskCount === minTasks && cleaner.id < bestCleaner.id) {
+      // Deterministic tie-breaker
+      bestCleaner = cleaner;
+    }
+  }
+
+  return bestCleaner;
+}
+
 
 function getRandomBytes(length: number): Uint8Array {
   const bytes = new Uint8Array(length);
@@ -1346,24 +1383,31 @@ export async function pregenerateTaskInstances(tpl: SOPItem, daysCount = 7): Pro
           legacyExists = legacySnap.exists();
         }
         if (!existingSnap.exists() && !legacyExists) {
-          let assignedTo = tpl.default_assignee_id || "";
+          let assignedTo = "";
+          if (tpl.default_assignee_id) {
+            const defaultCleaner = profiles.find((p) => p.id === tpl.default_assignee_id);
+            if (defaultCleaner && isEligibleCleaner(defaultCleaner)) {
+              assignedTo = defaultCleaner.id;
+            }
+          }
           if (!assignedTo) {
             const tplZone = zones.find((z) => z.id === tpl.zone_id);
             if (tplZone?.responsible_employee_id) {
-              const respEmp = profiles.find((p) => p.id === tplZone.responsible_employee_id && p.is_active);
+              const respEmp = profiles.find((p) => p.id === tplZone.responsible_employee_id && isEligibleCleaner(respEmp));
               if (respEmp) assignedTo = respEmp.id;
             }
-            if (!assignedTo) {
-              const dayNameAr = getArabicDayName(dateStr);
-              const activeCleaners = profiles.filter((p) => p.is_active && p.role === "cleaner");
-              let workingCleaners = activeCleaners.filter((p) => !p.work_days || p.work_days.includes(dayNameAr));
-              if (workingCleaners.length === 0) workingCleaners = activeCleaners;
-              if (workingCleaners.length > 0) {
-                assignedTo = workingCleaners[0].id;
-              } else {
-                const firstActive = profiles.find((p) => p.is_active);
-                assignedTo = firstActive ? firstActive.id : "p2";
-              }
+          }
+          if (!assignedTo) {
+            const activeCleaners = getEligibleCleaners(profiles);
+            if (activeCleaners.length > 0) {
+              const dayInstancesSnap = await getDocs(query(collection(db, "task_instances"), where("due_date", "==", dateStr)));
+              const dayInstances: TaskInstance[] = [];
+              dayInstancesSnap.forEach((d) => dayInstances.push(d.data() as TaskInstance));
+              const best = selectFlexibleAssignee(activeCleaners, dayInstances, dateStr);
+              assignedTo = best.id;
+            } else {
+              console.warn(`[Pregenerate] No active cleaners available for SOP ${tpl.id} on ${dateStr}. Skipping.`);
+              continue;
             }
           }
           const newInstance = buildTaskInstanceSnapshot(tpl, dateStr, occurrence, assignedTo);
@@ -1378,6 +1422,13 @@ export async function pregenerateTaskInstances(tpl: SOPItem, daysCount = 7): Pro
 }
 export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
   await ensureSeeded();
+  if (item.default_assignee_id && item.default_assignee_id.trim() !== "") {
+    const profiles = await getProfiles();
+    const targetProfile = profiles.find((p) => p.id === item.default_assignee_id);
+    if (!targetProfile || !isEligibleCleaner(targetProfile)) {
+      throw new Error("لا يمكن إسناد SOP لموظف غير نشط.");
+    }
+  }
   let finalItem: any;
   let oldAssigneeId: string | undefined;
   
@@ -1577,29 +1628,28 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
           console.log(`[Firestore Client] Generating missing recurring SOP tasks for ${todayStr}...`);
           generatedAny = true;
         }
-        let assignedTo = tpl.default_assignee_id || "";
+        let assignedTo = "";
+        if (tpl.default_assignee_id) {
+          const defaultEmp = profiles.find((p) => p.id === tpl.default_assignee_id);
+          if (defaultEmp && isEligibleCleaner(defaultEmp)) {
+            assignedTo = defaultEmp.id;
+          }
+        }
         if (!assignedTo) {
           const tplZone = zones.find((z) => z.id === tpl.zone_id);
           if (tplZone?.responsible_employee_id) {
-            const respEmp = profiles.find((p) => p.id === tplZone.responsible_employee_id && p.is_active);
+            const respEmp = profiles.find((p) => p.id === tplZone.responsible_employee_id && isEligibleCleaner(respEmp));
             if (respEmp) assignedTo = respEmp.id;
           }
-          if (!assignedTo) {
-            const activeCleaners = profiles.filter((p) => p.is_active && p.role === "cleaner");
-            let workingCleaners = activeCleaners.filter((p) => !p.work_days || p.work_days.includes(todayDayNameAr));
-            if (workingCleaners.length === 0) workingCleaners = activeCleaners;
-            if (workingCleaners.length > 0) {
-              let bestCleaner = workingCleaners[0];
-              let minTasks = Infinity;
-              for (const cleaner of workingCleaners) {
-                const taskCount = instances.filter((ti) => ti.assigned_to === cleaner.id).length;
-                if (taskCount < minTasks) { minTasks = taskCount; bestCleaner = cleaner; }
-                assignedTo = bestCleaner.id;
-              }
-            } else {
-              const firstActive = profiles.find((p) => p.is_active);
-              assignedTo = firstActive ? firstActive.id : "p2";
-            }
+        }
+        if (!assignedTo) {
+          const activeCleaners = getEligibleCleaners(profiles);
+          if (activeCleaners.length > 0) {
+            const best = selectFlexibleAssignee(activeCleaners, instances, todayStr);
+            assignedTo = best.id;
+          } else {
+            console.warn(`[Firestore Client] No active cleaners available for recurring task SOP ${tpl.id}. Skipping.`);
+            continue;
           }
         }
         const newInstance = buildTaskInstanceSnapshot(tpl, todayStr, occurrence, assignedTo);
@@ -1746,12 +1796,42 @@ export async function getTasksForRange(startDate: string, endDate: string): Prom
 
 export async function createTask(task: Partial<TaskInstance>): Promise<TaskInstance> {
   await ensureSeeded();
+  const profiles = await getProfiles();
+  const activeCleaners = getEligibleCleaners(profiles);
+
+  let assignedTo = task.assigned_to;
+
+  if (assignedTo && assignedTo.trim() !== "") {
+    const targetCleaner = profiles.find((p) => p.id === assignedTo);
+    if (!targetCleaner || !isEligibleCleaner(targetCleaner)) {
+      throw new Error("لا يمكن إسناد مهمة جديدة لموظف غير نشط.");
+    }
+  } else {
+    if (activeCleaners.length === 0) {
+      throw new Error("لا يوجد موظفون نشطون متاحون لإسناد المهمة.");
+    }
+    const targetDate = task.due_date || getLocalDateString();
+    let instancesSnap;
+    try {
+      const q = query(collection(db, "task_instances"), where("due_date", "==", targetDate));
+      instancesSnap = await getDocs(q);
+    } catch (e) {
+      handleFirestoreError(e, OperationType.LIST, "task_instances");
+    }
+    const instances: TaskInstance[] = [];
+    if (instancesSnap) {
+      instancesSnap.forEach((d) => instances.push(d.data() as TaskInstance));
+    }
+    const best = selectFlexibleAssignee(activeCleaners, instances, targetDate);
+    assignedTo = best.id;
+  }
+
   const id = "ti_" + randomHex(8);
   const newInstance: TaskInstance = {
     id,
     zone_id: (task.zone_id && task.zone_id !== "z1") ? task.zone_id : "z_reception",
     template_id: task.template_id || null,
-    assigned_to: task.assigned_to || "p2",
+    assigned_to: assignedTo,
     assigned_by: task.assigned_by || "p1",
     task_type: task.task_type || "one_time",
     title: task.title || "",
@@ -1824,6 +1904,15 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
     }
     
     const currentTask = snap.data() as TaskInstance;
+    
+    // Validate reassignment: target employee MUST be active cleaner
+    if (updates.assigned_to && updates.assigned_to !== currentTask.assigned_to) {
+      const profiles = await getProfiles();
+      const targetProfile = profiles.find((p) => p.id === updates.assigned_to);
+      if (!targetProfile || !isEligibleCleaner(targetProfile)) {
+        throw new Error("لا يمكن إعادة إسناد المهمة لموظف غير نشط.");
+      }
+    }
     
     // 1. Prevent duplicate completion
     if (currentTask.status === "completed" && updates.status === "completed") {
