@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { Camera, RefreshCw, Upload, CheckCircle, Loader2, AlertCircle, Trash2, ShieldCheck } from "lucide-react";
-import { uploadToCloudinary } from "../lib/cloudinary";
+import { uploadToCloudinary, recordOrphanCandidate } from "../lib/cloudinary";
 import { compressImage } from "../lib/api";
 
 interface PhotoCaptureProps {
@@ -20,6 +20,7 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
   const [isCompressing, setIsCompressing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [uploadedUrl, setUploadedUrl] = useState<string | null>(null);
+  const [uploadedPublicId, setUploadedPublicId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   
   const isUploadingRef = useRef(false);
@@ -163,6 +164,7 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
       clearInterval(progressInterval);
       setProgress(100);
       setUploadedUrl(result.secure_url);
+      setUploadedPublicId(result.public_id || null);
       
       const finalSize = result.bytes || compressedSize || originalSize || 0;
       const finalMimeType = "image/jpeg";
@@ -192,6 +194,10 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
 
   const resetPhoto = () => {
     if (uploading) return;
+    if (uploadedPublicId && uploadedUrl) {
+      const folder = storagePath.split("/").slice(0, -1).join("/") || "task_photos";
+      recordOrphanCandidate(uploadedPublicId, uploadedUrl, folder, "User reset photo to capture new one");
+    }
     if (previewUrlRef.current) {
       URL.revokeObjectURL(previewUrlRef.current);
       previewUrlRef.current = null;
@@ -200,6 +206,7 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
     setRawBase64(null);
     setCompressedBase64(null);
     setUploadedUrl(null);
+    setUploadedPublicId(null);
     setProgress(0);
     setError(null);
     setOriginalSize(0);

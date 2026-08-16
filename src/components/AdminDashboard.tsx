@@ -24,7 +24,6 @@ import {
   Lightbulb, 
   Power, 
   ShieldCheck, 
-  Bell, 
   Trash2, 
   UserCheck,
   Calendar,
@@ -35,6 +34,7 @@ import {
 } from "lucide-react";
 import { 
   getTasks, 
+  listenTasksForDate,
   getProfiles, 
   getZones, 
   getKpis, 
@@ -135,8 +135,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
     due_time: "10:00",
     requires_photo_before: true,
     requires_photo_after: true,
-    requires_supervisor_approval: true,
-    requires_signature: false
+    requires_supervisor_approval: true
   });
 
   // SOP Template Form modal state
@@ -184,14 +183,13 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   const [employeePhone, setEmployeePhone] = useState("");
   const [empActionLoading, setEmpActionLoading] = useState(false);
 
-  // Main load function
+  // Main load function for master & configuration data
   const loadAllData = async () => {
     try {
       setLoading(true);
       setLoadingZones(true);
       setLoadingProfiles(true);
-      const [allTasks, allProfiles, allZones, allKpis, allTemplates, allOps, allSwitches] = await Promise.all([
-        getTasks(selectedDate),
+      const [allProfiles, allZones, allKpis, allTemplates, allOps, allSwitches] = await Promise.all([
         getProfiles(),
         getZones(),
         getKpis(),
@@ -209,22 +207,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
         return true;
       });
 
-      // Deduplicate task instances by title, zone, date, and time
-      const seenTask = new Set<string>();
-      const uniqueTasks = allTasks.filter(t => {
-        const key = `${(t.title || "").trim().toLowerCase()}_${t.zone_id || ""}_${t.due_date || ""}_${t.due_time || ""}`;
-        if (seenTask.has(key)) return false;
-        seenTask.add(key);
-        return true;
-      });
-
-      const enrichedTasks = uniqueTasks.map(task => ({
-        ...task,
-        zone: allZones.find(z => z.id === task.zone_id),
-        assignee: allProfiles.find(p => p.id === task.assigned_to),
-        template: allTemplates.find(t => t.id === task.template_id)
-      }));
-      setTasks(enrichedTasks);
       setProfiles(allProfiles);
       setZones(allZones);
       setKpis(allKpis);
@@ -243,9 +225,28 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
     }
   };
 
+  // Realtime Live Tasks Listener for selectedDate (powers Daily Tasks Management & Live Approval Queue)
+  useEffect(() => {
+    const unsubscribe = listenTasksForDate(selectedDate, undefined, (liveTasks) => {
+      setTasks(liveTasks);
+      setLoading(false);
+
+      // Keep reviewingTask synchronized if currently reviewing
+      setReviewingTask((prev) => {
+        if (!prev) return null;
+        const updated = liveTasks.find(t => t.id === prev.id);
+        return updated || prev;
+      });
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [selectedDate]);
+
   useEffect(() => {
     loadAllData();
-  }, [selectedDate, activeTab]);
+  }, [activeTab]);
 
   useEffect(() => {
     if (!isSopModalOpen) {
@@ -408,8 +409,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
         due_time: "10:00",
         requires_photo_before: true,
         requires_photo_after: true,
-        requires_supervisor_approval: true,
-        requires_signature: false
+        requires_supervisor_approval: true
       });
       loadAllData();
     } catch (err) {
@@ -2493,7 +2493,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                             requires_photo_before: true,
                             requires_photo_after: true,
                             requires_supervisor_approval: true,
-                            requires_signature: false,
                             is_active: true
                           });
                           setIsSopModalOpen(true);

@@ -108,7 +108,7 @@ export default function TodayTasksPage({
   const [isOnlineState, setIsOnlineState] = useState<boolean>(isOnline());
   
   // Executing state
-  const [executingStep, setExecutingStep] = useState<'details' | 'before_photo' | 'after_photo' | 'signature_and_notes'>('details');
+  const [executingStep, setExecutingStep] = useState<'details' | 'before_photo' | 'after_photo' | 'notes_and_submit'>('details');
   const [photoBefore, setPhotoBefore] = useState<string | null>(null);
   const [photoAfter, setPhotoAfter] = useState<string | null>(null);
   const [photoAfterMeta, setPhotoAfterMeta] = useState<{ url: string; size: number; mimeType: string; takenAt: string } | null>(null);
@@ -270,8 +270,7 @@ export default function TodayTasksPage({
     if (requiresPhotoAfter) {
       setExecutingStep('after_photo');
     } else {
-      // Skip photo after and go to signature or submit directly
-      goToSignatureOrSubmit();
+      goToNotesAndSubmit();
     }
   };
 
@@ -282,12 +281,12 @@ export default function TodayTasksPage({
     }
     setPhotoAfter(meta.url);
     setPhotoAfterMeta(meta);
-    goToSignatureOrSubmit();
+    goToNotesAndSubmit();
   };
 
-  const goToSignatureOrSubmit = () => {
+  const goToNotesAndSubmit = () => {
     if (!selectedTask) return;
-    setExecutingStep('signature_and_notes');
+    setExecutingStep('notes_and_submit');
   };
 
   const submitTaskCompleted = async () => {
@@ -307,19 +306,13 @@ export default function TodayTasksPage({
       return;
     }
 
-    // Signature requirement disabled globally
-
     setIsSubmitting(true);
-    let signatureUrl: string | undefined = undefined;
-
-    // Signature upload disabled globally
     
     try {
       const updates: Partial<TaskInstance> = {
         status: 'completed',
         employee_notes: notes ? notes.trim() : undefined,
-        photo_after_url: photoAfter || undefined,
-        employee_signature_url: undefined
+        photo_after_url: photoAfter || undefined
       };
 
       if (photoAfterMeta) {
@@ -913,7 +906,7 @@ export default function TodayTasksPage({
               )}
 
               {/* STEP 4: Notes & Submit */}
-              {executingStep === 'signature_and_notes' && (
+              {executingStep === 'notes_and_submit' && (
                 <div className="flex flex-col gap-4">
                   <div>
                     <h3 className="text-sm font-bold text-slate-800">الخطوة الأخيرة: الملاحظات والتسليم</h3>

@@ -71,8 +71,44 @@ export async function uploadToCloudinary(
   };
 }
 
+export interface CloudinaryOrphanRecord {
+  public_id: string;
+  secure_url: string;
+  folder: string;
+  timestamp: string;
+  reason: string;
+}
+
+const orphanCandidates: CloudinaryOrphanRecord[] = [];
+
+export function recordOrphanCandidate(
+  publicId: string,
+  secureUrl: string,
+  folder: string,
+  reason: string
+): void {
+  const record: CloudinaryOrphanRecord = {
+    public_id: publicId,
+    secure_url: secureUrl,
+    folder,
+    timestamp: new Date().toISOString(),
+    reason,
+  };
+  orphanCandidates.push(record);
+  console.info("[Cloudinary Cleanup] Logged uncommitted or replaced orphan asset candidate:", record);
+}
+
+export function getOrphanCandidates(): CloudinaryOrphanRecord[] {
+  return [...orphanCandidates];
+}
+
 export async function deleteFromCloudinary(publicId: string): Promise<void> {
-  console.warn(`[Cloudinary] Client-side deletion not supported for unsigned uploads. Public ID to delete manually: ${publicId}`);
+  // Client-side browser execution cannot safely contain Cloudinary API secrets.
+  // We record the deletion intent and public_id for server/admin cleanup workflows.
+  recordOrphanCandidate(publicId, "", "manual_delete", "User requested photo deletion");
+  console.warn(
+    `[Cloudinary Cleanup] Direct client-side deletion requires admin secret which is forbidden in frontend. Public ID queued for server-side maintenance: ${publicId}`
+  );
 }
 
 export function getCloudinaryUrl(

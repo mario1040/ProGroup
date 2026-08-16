@@ -61,34 +61,36 @@ let localDBInitialized = false;
 // Automatically reset local fallback if switching to a new Firebase project ID
 const currentProjectId = firebaseConfig.projectId;
 try {
-  const lastUsedProjectId = localStorage.getItem("last_used_project_id");
-  if (lastUsedProjectId && lastUsedProjectId !== currentProjectId) {
-    console.log("[Project Change Detected] Resetting local caches, database and forcing sign-out...");
-    localStorage.setItem("last_used_project_id", currentProjectId);
-    localStorage.removeItem("use_local_fallback");
-    localStorage.removeItem("narisops_local_db");
-    localStorage.removeItem("naris_ops_session");
-    localStorage.removeItem("naris_ops_user");
-    localStorage.removeItem("naris_pending_updates");
-    localStorage.removeItem("naris_schema_version");
-    localStorage.removeItem("naris_inventory_data");
-    localStorage.removeItem("use_base64_storage");
-    
-    // Clear other keys
-    const keysToRemove: string[] = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key && (key.startsWith("naris_") || key.startsWith("narisops_"))) {
-        keysToRemove.push(key);
+  if (typeof window !== "undefined" && typeof localStorage !== "undefined") {
+    const lastUsedProjectId = localStorage.getItem("last_used_project_id");
+    if (lastUsedProjectId && lastUsedProjectId !== currentProjectId) {
+      console.log("[Project Change Detected] Resetting local caches, database and forcing sign-out...");
+      localStorage.setItem("last_used_project_id", currentProjectId);
+      localStorage.removeItem("use_local_fallback");
+      localStorage.removeItem("narisops_local_db");
+      localStorage.removeItem("naris_ops_session");
+      localStorage.removeItem("naris_ops_user");
+      localStorage.removeItem("naris_pending_updates");
+      localStorage.removeItem("naris_schema_version");
+      localStorage.removeItem("naris_inventory_data");
+      localStorage.removeItem("use_base64_storage");
+      
+      // Clear other keys
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && (key.startsWith("naris_") || key.startsWith("narisops_"))) {
+          keysToRemove.push(key);
+        }
       }
+      keysToRemove.forEach(k => localStorage.removeItem(k));
+      
+      setTimeout(() => {
+        window.dispatchEvent(new Event("project_changed_sign_out"));
+      }, 100);
+    } else if (!lastUsedProjectId) {
+      localStorage.setItem("last_used_project_id", currentProjectId);
     }
-    keysToRemove.forEach(k => localStorage.removeItem(k));
-    
-    setTimeout(() => {
-      window.dispatchEvent(new Event("project_changed_sign_out"));
-    }, 100);
-  } else if (!lastUsedProjectId) {
-    localStorage.setItem("last_used_project_id", currentProjectId);
   }
 } catch (e) {
   console.warn("localStorage is not accessible during project check:", e);
@@ -143,7 +145,6 @@ export function forceClearAllCaches() {
     localDB.sop_items = {};
     localDB.task_instances = {};
     localDB.operational_tasks = {};
-    localDB.notifications = {};
     localDB.device_switches = {};
     localDB.kpi_snapshots = {};
     
@@ -167,7 +168,6 @@ let localDB: {
   sop_items: Record<string, any>;
   task_instances: Record<string, any>;
   operational_tasks: Record<string, any>;
-  notifications: Record<string, any>;
   device_switches: Record<string, any>;
   kpi_snapshots: Record<string, any>;
 } = {
@@ -178,7 +178,6 @@ let localDB: {
   sop_items: {},
   task_instances: {},
   operational_tasks: {},
-  notifications: {},
   device_switches: {},
   kpi_snapshots: {}
 };
@@ -191,7 +190,7 @@ function initLocalDB() {
     if (stored) {
       localDB = JSON.parse(stored);
       // Ensure all collections exist
-      const keys: (keyof typeof localDB)[] = ["users", "locations", "zones", "task_templates", "sop_items", "task_instances", "operational_tasks", "notifications", "device_switches", "kpi_snapshots"];
+      const keys: (keyof typeof localDB)[] = ["users", "locations", "zones", "task_templates", "sop_items", "task_instances", "operational_tasks", "device_switches", "kpi_snapshots"];
       keys.forEach(k => {
         if (!localDB[k]) localDB[k] = {};
       });
@@ -268,7 +267,6 @@ function initLocalDB() {
   });
   seeded.task_instances.forEach(ti => { localDB.task_instances[ti.id] = ti; });
   seeded.operational_tasks.forEach(ot => { localDB.operational_tasks[ot.id] = ot; });
-  seeded.notifications.forEach(n => { localDB.notifications[n.id] = n; });
   seeded.device_switches.forEach(sw => { localDB.device_switches[sw.id] = sw; });
   seeded.kpi_snapshots.forEach(k => { localDB.kpi_snapshots[k.id] = k; });
 
@@ -830,7 +828,7 @@ export function getDaysDiff(dateStr1: string, dateStr2: string) {
 
 // --- Recurrence Engine Helpers ---
 
-function getSopOccurrencesForDate(sop: SOPItem, dateStr: string): { time: string; occurrenceIndex: number }[] {
+export function getSopOccurrencesForDate(sop: SOPItem, dateStr: string): { time: string; occurrenceIndex: number }[] {
   if (!sop.is_active) return [];
   const dayNameAr = getArabicDayName(dateStr);
   const occurrences: { time: string; occurrenceIndex: number }[] = [];
@@ -869,11 +867,11 @@ function getSopOccurrencesForDate(sop: SOPItem, dateStr: string): { time: string
   return occurrences;
 }
 
-function generateTaskInstanceId(sopId: string, dateStr: string, occurrenceIndex: number): string {
+export function generateTaskInstanceId(sopId: string, dateStr: string, occurrenceIndex: number): string {
   return `ti_rec_${sopId}_${dateStr}_${occurrenceIndex}`;
 }
 
-function buildTaskInstanceSnapshot(
+export function buildTaskInstanceSnapshot(
   sop: SOPItem,
   dateStr: string,
   occurrence: { time: string; occurrenceIndex: number },
@@ -1408,16 +1406,6 @@ export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
     }
   }
   
-  if (finalItem.guide_image_url && finalItem.guide_image_url.startsWith("data:")) {
-    try {
-      console.log(`[saveSopItem] Auto-uploading guide image to Cloudinary for SOP item ${finalItem.id}...`);
-      const uploadedUrl = await uploadPhoto(finalItem.guide_image_url, `sop_items/${finalItem.id}/guide.jpg`);
-      finalItem.guide_image_url = uploadedUrl;
-    } catch (err) {
-      console.warn(`[saveSopItem] Failed to auto-upload guide image:`, err);
-    }
-  }
-
   if (finalItem.reference_image_url && finalItem.reference_image_url.startsWith("data:")) {
     try {
       console.log(`[saveSopItem] Auto-uploading reference image to Cloudinary for SOP item ${finalItem.id}...`);
@@ -1633,18 +1621,19 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
   });
 }
 
-export function listenTodayTasks(
+export function listenTasksForDate(
+  dateStr: string,
   userId: string | undefined, 
   callback: (tasks: (TaskInstance & { zone?: Zone; assignee?: Profile; template?: TaskTemplate })[]) => void
 ): () => void {
-  const todayStr = getLocalDateString();
+  const targetDate = dateStr || getLocalDateString();
   
   // Fire off getTasks in background to generate any missing recurring tasks
-  getTasks(todayStr).catch(console.error);
+  getTasks(targetDate).catch(console.error);
 
   const q = query(
     collection(db, "task_instances"), 
-    where("due_date", "==", todayStr)
+    where("due_date", "==", targetDate)
   );
 
   const unsubscribe = onSnapshot(q, async (snap) => {
@@ -1667,7 +1656,16 @@ export function listenTodayTasks(
       const zones: Zone[] = [];
       zonesSnap.forEach((d) => zones.push(d.data() as Zone));
 
-      const enrichedTasks = filteredInstances.map((ti) => {
+      // Deduplicate task instances by title, zone, date, and time
+      const seenTask = new Set<string>();
+      const uniqueInstances = filteredInstances.filter(t => {
+        const key = `${(t.title || "").trim().toLowerCase()}_${t.zone_id || ""}_${t.due_date || ""}_${t.due_time || ""}`;
+        if (seenTask.has(key)) return false;
+        seenTask.add(key);
+        return true;
+      });
+
+      const enrichedTasks = uniqueInstances.map((ti) => {
         const zone = zones.find((z) => z.id === ti.zone_id);
         const assignee = profiles.find((p) => p.id === ti.assigned_to);
         const template = templates.find((tpl) => tpl.id === ti.template_id);
@@ -1696,6 +1694,13 @@ export function listenTodayTasks(
   });
 
   return unsubscribe;
+}
+
+export function listenTodayTasks(
+  userId: string | undefined, 
+  callback: (tasks: (TaskInstance & { zone?: Zone; assignee?: Profile; template?: TaskTemplate })[]) => void
+): () => void {
+  return listenTasksForDate(getLocalDateString(), userId, callback);
 }
 
 export async function getTasksForRange(startDate: string, endDate: string): Promise<(TaskInstance & { zone?: Zone; assignee?: Profile; template?: TaskTemplate })[]> {
@@ -2234,12 +2239,6 @@ export function compressImage(base64Str: string, maxWidth = 1600, maxHeight = 16
 export async function uploadPhoto(blobOrBase64: Blob | string, path: string): Promise<string> {
   const folder = path.split("/").slice(0, -1).join("/") || "naris_ops";
   const result = await uploadToCloudinary(blobOrBase64, folder);
-  return result.secure_url;
-}
-
-export async function uploadSignature(signatureBase64: string, path: string): Promise<string> {
-  const folder = path.split("/").slice(0, -1).join("/") || "signatures";
-  const result = await uploadToCloudinary(signatureBase64, folder);
   return result.secure_url;
 }
 

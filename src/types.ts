@@ -49,7 +49,7 @@ export interface TaskTemplate {
   requires_photo_after: boolean;
   requires_supervisor_approval: boolean;
   requires_gps: boolean;
-  requires_signature: boolean;
+  requires_signature?: boolean; // legacy
   is_reopenable: boolean;
   auto_escalate_if_late: boolean;
   default_assignee_id?: string;
