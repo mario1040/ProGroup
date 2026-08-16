@@ -138,7 +138,7 @@ export default function TodayTasksPage({
 
 
 
-  useEffect(() => {
+    useEffect(() => {
     setLoading(true);
     const unsubscribe = listenTodayTasks(user.id, (myTasks) => {
       setTasks(myTasks);
@@ -153,6 +153,21 @@ export default function TodayTasksPage({
 
     return () => unsubscribe();
   }, [user.id]);
+
+  const loadTodayTasks = async () => {
+    setLoading(true);
+    try {
+      const allTasks = await getTasks(getLocalDateString());
+      const myTasks = allTasks.filter((t) => t.assigned_to === user.id);
+      setTasks(myTasks);
+      setLoading(false);
+    } catch (err) {
+      console.error(err);
+      setLoading(false);
+    }
+  };
+
+  // Filter logic
 
   // Filter logic
   const filteredTasks = tasks.filter((t) => {
