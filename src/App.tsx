@@ -21,6 +21,7 @@ import AdminDashboard from "./components/AdminDashboard";
 import ProfessorLogo from "./components/ProfessorLogo";
 import FirebaseDiagnosticTool from "./components/FirebaseDiagnosticTool";
 import SwitchLabelsGuide from "./components/SwitchLabelsGuide";
+import FirestoreQuotaBanner from "./components/FirestoreQuotaBanner";
 
 type SessionSummary = {
   id: string;
@@ -219,6 +220,7 @@ export default function App() {
           </button>
         </div>
       )}
+      {isOnline && !user && <FirestoreQuotaBanner onRetry={() => window.location.reload()} />}
       {!user ? (
         <div className="min-h-screen flex flex-col items-center justify-center bg-slate-900 px-4 py-12 relative overflow-hidden">
           <div className="absolute w-96 h-96 bg-indigo-600/10 rounded-full blur-3xl -top-12 -right-12" />

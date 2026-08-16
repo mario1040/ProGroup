@@ -2,6 +2,7 @@ import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
 import { initializeFirestore, getFirestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
+import { recordFirestoreError } from "./quotaManager";
 
 // Hardcoded static configuration as a robust fallback to ensure zero runtime file system or download dependencies
 export const firebaseConfig = {
@@ -64,6 +65,7 @@ export interface FirestoreErrorInfo {
 }
 
 export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null): never {
+  recordFirestoreError(error);
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {

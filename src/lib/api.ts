@@ -37,6 +37,25 @@ import {
 import { initializeApp, deleteApp } from "firebase/app";
 import { getSeededDB } from "../db_default";
 import { isOnline } from "./offlineManager";
+import { 
+  recordFirestoreError, 
+  clearFirestoreQuotaWarning, 
+  isFirestoreQuotaError, 
+  getFirestoreQuotaExceeded, 
+  setFirestoreQuotaExceeded, 
+  subscribeFirestoreQuota, 
+  useFirestoreQuota 
+} from "./quotaManager";
+
+export { 
+  recordFirestoreError, 
+  clearFirestoreQuotaWarning, 
+  isFirestoreQuotaError, 
+  getFirestoreQuotaExceeded, 
+  setFirestoreQuotaExceeded, 
+  subscribeFirestoreQuota, 
+  useFirestoreQuota 
+};
 
 // 44--- Clean Undefined Interceptor (Mandatory to prevent Firestore crash) ---
 function cleanUndefined<T extends object>(obj: T): T {
@@ -465,8 +484,10 @@ export async function getDoc(docRef: any): Promise<any> {
   }
   try {
     const snap = await firebaseGetDoc(docRef);
+    clearFirestoreQuotaWarning();
     return snap;
   } catch (err: any) {
+    recordFirestoreError(err);
     triggerLocalFallback(err);
     throw err;
   }
@@ -497,8 +518,10 @@ export async function getDocs(q: any): Promise<any> {
   }
   try {
     const snap = await firebaseGetDocs(q);
+    clearFirestoreQuotaWarning();
     return snap;
   } catch (err: any) {
+    recordFirestoreError(err);
     triggerLocalFallback(err);
     throw err;
   }
@@ -509,7 +532,9 @@ export async function setDoc(docRef: any, data: any, options?: any) {
 
   try {
     await firebaseSetDoc(docRef, cleaned, options);
+    clearFirestoreQuotaWarning();
   } catch (err: any) {
+    recordFirestoreError(err);
     triggerLocalFallback(err);
     throw err;
   }
@@ -520,7 +545,9 @@ export async function updateDoc(docRef: any, data: any) {
 
   try {
     await firebaseUpdateDoc(docRef, cleaned);
+    clearFirestoreQuotaWarning();
   } catch (err: any) {
+    recordFirestoreError(err);
     triggerLocalFallback(err);
     throw err;
   }
@@ -529,7 +556,9 @@ export async function updateDoc(docRef: any, data: any) {
 export async function deleteDoc(docRef: any) {
   try {
     await firebaseDeleteDoc(docRef);
+    clearFirestoreQuotaWarning();
   } catch (err: any) {
+    recordFirestoreError(err);
     triggerLocalFallback(err);
     throw err;
   }
@@ -568,9 +597,17 @@ export function onSnapshot(q: any, callback: any, errorCallback?: any): any {
       snapshotListeners.delete(listenerObj);
     };
   } else {
-    const realUnsubscribe = firebaseOnSnapshot(q, callback, (err) => {
-      if (errorCallback) errorCallback(err);
-    });
+    const realUnsubscribe = firebaseOnSnapshot(
+      q,
+      (snap) => {
+        clearFirestoreQuotaWarning();
+        callback(snap);
+      },
+      (err) => {
+        recordFirestoreError(err);
+        if (errorCallback) errorCallback(err);
+      }
+    );
     return realUnsubscribe;
   }
 }

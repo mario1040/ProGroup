@@ -22,6 +22,7 @@ import { getTasks, listenTodayTasks, updateTask, getLocalDateString, deletePhoto
 import { isOnline } from "../lib/offlineManager";
 import PhotoCapture from "./PhotoCapture";
 import ProfessorLogo from "./ProfessorLogo";
+import FirestoreQuotaBanner from "./FirestoreQuotaBanner";
 
 const TaskTimer = ({ task }: { task: TaskInstance & { zone?: Zone; template?: TaskTemplate } }) => {
   const [elapsed, setElapsed] = useState<number>(0);
@@ -384,6 +385,8 @@ export default function TodayTasksPage({
           </div>
         </div>
       )}
+
+      {isOnlineState && <FirestoreQuotaBanner onRetry={loadTodayTasks} />}
 
       {/* Toast Alert */}
       {toast && (

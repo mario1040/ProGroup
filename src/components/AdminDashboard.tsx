@@ -3,6 +3,7 @@ import { jsPDF } from "jspdf";
 import html2canvas from "html2canvas";
 import ProfessorLogo from "./ProfessorLogo";
 import SwitchLabelsGuide from "./SwitchLabelsGuide";
+import FirestoreQuotaBanner from "./FirestoreQuotaBanner";
 import { BookOpen } from "lucide-react";
 import { 
   CheckCircle, 
@@ -1058,6 +1059,9 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans text-right">
       
+      {/* Firestore Quota Exhaustion Warning Banner */}
+      <FirestoreQuotaBanner onRetry={loadAllData} />
+
       {/* Toast Notification Container */}
       {toast && (
         <div className={`fixed top-4 left-4 right-4 md:left-auto md:w-96 z-50 p-4 rounded-xl shadow-xl border transition-all duration-300 flex items-center gap-3 ${
