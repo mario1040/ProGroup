@@ -1738,14 +1738,12 @@ export function listenTasksForDate(
         ? instances.filter(ti => ti.assigned_to === userId)
         : instances;
 
-      const [zonesSnap, profiles, templates] = await Promise.all([
-        getDocs(collection(db, "zones")),
+      // بعد (مُصلح):
+      const [zones, profiles, templates] = await Promise.all([
+        getRawZones(),   // ← cache-enabled, same as getTasks()
         getProfiles(),
         getTemplates()
       ]);
-
-      const zones: Zone[] = [];
-      zonesSnap.forEach((d) => zones.push(d.data() as Zone));
 
       // Deduplicate task instances by title, zone, date, and time
       const seenTask = new Set<string>();
