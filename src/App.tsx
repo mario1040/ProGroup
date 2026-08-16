@@ -334,7 +334,7 @@ export default function App() {
           )}
         </div>
       )}
-      <FirebaseDiagnosticTool />
+      {window.location.hostname.includes('aistudio.google.com') && <FirebaseDiagnosticTool />}
     </div>
   );
 }
