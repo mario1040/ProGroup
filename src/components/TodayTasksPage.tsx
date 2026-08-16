@@ -18,7 +18,7 @@ import {
   X
 } from "lucide-react";
 import { Profile, TaskInstance, Zone, TaskTemplate } from "../types";
-import { getTasks, listenTodayTasks, updateTask, getLocalDateString, deletePhoto, uploadSignature } from "../lib/api";
+import { getTasks, listenTodayTasks, updateTask, getLocalDateString, deletePhoto } from "../lib/api";
 import { isOnline } from "../lib/offlineManager";
 import PhotoCapture from "./PhotoCapture";
 import ProfessorLogo from "./ProfessorLogo";
@@ -116,11 +116,6 @@ export default function TodayTasksPage({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'warning' } | null>(null);
   const [activeLightboxImage, setActiveLightboxImage] = useState<string | null>(null);
-
-  // Canvas ref for signature
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [isDrawing, setIsDrawing] = useState(false);
-  const [hasSigned, setHasSigned] = useState(false);
 
   const showToast = (message: string, type: 'success' | 'error' | 'warning') => {
     setToast({ message, type });
@@ -352,7 +347,6 @@ export default function TodayTasksPage({
       setPhotoAfter(null);
       setPhotoAfterMeta(null);
       setNotes("");
-      setHasSigned(false);
     } catch (err) {
       console.error(err);
       showToast("فشل تسليم المهمة. يرجى المحاولة لاحقاً.", "error");
@@ -362,85 +356,9 @@ export default function TodayTasksPage({
         const path = `task-photos/${selectedTask.zone_id}/${selectedTask.id}/after.jpg`;
         await deletePhoto(path);
       }
-      // Signature rollback disabled globally
     } finally {
       setIsSubmitting(false);
     }
-  };
-
-  // Canvas Drawing Handlers for Finger/Mouse Signatures
-  const startDrawing = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    ctx.strokeStyle = "#0f172a";
-    ctx.lineWidth = 3;
-    ctx.lineCap = "round";
-
-    const rect = canvas.getBoundingClientRect();
-    let x, y;
-    if ("touches" in e) {
-      x = e.touches[0].clientX - rect.left;
-      y = e.touches[0].clientY - rect.top;
-    } else {
-      x = e.clientX - rect.left;
-      y = e.clientY - rect.top;
-    }
-
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-    setIsDrawing(true);
-  };
-
-  const draw = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
-    if (!isDrawing) return;
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    const rect = canvas.getBoundingClientRect();
-    let x, y;
-    if ("touches" in e) {
-      // Prevent scrolling on touch devices while signing
-      if (e.cancelable) e.preventDefault();
-      x = e.touches[0].clientX - rect.left;
-      y = e.touches[0].clientY - rect.top;
-    } else {
-      x = e.clientX - rect.left;
-      y = e.clientY - rect.top;
-    }
-
-    ctx.lineTo(x, y);
-    ctx.stroke();
-    setHasSigned(true);
-  };
-
-  const stopDrawing = () => {
-    setIsDrawing(false);
-  };
-
-  const clearCanvas = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    setHasSigned(false);
-  };
-
-  const handleSignatureSubmit = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    
-    if (!hasSigned) {
-      showToast("يرجى كتابة التوقيع أولاً بإصبعك", "warning");
-      return;
-    }
-
-    submitTaskCompleted();
   };
 
   return (
@@ -621,7 +539,6 @@ export default function TodayTasksPage({
                   setPhotoBefore(null);
                   setPhotoAfter(null);
                   setNotes("");
-                  setHasSigned(false);
                   setSelectedTask(task);
                   setExecutingStep('details');
                 }}
@@ -682,14 +599,14 @@ export default function TodayTasksPage({
                 </div>
 
                 <div className="flex items-center gap-2.5 shrink-0">
-                  {(task.reference_image_url || task.guide_image_url || task.zone?.cover_image_url) && (
+                  {task.reference_image_url && (
                     <img
-                      src={task.reference_image_url || task.guide_image_url || task.zone?.cover_image_url}
-                      alt="SOP Map Guide"
+                      src={task.reference_image_url}
+                      alt="الصورة الاسترشادية للمهمة"
                       referrerPolicy="no-referrer"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setActiveLightboxImage(task.reference_image_url || task.guide_image_url || task.zone?.cover_image_url || null);
+                        setActiveLightboxImage(task.reference_image_url || null);
                       }}
                       className="w-12 h-12 rounded-xl object-cover border border-slate-200 shadow-sm hover:scale-105 active:scale-95 transition-transform"
                     />
@@ -716,7 +633,6 @@ export default function TodayTasksPage({
                   setPhotoBefore(null);
                   setPhotoAfter(null);
                   setNotes("");
-                  setHasSigned(false);
                 }}
                 className="text-xs font-bold text-slate-500 hover:text-slate-800 cursor-pointer flex items-center gap-1 bg-slate-100 py-1.5 px-3 rounded-full"
               >
@@ -807,65 +723,31 @@ export default function TodayTasksPage({
                       </div>
                     </div>
 
-                    {/* Image display logic aligning with thumbnail priority */}
-                    {(() => {
-                      const primaryImg = selectedTask.reference_image_url || selectedTask.guide_image_url || selectedTask.zone?.cover_image_url;
-                      const hasRefImg = !!selectedTask.reference_image_url;
-                      const hasGuideImg = !!selectedTask.guide_image_url;
-                      const secondaryImg = (hasRefImg && hasGuideImg) ? selectedTask.guide_image_url : null;
-
-                      return (
-                        <>
-                          {/* Primary image display */}
-                          {primaryImg && (
-                            <div className="flex flex-col gap-1.5 mt-2 border border-slate-100 rounded-xl overflow-hidden bg-slate-50/50 p-2">
-                              <div className="flex items-center gap-2 mb-1.5">
-                                <div className="bg-blue-50 text-blue-600 p-1 rounded-lg border border-blue-100">
-                                  <Camera className="w-3.5 h-3.5" />
-                                </div>
-                                <div>
-                                  <span className="text-xs font-bold text-slate-700 block">
-                                    {hasRefImg ? "الصورة المرجعية لبند العمل:" : "صورة الدليل الإرشادي والعمل:"}
-                                  </span>
-                                  <span className="text-[10px] text-slate-400 block">
-                                    {hasRefImg ? "صورة توضيحية للموقع أو البند المحدد المطلوب العمل عليه" : "صورة توضيحية لتحديد موقع العمل بدقة"}
-                                  </span>
-                                </div>
-                              </div>
-                              <img
-                                src={primaryImg}
-                                alt={selectedTask.title}
-                                referrerPolicy="no-referrer"
-                                onClick={() => setActiveLightboxImage(primaryImg || null)}
-                                className="w-full h-48 object-cover rounded-lg border border-slate-200 shadow-sm animate-fade-in cursor-pointer hover:scale-[1.02] active:scale-[0.99] transition-transform duration-300"
-                              />
-                            </div>
-                          )}
-
-                          {/* Secondary image display */}
-                          {secondaryImg && (
-                            <div className="flex flex-col gap-1.5 mt-2 border border-slate-100 rounded-xl overflow-hidden bg-slate-50/50 p-2">
-                              <div className="flex items-center gap-2 mb-1.5">
-                                <div className="bg-indigo-50 text-indigo-600 p-1 rounded-lg border border-indigo-100">
-                                  <Camera className="w-3.5 h-3.5" />
-                                </div>
-                                <div>
-                                  <span className="text-xs font-bold text-slate-700 block">صورة الدليل الإرشادي (مكان البند):</span>
-                                  <span className="text-[10px] text-slate-400 block">صورة توضيحية لتحديد موقع العمل بدقة</span>
-                                </div>
-                              </div>
-                              <img
-                                src={secondaryImg}
-                                alt={selectedTask.title}
-                                referrerPolicy="no-referrer"
-                                onClick={() => setActiveLightboxImage(secondaryImg || null)}
-                                className="w-full h-44 object-cover rounded-lg border border-slate-200 shadow-sm animate-fade-in cursor-pointer hover:scale-[1.02] active:scale-[0.99] transition-transform duration-300"
-                              />
-                            </div>
-                          )}
-                        </>
-                      );
-                    })()}
+                    {/* SOP Official Reference Image */}
+                    {selectedTask.reference_image_url && (
+                      <div className="flex flex-col gap-1.5 mt-2 border border-slate-100 rounded-xl overflow-hidden bg-slate-50/50 p-2">
+                        <div className="flex items-center gap-2 mb-1.5">
+                          <div className="bg-blue-50 text-blue-600 p-1 rounded-lg border border-blue-100">
+                            <Camera className="w-3.5 h-3.5" />
+                          </div>
+                          <div>
+                            <span className="text-xs font-bold text-slate-700 block">
+                              الصورة الاسترشادية للمهمة
+                            </span>
+                            <span className="text-[10px] text-slate-400 block">
+                              صورة توضيحية للموقع أو البند المحدد المطلوب العمل عليه
+                            </span>
+                          </div>
+                        </div>
+                        <img
+                          src={selectedTask.reference_image_url}
+                          alt={selectedTask.title}
+                          referrerPolicy="no-referrer"
+                          onClick={() => setActiveLightboxImage(selectedTask.reference_image_url || null)}
+                          className="w-full h-48 object-cover rounded-lg border border-slate-200 shadow-sm animate-fade-in cursor-pointer hover:scale-[1.02] active:scale-[0.99] transition-transform duration-300"
+                        />
+                      </div>
+                    )}
                   </div>
 
                   {/* Employee Uploaded Photos with Sync Status */}

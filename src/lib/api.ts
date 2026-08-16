@@ -508,26 +508,6 @@ export async function getDocs(q: any): Promise<any> {
 
 export async function setDoc(docRef: any, data: any, options?: any) {
   const cleaned = cleanUndefined(data);
-  const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
-  const docId = docRef.__doc_id || docRef.id || "";
-
-  // Always keep local database up to date to prevent syncing old or deleted data back
-  try {
-    initLocalDB();
-    if (colName && docId) {
-      if (options?.merge && localDB[colName as keyof typeof localDB]?.[docId]) {
-        localDB[colName as keyof typeof localDB][docId] = {
-          ...localDB[colName as keyof typeof localDB][docId],
-          ...cleaned
-        };
-      } else {
-        localDB[colName as keyof typeof localDB][docId] = cleaned;
-      }
-      saveLocalDB();
-    }
-  } catch (e) {
-    console.warn("[Local DB] Failed to sync setDoc to local storage:", e);
-  }
 
   try {
     await firebaseSetDoc(docRef, cleaned, options);
@@ -539,22 +519,6 @@ export async function setDoc(docRef: any, data: any, options?: any) {
 
 export async function updateDoc(docRef: any, data: any) {
   const cleaned = cleanUndefined(data);
-  const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
-  const docId = docRef.__doc_id || docRef.id || "";
-
-  // Always keep local database up to date to prevent syncing old or deleted data back
-  try {
-    initLocalDB();
-    if (colName && docId) {
-      localDB[colName as keyof typeof localDB][docId] = {
-        ...(localDB[colName as keyof typeof localDB][docId] || {}),
-        ...cleaned
-      };
-      saveLocalDB();
-    }
-  } catch (e) {
-    console.warn("[Local DB] Failed to sync updateDoc to local storage:", e);
-  }
 
   try {
     await firebaseUpdateDoc(docRef, cleaned);
@@ -565,22 +529,6 @@ export async function updateDoc(docRef: any, data: any) {
 }
 
 export async function deleteDoc(docRef: any) {
-  const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
-  const docId = docRef.__doc_id || docRef.id || "";
-
-  // Always keep local database up to date to prevent syncing old or deleted data back
-  try {
-    initLocalDB();
-    if (colName && docId) {
-      if (localDB[colName as keyof typeof localDB]) {
-        delete localDB[colName as keyof typeof localDB][docId];
-      }
-      saveLocalDB();
-    }
-  } catch (e) {
-    console.warn("[Local DB] Failed to sync deleteDoc to local storage:", e);
-  }
-
   try {
     await firebaseDeleteDoc(docRef);
   } catch (err: any) {
@@ -819,17 +767,12 @@ async function ensureSeeded(): Promise<void> {
         await setDoc(doc(db, "operational_tasks", ot.id), ot);
       }
       
-      // 7. Seed notifications
-      for (const n of seeded.notifications) {
-        await setDoc(doc(db, "notifications", n.id), n);
-      }
-      
-      // 8. Seed device_switches
+      // 7. Seed device_switches
       for (const sw of seeded.device_switches) {
         await setDoc(doc(db, "device_switches", sw.id), sw);
       }
       
-      // 9. Seed kpi_snapshots
+      // 8. Seed kpi_snapshots
       for (const k of seeded.kpi_snapshots) {
         await setDoc(doc(db, "kpi_snapshots", k.id), k);
       }
@@ -1760,8 +1703,12 @@ export async function getTasksForRange(startDate: string, endDate: string): Prom
   
   let instancesSnap;
   try {
-    // Fetch all instances and filter locally to avoid complex Firestore composite index requirements
-    instancesSnap = await getDocs(collection(db, "task_instances"));
+    const q = query(
+      collection(db, "task_instances"),
+      where("due_date", ">=", startDate),
+      where("due_date", "<=", endDate)
+    );
+    instancesSnap = await getDocs(q);
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, "task_instances");
   }
@@ -1769,34 +1716,20 @@ export async function getTasksForRange(startDate: string, endDate: string): Prom
   const instances: TaskInstance[] = [];
   if (instancesSnap) {
     instancesSnap.forEach((docSnap) => {
-      const data = docSnap.data() as TaskInstance;
-      if (data.due_date >= startDate && data.due_date <= endDate) {
-        instances.push(data);
-      }
+      instances.push(docSnap.data() as TaskInstance);
     });
   }
   
-  const templates = await getTemplates();
-  let zonesSnap;
-  try {
-    zonesSnap = await getDocs(collection(db, "zones"));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.LIST, "zones");
-  }
-  
-  const zones: Zone[] = [];
-  if (zonesSnap) {
-    zonesSnap.forEach((docSnap) => {
-      zones.push(docSnap.data() as Zone);
-    });
-  }
-  
-  const profiles = await getProfiles();
+  const [templates, zones, profiles] = await Promise.all([
+    getTemplates(),
+    getRawZones(),
+    getProfiles()
+  ]);
   
   return instances.map((ti) => {
     const zone = zones.find((z) => z.id === ti.zone_id);
     const assignee = profiles.find((p) => p.id === ti.assigned_to);
-    const template = templates.find((tpl) => tpl.id === ti.template_id);
+    const template = templates.find((tpl) => tpl.id === (ti.sop_item_id || ti.template_id));
     return {
       ...ti,
       zone,
@@ -2096,21 +2029,42 @@ export interface KpiSummary {
   supervisor_rating: number;
 }
 
-export async function getKpis(): Promise<KpiSummary[]> {
+export async function getKpis(dateRange?: { startDate?: string; endDate?: string }): Promise<KpiSummary[]> {
   await ensureSeeded();
   const profiles = await getProfiles();
   const cleaners = profiles.filter((p) => p.role === "cleaner");
   
   let instancesSnap;
   try {
-    instancesSnap = await getDocs(collection(db, "task_instances"));
+    if (dateRange?.startDate && dateRange?.endDate) {
+      const q = query(
+        collection(db, "task_instances"),
+        where("due_date", ">=", dateRange.startDate),
+        where("due_date", "<=", dateRange.endDate)
+      );
+      instancesSnap = await getDocs(q);
+    } else {
+      const now = new Date();
+      const currentMonthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+      const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+      const currentMonthEnd = `${nextMonth.getFullYear()}-${String(nextMonth.getMonth() + 1).padStart(2, '0')}-01`;
+      
+      const q = query(
+        collection(db, "task_instances"),
+        where("due_date", ">=", currentMonthStart),
+        where("due_date", "<=", currentMonthEnd)
+      );
+      instancesSnap = await getDocs(q);
+    }
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, "task_instances");
   }
   const tasks: TaskInstance[] = [];
-  instancesSnap.forEach((docSnap) => {
-    tasks.push(docSnap.data() as TaskInstance);
-  });
+  if (instancesSnap) {
+    instancesSnap.forEach((docSnap) => {
+      tasks.push(docSnap.data() as TaskInstance);
+    });
+  }
   
   const kpisData = cleaners.map((cleaner) => {
     const cleanerTasks = tasks.filter((t) => t.assigned_to === cleaner.id);

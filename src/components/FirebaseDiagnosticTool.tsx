@@ -328,7 +328,7 @@ export default function FirebaseDiagnosticTool() {
                             Bucket: {report.storageBucket}
                           </p>
                           <p className="text-[10px] text-slate-500 mt-1">
-                            يتم رفع كافة صور المهام والتوقيعات بصيغة JPEG مضغوطة مباشرة لمسار التخزين السحابي الدائم.
+                            يتم رفع كافة صور المهام بصيغة JPEG مضغوطة مباشرة لمسار التخزين السحابي الدائم.
                           </p>
                         </div>
                       </div>

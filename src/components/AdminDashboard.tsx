@@ -142,7 +142,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   // SOP Template Form modal state
   const [isSopModalOpen, setIsSopModalOpen] = useState(false);
   const [selectedTemplate, setSelectedTemplate] = useState<Partial<TaskTemplate> | null>(null);
-  const [uploadingGuide, setUploadingGuide] = useState(false);
   const [uploadingReference, setUploadingReference] = useState(false);
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
 
@@ -485,42 +484,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
     }
   };
 
-  // Upload guide image from files
-  const handleGuideImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (!file.type.startsWith("image/")) {
-      showToast("يرجى اختيار ملف صورة صالح 🖼️", "error");
-      return;
-    }
-
-    try {
-      setUploadingGuide(true);
-      const reader = new FileReader();
-      reader.onloadend = async () => {
-        const base64String = reader.result as string;
-        try {
-          const pathId = selectedTemplate?.id || `temp_${Date.now()}`;
-          const storagePath = `templates/guide_${pathId}.jpg`;
-          const uploadedUrl = await uploadPhoto(base64String, storagePath);
-          setSelectedTemplate(prev => prev ? { ...prev, guide_image_url: uploadedUrl } : null);
-          showToast("تم رفع الصورة الإرشادية بنجاح إلى التخزين السحابي! 📸✅", "success");
-        } catch (err: any) {
-          console.error("Error processing guide image:", err);
-          showToast(`فشل رفع الصورة الإرشادية: ${err?.message || "خطأ في الاتصال"}`, "error");
-        } finally {
-          setUploadingGuide(false);
-        }
-      };
-      reader.readAsDataURL(file);
-    } catch (err) {
-      console.error(err);
-      showToast("فشل معالجة ملف الصورة", "error");
-      setUploadingGuide(false);
-    }
-  };
-
   // Upload reference image from files
   const handleReferenceImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -541,10 +504,10 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
           const storagePath = `templates/ref_${pathId}.jpg`;
           const uploadedUrl = await uploadPhoto(base64String, storagePath);
           setSelectedTemplate(prev => prev ? { ...prev, reference_image_url: uploadedUrl } : null);
-          showToast("تم رفع صورة بند العمل المرجعية بنجاح! 📸✅", "success");
+          showToast("تم رفع الصورة الاسترشادية للمهمة بنجاح! 📸✅", "success");
         } catch (err: any) {
           console.error("Error processing reference image:", err);
-          showToast(`فشل رفع الصورة المرجعية: ${err?.message || "خطأ في الاتصال"}`, "error");
+          showToast(`فشل رفع الصورة الاسترشادية: ${err?.message || "خطأ في الاتصال"}`, "error");
         } finally {
           setUploadingReference(false);
         }
@@ -552,7 +515,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       reader.readAsDataURL(file);
     } catch (err) {
       console.error(err);
-      showToast("فشل معالجة ملف الصورة المرجعية", "error");
+      showToast("فشل معالجة ملف الصورة الاسترشادية", "error");
       setUploadingReference(false);
     }
   };
@@ -2150,33 +2113,27 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                           <span className="text-xs font-bold text-slate-600 block">مقارنة حالة التنظيف (قبل و بعد):</span>
                           
                           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-2">
-                            {/* Guide / Reference Image */}
-                            {(() => {
-                              const primaryImg = reviewingTask.reference_image_url || reviewingTask.guide_image_url || (reviewingTask as any).photos?.reference || reviewingTask.zone?.cover_image_url;
-                              const hasRefImg = !!(reviewingTask.reference_image_url || (reviewingTask as any).photos?.reference);
-                              return (
-                                <div className="flex flex-col gap-1 text-center">
-                                  <span className="text-[10px] font-bold text-indigo-500 block">
-                                    {hasRefImg ? "الصورة المرجعية للمهمة 💡" : "الصورة الاسترشادية 💡"}
-                                  </span>
-                                  <div className="aspect-video bg-slate-900 border border-slate-200 rounded-lg overflow-hidden flex items-center justify-center relative">
-                                    {primaryImg ? (
-                                      <img 
-                                        src={primaryImg} 
-                                        alt="المرجع" 
-                                        className="w-full h-full object-contain cursor-zoom-in" 
-                                        referrerPolicy="no-referrer"
-                                        onClick={() => window.open(primaryImg, '_blank')}
-                                      />
-                                    ) : (
-                                      <div className="w-full h-full flex items-center justify-center text-slate-400 text-[10px] font-semibold">
-                                        لا توجد صورة استرشادية مسجلة
-                                      </div>
-                                    )}
+                            {/* Official SOP Reference Image */}
+                            <div className="flex flex-col gap-1 text-center">
+                              <span className="text-[10px] font-bold text-indigo-500 block">
+                                الصورة الاسترشادية للمهمة 💡
+                              </span>
+                              <div className="aspect-video bg-slate-900 border border-slate-200 rounded-lg overflow-hidden flex items-center justify-center relative">
+                                {reviewingTask.reference_image_url ? (
+                                  <img 
+                                    src={reviewingTask.reference_image_url} 
+                                    alt="الصورة الاسترشادية للمهمة" 
+                                    className="w-full h-full object-contain cursor-zoom-in" 
+                                    referrerPolicy="no-referrer"
+                                    onClick={() => window.open(reviewingTask.reference_image_url, '_blank')}
+                                  />
+                                ) : (
+                                  <div className="w-full h-full flex items-center justify-center text-slate-400 text-[10px] font-semibold">
+                                    لا توجد صورة استرشادية مسجلة
                                   </div>
-                                </div>
-                              );
-                            })()}
+                                )}
+                              </div>
+                            </div>
 
                             {/* Photo Before */}
                             <div className="flex flex-col gap-1 text-center">
@@ -2571,10 +2528,10 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                               <td className="p-3 font-bold text-blue-600">{tpl.task_code}</td>
                               <td className="p-3 max-w-xs">
                                 <div className="flex items-center gap-2">
-                                  {(tpl.reference_image_url || tpl.guide_image_url || zone?.cover_image_url) && (
+                                  {tpl.reference_image_url && (
                                     <img
-                                      src={tpl.reference_image_url || tpl.guide_image_url || zone?.cover_image_url}
-                                      alt="SOP Guide"
+                                      src={tpl.reference_image_url}
+                                      alt="الصورة الاسترشادية للمهمة"
                                       referrerPolicy="no-referrer"
                                       className="w-10 h-10 object-cover rounded-lg border border-slate-200 shrink-0 shadow-sm"
                                     />
@@ -3339,32 +3296,26 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
 
                               {/* Image Verification logs (صورة قبل وبعد) */}
                               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                {/* Guide / Reference Image */}
-                                {(() => {
-                                  const primaryImg = task.reference_image_url || task.guide_image_url || task.zone?.cover_image_url;
-                                  const hasRefImg = !!task.reference_image_url;
-                                  return (
-                                    <div className="border border-slate-200 rounded-xl p-3 bg-white flex flex-col justify-between h-44">
-                                      <span className="text-[10px] font-bold text-indigo-600 mb-2 block border-b border-slate-100 pb-1">💡 {hasRefImg ? "الصورة المرجعية للمهمة" : "صورة الدليل الإرشادي"}</span>
-                                      {primaryImg ? (
-                                        <div className="relative group overflow-hidden rounded-lg border border-slate-100 h-full flex items-center justify-center bg-slate-50">
-                                          <img 
-                                            src={primaryImg} 
-                                            alt="صورة مرجعية" 
-                                            className="max-h-full object-contain cursor-zoom-in transition duration-200 hover:scale-105" 
-                                            referrerPolicy="no-referrer"
-                                            onClick={() => window.open(primaryImg, '_blank')}
-                                          />
-                                        </div>
-                                      ) : (
-                                        <div className="h-full rounded-lg bg-slate-50/50 border border-dashed border-slate-200 flex flex-col items-center justify-center text-slate-400">
-                                          <span className="text-xl">💡</span>
-                                          <span className="text-[10px] mt-1">لا توجد صورة إرشادية مسجلة</span>
-                                        </div>
-                                      )}
+                                {/* SOP Official Reference Image */}
+                                <div className="border border-slate-200 rounded-xl p-3 bg-white flex flex-col justify-between h-44">
+                                  <span className="text-[10px] font-bold text-indigo-600 mb-2 block border-b border-slate-100 pb-1">💡 الصورة الاسترشادية للمهمة</span>
+                                  {task.reference_image_url ? (
+                                    <div className="relative group overflow-hidden rounded-lg border border-slate-100 h-full flex items-center justify-center bg-slate-50">
+                                      <img 
+                                        src={task.reference_image_url} 
+                                        alt="الصورة الاسترشادية للمهمة" 
+                                        className="max-h-full object-contain cursor-zoom-in transition duration-200 hover:scale-105" 
+                                        referrerPolicy="no-referrer"
+                                        onClick={() => window.open(task.reference_image_url, '_blank')}
+                                      />
                                     </div>
-                                  );
-                                })()}
+                                  ) : (
+                                    <div className="h-full rounded-lg bg-slate-50/50 border border-dashed border-slate-200 flex flex-col items-center justify-center text-slate-400">
+                                      <span className="text-xl">💡</span>
+                                      <span className="text-[10px] mt-1">لا توجد صورة استرشادية مسجلة</span>
+                                    </div>
+                                  )}
+                                </div>
 
                                 {/* Photo Before */}
                                 <div className="border border-slate-200 rounded-xl p-3 bg-white flex flex-col justify-between h-44">
@@ -3903,67 +3854,12 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
               </div>
 
               <div className="flex flex-col gap-1.5">
-                <label className="text-xs font-bold text-slate-700">الصورة التوضيحية لموقع/بند العمل (صورة الدليل الإرشادي):</label>
+                <label className="text-xs font-bold text-slate-700">الصورة الاسترشادية للمهمة:</label>
                 <div className="flex flex-col gap-2">
                   <div className="flex gap-2 items-center">
                     <input
                       type="text"
-                      placeholder="ضع رابط صورة توضيحية من الإنترنت، أو اضغط لتحميل ملف مباشرة..."
-                      value={selectedTemplate.guide_image_url || ""}
-                      onChange={(e) => setSelectedTemplate({...selectedTemplate, guide_image_url: e.target.value})}
-                      className="p-2.5 border border-slate-200 rounded-lg outline-none text-xs flex-1 bg-white"
-                    />
-                    
-                    <label className={`flex items-center gap-1.5 px-3 py-2.5 rounded-lg border cursor-pointer transition text-xs font-bold shrink-0 ${
-                      uploadingGuide 
-                        ? 'bg-slate-50 border-slate-200 text-slate-400 cursor-not-allowed' 
-                        : 'bg-indigo-50 border-indigo-200 text-indigo-600 hover:bg-indigo-100/75'
-                    }`}>
-                      <Camera className="w-4 h-4" />
-                      {uploadingGuide ? "جاري الرفع..." : "إدراج/رفع صورة"}
-                      <input
-                        type="file"
-                        accept="image/*"
-                        disabled={uploadingGuide}
-                        onChange={handleGuideImageUpload}
-                        className="hidden"
-                      />
-                    </label>
-                  </div>
-
-                  {selectedTemplate.guide_image_url && (
-                    <div className="relative mt-1 border border-slate-200 rounded-xl overflow-hidden bg-slate-50 p-1.5 flex items-center justify-between gap-3 animate-fade-in">
-                      <div className="flex items-center gap-2">
-                        <img
-                          src={selectedTemplate.guide_image_url}
-                          alt="SOP Preview"
-                          referrerPolicy="no-referrer"
-                          className="w-12 h-12 object-cover rounded-lg border border-slate-100 shadow-sm"
-                        />
-                        <span className="text-[11px] text-slate-500 truncate max-w-xs font-mono leading-none">
-                          {selectedTemplate.guide_image_url.substring(0, 45)}...
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setSelectedTemplate({...selectedTemplate, guide_image_url: ""})}
-                        className="p-1 hover:bg-red-50 text-red-500 hover:text-red-600 rounded-lg transition"
-                        title="إزالة الصورة"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-1.5">
-                <label className="text-xs font-bold text-slate-700">الصورة المرجعية التفصيلية للمهمة (Reference Image):</label>
-                <div className="flex flex-col gap-2">
-                  <div className="flex gap-2 items-center">
-                    <input
-                      type="text"
-                      placeholder="رابط صورة مرجعية أو قم بتحميل ملف لتحديد مكان التنظيف للعامل بدقة..."
+                      placeholder="رابط صورة استرشادية أو قم بتحميل ملف لتحديد مكان وتنفيذ العمل للعامل بدقة..."
                       value={selectedTemplate.reference_image_url || ""}
                       onChange={(e) => setSelectedTemplate({...selectedTemplate, reference_image_url: e.target.value})}
                       className="p-2.5 border border-slate-200 rounded-lg outline-none text-xs flex-1 bg-white"
@@ -3972,7 +3868,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                     <label className={`flex items-center gap-1.5 px-3 py-2.5 rounded-lg border cursor-pointer transition text-xs font-bold shrink-0 ${
                       uploadingReference 
                         ? 'bg-slate-50 border-slate-200 text-slate-400 cursor-not-allowed' 
-                        : 'bg-blue-50 border-blue-200 text-blue-600 hover:bg-blue-100/75'
+                        : 'bg-indigo-50 border-indigo-200 text-indigo-600 hover:bg-indigo-100/75'
                     }`}>
                       <Camera className="w-4 h-4" />
                       {uploadingReference ? "جاري الرفع..." : "إدراج/رفع صورة"}
@@ -3991,7 +3887,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                       <div className="flex items-center gap-2">
                         <img
                           src={selectedTemplate.reference_image_url}
-                          alt="Reference Preview"
+                          alt="الصورة الاسترشادية للمهمة"
                           referrerPolicy="no-referrer"
                           className="w-12 h-12 object-cover rounded-lg border border-slate-100 shadow-sm"
                         />
