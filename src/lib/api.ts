@@ -1,60 +1,60 @@
 import { Profile, Zone, TaskTemplate, SOPItem, TaskInstance, OperationalTask, DeviceSwitch } from "../types";
-import { 
-  db, 
-  auth, 
-  storage, 
-  OperationType, 
+import {
+  db,
+  auth,
+  storage,
+  OperationType,
   handleFirestoreError,
   firebaseConfig
 } from "./firebase";
-import { 
-  doc as firebaseDoc, 
-  getDoc as firebaseGetDoc, 
-  getDocs as firebaseGetDocs, 
-  setDoc as firebaseSetDoc, 
-  deleteDoc as firebaseDeleteDoc, 
+import {
+  doc as firebaseDoc,
+  getDoc as firebaseGetDoc,
+  getDocs as firebaseGetDocs,
+  setDoc as firebaseSetDoc,
+  deleteDoc as firebaseDeleteDoc,
   updateDoc as firebaseUpdateDoc,
-  collection as firebaseCollection, 
-  query as firebaseQuery, 
+  collection as firebaseCollection,
+  query as firebaseQuery,
   where as firebaseWhere,
   onSnapshot as firebaseOnSnapshot
-} from "firebase/firestore"; 
-import { 
-  ref as storageRef, 
-  uploadString, 
+} from "firebase/firestore";
+import {
+  ref as storageRef,
+  uploadString,
   getDownloadURL,
   uploadBytesResumable,
   UploadTask,
   deleteObject
 } from "firebase/storage";
 import { uploadToCloudinary } from "./cloudinary";
-import { 
-  signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword, 
+import {
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
   signOut,
   getAuth
 } from "firebase/auth";
 import { initializeApp, deleteApp } from "firebase/app";
 import { getSeededDB } from "../db_default";
 import { isOnline } from "./offlineManager";
-import { 
-  recordFirestoreError, 
-  clearFirestoreQuotaWarning, 
-  isFirestoreQuotaError, 
-  getFirestoreQuotaExceeded, 
-  setFirestoreQuotaExceeded, 
-  subscribeFirestoreQuota, 
-  useFirestoreQuota 
+import {
+  recordFirestoreError,
+  clearFirestoreQuotaWarning,
+  isFirestoreQuotaError,
+  getFirestoreQuotaExceeded,
+  setFirestoreQuotaExceeded,
+  subscribeFirestoreQuota,
+  useFirestoreQuota
 } from "./quotaManager";
 
-export { 
-  recordFirestoreError, 
-  clearFirestoreQuotaWarning, 
-  isFirestoreQuotaError, 
-  getFirestoreQuotaExceeded, 
-  setFirestoreQuotaExceeded, 
-  subscribeFirestoreQuota, 
-  useFirestoreQuota 
+export {
+  recordFirestoreError,
+  clearFirestoreQuotaWarning,
+  isFirestoreQuotaError,
+  getFirestoreQuotaExceeded,
+  setFirestoreQuotaExceeded,
+  subscribeFirestoreQuota,
+  useFirestoreQuota
 };
 
 // 44--- Clean Undefined Interceptor (Mandatory to prevent Firestore crash) ---
@@ -93,7 +93,7 @@ try {
       localStorage.removeItem("naris_schema_version");
       localStorage.removeItem("naris_inventory_data");
       localStorage.removeItem("use_base64_storage");
-      
+
       // Clear other keys
       const keysToRemove: string[] = [];
       for (let i = 0; i < localStorage.length; i++) {
@@ -103,7 +103,7 @@ try {
         }
       }
       keysToRemove.forEach(k => localStorage.removeItem(k));
-      
+
       setTimeout(() => {
         window.dispatchEvent(new Event("project_changed_sign_out"));
       }, 100);
@@ -144,7 +144,7 @@ export function forceClearAllCaches() {
     localStorage.removeItem("naris_schema_version");
     localStorage.removeItem("naris_inventory_data");
     localStorage.removeItem("use_base64_storage");
-    
+
     const keysToRemove: string[] = [];
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
@@ -153,9 +153,9 @@ export function forceClearAllCaches() {
       }
     }
     keysToRemove.forEach(k => localStorage.removeItem(k));
-    
+
     invalidateMetadataCaches();
-    
+
     // Reset local DB in memory
     localDB.users = {};
     localDB.locations = {};
@@ -166,13 +166,13 @@ export function forceClearAllCaches() {
     localDB.operational_tasks = {};
     localDB.device_switches = {};
     localDB.kpi_snapshots = {};
-    
+
     localDBInitialized = false;
     useLocalFallback = false;
-    
+
     window.dispatchEvent(new Event("local_fallback_changed"));
     window.dispatchEvent(new Event("project_changed_sign_out"));
-    
+
     console.log("[Cache Cleared] Successfully wiped out all cached data and forced logout.");
   } catch (err) {
     console.error("Error forcing complete clearing of caches:", err);
@@ -203,7 +203,7 @@ let localDB: {
 
 function initLocalDB() {
   if (localDBInitialized) return;
-  
+
   try {
     const stored = localStorage.getItem("narisops_local_db");
     if (stored) {
@@ -219,7 +219,7 @@ function initLocalDB() {
       let localTemplatesChanged = false;
       const seeded = getSeededDB();
       const validTemplateIds = new Set(seeded.task_templates.map(t => t.id));
-      
+
       const tKeys = Object.keys(localDB.task_templates);
       for (const tk of tKeys) {
         if (tk.startsWith("t_sop_") && !validTemplateIds.has(tk)) {
@@ -227,7 +227,7 @@ function initLocalDB() {
           localTemplatesChanged = true;
         }
       }
-      
+
       const tiKeys = Object.keys(localDB.task_instances);
       for (const tik of tiKeys) {
         const ti = localDB.task_instances[tik];
@@ -256,7 +256,7 @@ function initLocalDB() {
           }
         });
       }
-      
+
       if (localTemplatesChanged || localUsersChanged) {
         console.log("[Local DB] Auto-purged old/obsolete templates and/or recovered locked out admin accounts.");
         try {
@@ -276,12 +276,12 @@ function initLocalDB() {
 
   console.log("[Local DB] No local database found. Seeding initial local database...");
   const seeded = getSeededDB();
-  
+
   seeded.profiles.forEach(p => { localDB.users[p.id] = p; });
   seeded.locations.forEach(l => { localDB.locations[l.id] = l; });
   seeded.zones.forEach(z => { localDB.zones[z.id] = z; });
-  seeded.task_templates.forEach(t => { 
-    localDB.task_templates[t.id] = t; 
+  seeded.task_templates.forEach(t => {
+    localDB.task_templates[t.id] = t;
     localDB.sop_items[t.id] = t;
   });
   seeded.task_instances.forEach(ti => { localDB.task_instances[ti.id] = ti; });
@@ -295,7 +295,7 @@ function initLocalDB() {
 
 function pruneLocalDBInstances(): boolean {
   if (!localDB || !localDB.task_instances) return false;
-  
+
   let changed = false;
   const ids = Object.keys(localDB.task_instances);
   for (const id of ids) {
@@ -337,7 +337,7 @@ export function setLocalFallback(value: boolean) {
   useLocalFallback = value;
   try {
     localStorage.setItem("use_local_fallback", value ? "true" : "false");
-  } catch (e) {}
+  } catch (e) { }
   window.dispatchEvent(new Event("local_fallback_changed"));
 }
 
@@ -454,7 +454,7 @@ export function doc(...args: any[]): any {
     colPath = second;
     docId = third;
   }
-  
+
   const firstArg = typeof first === "string" ? first : (first || db);
   if (!firstArg) {
     console.error(`[doc] Both first argument and imported db are undefined for path: ${colPath || second}`);
@@ -569,7 +569,7 @@ export function onSnapshot(q: any, callback: any, errorCallback?: any): any {
     initLocalDB();
     const listenerObj = { query: q, callback, errorCallback };
     snapshotListeners.add(listenerObj);
-    
+
     const colName = q.__collection_path;
     const docs = Object.values(localDB[colName as keyof typeof localDB] || {});
     const filtered = localFilter(docs, q.__constraints || []);
@@ -632,13 +632,13 @@ export async function deduplicateDatabase(): Promise<void> {
       const templatesCol = collection(db, "task_templates");
       const templatesSnap = await getDocs(templatesCol);
       const seenTemplates = new Map<string, string>(); // Key: title + "_" + zone_id, Value: kept_template_id
-      
+
       for (const docSnap of templatesSnap.docs) {
         const data = docSnap.data();
         const title = (data.title || "").trim();
         const zoneId = data.zone_id || "";
         const key = `${title}_${zoneId}`;
-        
+
         if (seenTemplates.has(key)) {
           // This is a duplicate template! Delete it.
           console.log(`[Deduplicator] Deleting duplicate task_template: ${data.title} (${docSnap.id})`);
@@ -662,7 +662,7 @@ export async function deduplicateDatabase(): Promise<void> {
         const title = (data.title || "").trim();
         const zoneId = data.zone_id || "";
         const key = `${title}_${zoneId}`;
-        
+
         if (seenSop.has(key)) {
           console.log(`[Deduplicator] Deleting duplicate sop_item: ${data.title} (${docSnap.id})`);
           try {
@@ -702,7 +702,7 @@ async function ensureSeeded(): Promise<void> {
   if (seedingPromise) {
     return seedingPromise;
   }
-  
+
   seedingPromise = (async () => {
     try {
       // Check if users collection already has data
@@ -764,10 +764,10 @@ async function ensureSeeded(): Promise<void> {
 
         return;
       }
-      
+
       console.log("[Firestore Client] Firestore is empty. Seeding initial default data across collections...");
       const seeded = getSeededDB();
-      
+
       // 1. Seed users (profiles)
       for (const p of seeded.profiles) {
         const profileToSeed = {
@@ -776,12 +776,12 @@ async function ensureSeeded(): Promise<void> {
         };
         await setDoc(doc(db, "users", p.id), profileToSeed);
       }
-      
+
       // 2. Seed locations
       for (const l of seeded.locations) {
         await setDoc(doc(db, "locations", l.id), l);
       }
-      
+
       // 3. Seed zones
       for (const z of seeded.zones) {
         await setDoc(doc(db, "zones", z.id), z);
@@ -791,33 +791,33 @@ async function ensureSeeded(): Promise<void> {
       for (const tpl of seeded.task_templates) {
         await setDoc(doc(db, "task_templates", tpl.id), tpl);
       }
-      
+
       // 5. Seed task_instances
       for (const ti of seeded.task_instances) {
         await setDoc(doc(db, "task_instances", ti.id), ti);
       }
-      
+
       // 6. Seed operational_tasks
       for (const ot of seeded.operational_tasks) {
         await setDoc(doc(db, "operational_tasks", ot.id), ot);
       }
-      
+
       // 7. Seed device_switches
       for (const sw of seeded.device_switches) {
         await setDoc(doc(db, "device_switches", sw.id), sw);
       }
-      
+
       // 8. Seed kpi_snapshots
       for (const k of seeded.kpi_snapshots) {
         await setDoc(doc(db, "kpi_snapshots", k.id), k);
       }
-      
+
       console.log("[Firestore Client] Seeding completed successfully.");
     } catch (err) {
       console.error("[Firestore Client] Seeding failed:", err);
     }
   })();
-  
+
   return seedingPromise;
 }
 
@@ -1010,7 +1010,7 @@ export async function getCurrentUserProfile(email: string): Promise<Profile | nu
   await ensureSeeded();
   if (!email) return null;
   const username = email.split("@")[0].toLowerCase();
-  
+
   let snap;
   try {
     snap = await getDocs(collection(db, "users"));
@@ -1315,12 +1315,12 @@ export async function getRawZones(): Promise<Zone[]> {
 export async function getZones(): Promise<(Zone & { responsible_employee?: Profile })[]> {
   const zones = await getRawZones();
   const profiles = await getProfiles();
-  
+
   const enrichedZones = zones.map((zone) => {
     const emp = profiles.find((p) => p.id === zone.responsible_employee_id);
     return { ...zone, responsible_employee: emp };
   });
-  
+
   enrichedZones.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
   return enrichedZones;
 }
@@ -1365,7 +1365,7 @@ export async function saveZone(zone: Partial<Zone>): Promise<Zone> {
 export async function getSopItems(): Promise<SOPItem[]> {
   await ensureSeeded();
   if (cachedSopItems) return cachedSopItems;
-  
+
   if (useLocalFallback) {
     const items = Object.values(localDB.sop_items || {}) as SOPItem[];
     items.sort((a, b) => (a.task_code || "").localeCompare(b.task_code || ""));
@@ -1430,8 +1430,10 @@ export async function pregenerateTaskInstances(tpl: SOPItem, daysCount = 7): Pro
           if (!assignedTo) {
             const tplZone = zones.find((z) => z.id === tpl.zone_id);
             if (tplZone?.responsible_employee_id) {
-              const respEmp = profiles.find((p) => p.id === tplZone.responsible_employee_id && isEligibleCleaner(respEmp));
-              if (respEmp) assignedTo = respEmp.id;
+              const respEmp = profiles.find((p) => p.id === tplZone.responsible_employee_id);
+              if (respEmp && isEligibleCleaner(respEmp)) {
+                assignedTo = respEmp.id;
+              }
             }
           }
           if (!assignedTo) {
@@ -1468,7 +1470,7 @@ export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
   }
   let finalItem: any;
   let oldAssigneeId: string | undefined;
-  
+
   if (!item.id) {
     finalItem = {
       ...item,
@@ -1493,7 +1495,7 @@ export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
       finalItem = { ...existing, ...item, updated_at: new Date().toISOString() };
     }
   }
-  
+
   if (finalItem.reference_image_url && finalItem.reference_image_url.startsWith("data:")) {
     try {
       console.log(`[saveSopItem] Auto-uploading reference image to Cloudinary for SOP item ${finalItem.id}...`);
@@ -1503,15 +1505,15 @@ export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
       console.warn(`[saveSopItem] Failed to auto-upload reference image:`, err);
     }
   }
-  
+
   if (useLocalFallback) {
     localDB.sop_items[finalItem.id] = finalItem;
     saveLocalDB();
   } else {
     await setDoc(doc(db, "sop_items", finalItem.id), finalItem);
   }
-  
-  
+
+
   // Sync all detail changes to any future pending task instances
   if (item.id) {
     console.log(`[SOP Detail Sync] Syncing updated SOP configurations for ${finalItem.title} to future pending task instances...`);
@@ -1567,7 +1569,7 @@ export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
             due_time: ti.due_time || "09:00",
             updated_at: new Date().toISOString()
           };
-          
+
           if (useLocalFallback) {
             localDB.task_instances[ti.id] = updatedInstance;
           } else {
@@ -1596,7 +1598,7 @@ export async function deleteSopItem(id: string): Promise<void> {
     console.error("[Firestore Client] deleteSopItem: Invalid or empty ID provided:", id);
     throw new Error("معرف البند المعياري (ID) غير صالح أو مفقود.");
   }
-  
+
   await ensureSeeded();
   try {
     if (useLocalFallback) {
@@ -1620,7 +1622,7 @@ export async function deleteTemplate(id: string): Promise<void> {
 export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone?: Zone; assignee?: Profile; template?: TaskTemplate })[]> {
   await ensureSeeded();
   const todayStr = dateStr || getLocalDateString();
-  
+
   let instancesSnap;
   try {
     instancesSnap = await getDocs(
@@ -1629,7 +1631,7 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, "task_instances");
   }
-  
+
   const instances: TaskInstance[] = [];
   instancesSnap.forEach((docSnap) => {
     instances.push(docSnap.data() as TaskInstance);
@@ -1648,19 +1650,19 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
   zonesSnap.forEach((docSnap) => {
     zones.push(docSnap.data() as Zone);
   });
-  
+
   // Generate missing recurring tasks for active templates that run today per-template
   const templates = await getTemplates();
   const todayDayNameAr = getArabicDayName(todayStr);
   let generatedAny = false;
-  
+
   for (const tpl of templates) {
     const occurrences = getSopOccurrencesForDate(tpl, todayStr);
     for (const occurrence of occurrences) {
       const instanceId = generateTaskInstanceId(tpl.id, todayStr, occurrence.occurrenceIndex);
-        const alreadyExists = instances.some((ti) => ti.id === instanceId);
-        const legacyExists = occurrence.occurrenceIndex === 0 && instances.some((ti) => ti.id === `ti_rec_${tpl.id}_${todayStr}`);
-        if (!alreadyExists && !legacyExists) {
+      const alreadyExists = instances.some((ti) => ti.id === instanceId);
+      const legacyExists = occurrence.occurrenceIndex === 0 && instances.some((ti) => ti.id === `ti_rec_${tpl.id}_${todayStr}`);
+      if (!alreadyExists && !legacyExists) {
         if (!generatedAny) {
           console.log(`[Firestore Client] Generating missing recurring SOP tasks for ${todayStr}...`);
           generatedAny = true;
@@ -1710,16 +1712,16 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
 
 export function listenTasksForDate(
   dateStr: string,
-  userId: string | undefined, 
+  userId: string | undefined,
   callback: (tasks: (TaskInstance & { zone?: Zone; assignee?: Profile; template?: TaskTemplate })[]) => void
 ): () => void {
   const targetDate = dateStr || getLocalDateString();
-  
+
   // Fire off getTasks in background to generate any missing recurring tasks
   getTasks(targetDate).catch(console.error);
 
   const q = query(
-    collection(db, "task_instances"), 
+    collection(db, "task_instances"),
     where("due_date", "==", targetDate)
   );
 
@@ -1730,7 +1732,7 @@ export function listenTasksForDate(
         instances.push(docSnap.data() as TaskInstance);
       });
 
-      const filteredInstances = userId 
+      const filteredInstances = userId
         ? instances.filter(ti => ti.assigned_to === userId)
         : instances;
 
@@ -1766,10 +1768,10 @@ export function listenTasksForDate(
 
       // Sort by creation time so they appear predictably, or by due_time
       enrichedTasks.sort((a, b) => {
-         if (a.due_time !== b.due_time) {
-            return (a.due_time || "").localeCompare(b.due_time || "");
-         }
-         return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+        if (a.due_time !== b.due_time) {
+          return (a.due_time || "").localeCompare(b.due_time || "");
+        }
+        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
       });
 
       callback(enrichedTasks);
@@ -1784,7 +1786,7 @@ export function listenTasksForDate(
 }
 
 export function listenTodayTasks(
-  userId: string | undefined, 
+  userId: string | undefined,
   callback: (tasks: (TaskInstance & { zone?: Zone; assignee?: Profile; template?: TaskTemplate })[]) => void
 ): () => void {
   return listenTasksForDate(getLocalDateString(), userId, callback);
@@ -1792,7 +1794,7 @@ export function listenTodayTasks(
 
 export async function getTasksForRange(startDate: string, endDate: string): Promise<(TaskInstance & { zone?: Zone; assignee?: Profile; template?: TaskTemplate })[]> {
   await ensureSeeded();
-  
+
   let instancesSnap;
   try {
     const q = query(
@@ -1804,20 +1806,20 @@ export async function getTasksForRange(startDate: string, endDate: string): Prom
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, "task_instances");
   }
-  
+
   const instances: TaskInstance[] = [];
   if (instancesSnap) {
     instancesSnap.forEach((docSnap) => {
       instances.push(docSnap.data() as TaskInstance);
     });
   }
-  
+
   const [templates, zones, profiles] = await Promise.all([
     getTemplates(),
     getRawZones(),
     getProfiles()
   ]);
-  
+
   return instances.map((ti) => {
     const zone = zones.find((z) => z.id === ti.zone_id);
     const assignee = profiles.find((p) => p.id === ti.assigned_to);
@@ -1890,7 +1892,7 @@ export async function createTask(task: Partial<TaskInstance>): Promise<TaskInsta
     created_at: task.created_at || new Date().toISOString(),
     updated_at: task.updated_at || new Date().toISOString()
   };
-  
+
   await setDoc(doc(db, "task_instances", id), newInstance);
   return newInstance;
 }
@@ -1935,13 +1937,13 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
       console.error("[Online Engine] getDoc failed:", error);
       throw new Error("تعذر الاتصال بقاعدة البيانات. يرجى التحقق من اتصالك بالإنترنت.");
     }
-    
+
     if (!snap.exists()) {
       throw new Error("المهمة المطلوبة غير موجودة في قاعدة البيانات");
     }
-    
+
     const currentTask = snap.data() as TaskInstance;
-    
+
     // Validate reassignment: target employee MUST be active cleaner
     if (updates.assigned_to && updates.assigned_to !== currentTask.assigned_to) {
       const profiles = await getProfiles();
@@ -1950,7 +1952,7 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
         throw new Error("لا يمكن إعادة إسناد المهمة لموظف غير نشط.");
       }
     }
-    
+
     // 1. Prevent duplicate completion
     if (currentTask.status === "completed" && updates.status === "completed") {
       throw new Error("تنبيه: تم إكمال هذه المهمة بالفعل مسبقاً ولا يمكن إعادة تسليمها.");
@@ -1973,7 +1975,7 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
         console.warn("Could not retrieve SOP master item", error);
       }
     }
-    
+
     const merged = { ...currentTask, ...updates, updated_at: new Date().toISOString() };
 
     // 2. Enforce "before photo" requirement — use task instance snapshot first, SOP fallback only if undefined
@@ -2016,14 +2018,14 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
     if (updates.status === "in_progress" && !currentTask.started_at) {
       merged.started_at = new Date().toISOString();
     }
-    
+
     if (updates.status === "completed" && !currentTask.completed_at) {
       merged.completed_at = new Date().toISOString();
       if (!merged.photo_after_taken_at) {
         merged.photo_after_taken_at = updates.photo_after_taken_at || new Date().toISOString();
       }
       merged.photo_after_uploaded_at = updates.photo_after_uploaded_at || new Date().toISOString();
-      
+
       if (currentTask.due_time && currentTask.due_date) {
         try {
           const dueDateTime = new Date(`${currentTask.due_date}T${currentTask.due_time}:00`);
@@ -2034,7 +2036,7 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
           console.error("Error parsing date for delay calc", e);
         }
       }
-      
+
       const requiresApproval = currentTask.requires_supervisor_approval !== undefined
         ? currentTask.requires_supervisor_approval
         : (template ? template.requires_supervisor_approval : true);
@@ -2073,14 +2075,14 @@ export async function approveTask(id: string, approval: { supervisor_id: string;
   if (!snap.exists()) {
     throw new Error("المهمة المراد اعتمادها غير موجودة");
   }
-  
+
   const task = snap.data() as TaskInstance;
 
   // 5. Prevent approval before completion
   if (task.status !== "completed") {
     throw new Error("خطأ حماية: لا يمكن اعتماد مهمة لم يكتمل تنفيذها وتأكيد تسليمها من قبل الموظف بعد.");
   }
-  
+
   task.status = "completed";
   task.supervisor_approved = true;
   task.supervisor_approved_by = approval.supervisor_id || "p1";
@@ -2088,7 +2090,7 @@ export async function approveTask(id: string, approval: { supervisor_id: string;
   task.quality_grade = approval.quality_grade || "A";
   task.supervisor_notes = approval.supervisor_notes || "";
   task.updated_at = new Date().toISOString();
-  
+
   await setDoc(docRef, task);
   return task;
 }
@@ -2105,23 +2107,23 @@ export async function rejectTask(id: string, rejection: { supervisor_id: string;
   if (!snap.exists()) {
     throw new Error("المهمة غير موجودة");
   }
-  
+
   const originalTask = snap.data() as TaskInstance;
-  
+
   // Prevent duplicate rework creation
   if (originalTask.status === "rejected") {
     throw new Error("تنبيه: تم رفض هذه المهمة بالفعل مسبقاً، وهنالك أمر إعادة تنظيف (Rework) جارٍ العمل عليه لها.");
   }
-  
+
   originalTask.status = "rejected";
   originalTask.supervisor_approved = false;
   originalTask.supervisor_approved_by = rejection.supervisor_id || "p1";
   originalTask.supervisor_approved_at = new Date().toISOString();
   originalTask.supervisor_notes = rejection.supervisor_notes || "مرفوضة وتحتاج لإعادة التنظيف";
   originalTask.updated_at = new Date().toISOString();
-  
+
   await setDoc(docRef, originalTask);
-  
+
   const reworkId = "ti_rework_" + randomHex(8);
   const reworkTask: TaskInstance = {
     id: reworkId,
@@ -2140,7 +2142,7 @@ export async function rejectTask(id: string, rejection: { supervisor_id: string;
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString()
   };
-  
+
   await setDoc(doc(db, "task_instances", reworkId), reworkTask);
   return { original: originalTask, rework: reworkTask };
 }
@@ -2164,7 +2166,7 @@ export async function getKpis(dateRange?: { startDate?: string; endDate?: string
   await ensureSeeded();
   const profiles = await getProfiles();
   const cleaners = profiles.filter((p) => p.role === "cleaner");
-  
+
   let instancesSnap;
   try {
     if (dateRange?.startDate && dateRange?.endDate) {
@@ -2179,7 +2181,7 @@ export async function getKpis(dateRange?: { startDate?: string; endDate?: string
       const currentMonthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
       const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
       const currentMonthEnd = `${nextMonth.getFullYear()}-${String(nextMonth.getMonth() + 1).padStart(2, '0')}-01`;
-      
+
       const q = query(
         collection(db, "task_instances"),
         where("due_date", ">=", currentMonthStart),
@@ -2196,19 +2198,19 @@ export async function getKpis(dateRange?: { startDate?: string; endDate?: string
       tasks.push(docSnap.data() as TaskInstance);
     });
   }
-  
+
   const kpisData = cleaners.map((cleaner) => {
     const cleanerTasks = tasks.filter((t) => t.assigned_to === cleaner.id);
-    
+
     const total = cleanerTasks.length;
     const completed = cleanerTasks.filter((t) => t.status === "completed" && t.supervisor_approved).length;
     const onTime = cleanerTasks.filter((t) => t.status === "completed" && t.supervisor_approved && (t.delay_minutes || 0) <= 0).length;
     const late = cleanerTasks.filter((t) => t.status === "completed" && (t.delay_minutes || 0) > 0).length;
     const reworked = cleanerTasks.filter((t) => t.task_type === "rework").length;
     const rejected = cleanerTasks.filter((t) => t.status === "rejected").length;
-    
+
     const compliance_rate = completed > 0 ? Math.round((onTime / completed) * 100) : 0;
-    
+
     let totalDuration = 0;
     let durationCount = 0;
     cleanerTasks.forEach((t) => {
@@ -2223,7 +2225,7 @@ export async function getKpis(dateRange?: { startDate?: string; endDate?: string
       }
     });
     const avg_execution_time_minutes = durationCount > 0 ? Math.round((totalDuration / durationCount) * 10) / 10 : 0;
-    
+
     let qualitySum = 0;
     let gradedCount = 0;
     cleanerTasks.forEach((t) => {
@@ -2236,7 +2238,7 @@ export async function getKpis(dateRange?: { startDate?: string; endDate?: string
     });
     const quality_score = gradedCount > 0 ? Math.round(qualitySum / gradedCount) : 0;
     const supervisor_rating = quality_score > 0 ? (quality_score >= 90 ? 4.9 : quality_score >= 80 ? 4.5 : 3.8) : 0;
-    
+
     return {
       profile_id: cleaner.id,
       cleaner_name: cleaner.full_name,
@@ -2277,7 +2279,7 @@ export async function getOperationalTasks(): Promise<(OperationalTask & { respon
     handleFirestoreError(error, OperationType.LIST, "operational_tasks");
   }
   const profiles = await getProfiles();
-  
+
   const tasks: (OperationalTask & { responsible_employee?: Profile })[] = [];
   opSnap.forEach((docSnap) => {
     const ot = docSnap.data() as OperationalTask;
@@ -2463,15 +2465,15 @@ export async function validateDatabase(): Promise<DatabaseValidationReport> {
             detail.errors.push(`المستخدم [${id}]: الصلاحية 'role' مفقودة أو غير صالحة (${data.role}).`);
             docHasError = true;
           }
-        } 
-        
+        }
+
         else if (col.name === "locations") {
           if (!data.name) {
             detail.errors.push(`الموقع [${id}]: الاسم 'name' مفقود.`);
             docHasError = true;
           }
-        } 
-        
+        }
+
         else if (col.name === "zones") {
           if (!data.location_id) {
             detail.errors.push(`المنطقة [${id}]: معرف الموقع 'location_id' مفقود.`);
@@ -2481,8 +2483,8 @@ export async function validateDatabase(): Promise<DatabaseValidationReport> {
             detail.errors.push(`المنطقة [${id}]: الاسم 'name' مفقود.`);
             docHasError = true;
           }
-        } 
-        
+        }
+
         else if (col.name === "task_templates" || col.name === "sop_items") {
           if (!data.zone_id) {
             detail.errors.push(`البند [${id}]: معرف المنطقة 'zone_id' مفقود.`);
@@ -2502,8 +2504,8 @@ export async function validateDatabase(): Promise<DatabaseValidationReport> {
           if (data.requires_photo_after === undefined) {
             detail.warnings.push(`البند [${id}]: حقل 'requires_photo_after' غير معرف (يفترض false).`);
           }
-        } 
-        
+        }
+
         else if (col.name === "task_instances") {
           // Task Instance validation
           if (!data.zone_id) {
@@ -2547,8 +2549,8 @@ export async function validateDatabase(): Promise<DatabaseValidationReport> {
           if (data.after_image_url && !data.photo_after_url) {
             detail.warnings.push(`مهمة [${id}]: تم استخدام 'after_image_url' بدلاً من 'photo_after_url' القياسي.`);
           }
-        } 
-        
+        }
+
         else if (col.name === "operational_tasks") {
           if (!data.zone_id) {
             detail.errors.push(`مهمة تشغيلية [${id}]: معرف المنطقة 'zone_id' مفقود.`);
@@ -2558,7 +2560,7 @@ export async function validateDatabase(): Promise<DatabaseValidationReport> {
             detail.errors.push(`مهمة تشغيلية [${id}]: العنوان 'title' مفقود.`);
             docHasError = true;
           }
-        } 
+        }
 
 
         if (docHasError) {
