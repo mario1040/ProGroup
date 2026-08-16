@@ -1428,6 +1428,7 @@ export async function pregenerateTaskInstances(tpl: SOPItem, daysCount = 7): Pro
             }
           }
           if (!assignedTo) {
+            
             const tplZone = zones.find((z) => z.id === tpl.zone_id);
             if (tplZone?.responsible_employee_id) {
               const respEmp = profiles.find((p) => p.id === tplZone.responsible_employee_id);
