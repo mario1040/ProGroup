@@ -112,7 +112,7 @@ export default function App() {
         }
 
         const current = await getCurrentUserProfile(makeProfileEmail(stored.username));
-        if (!current || current.is_active === false) {
+        if (!current || current.is_active !== true) {
           localStorage.removeItem(SESSION_KEY);
           localStorage.removeItem(LEGACY_SESSION_KEY);
           if (!cancelled) setUser(null);

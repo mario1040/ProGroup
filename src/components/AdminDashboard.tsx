@@ -27,6 +27,8 @@ import {
   ShieldCheck, 
   Trash2, 
   UserCheck,
+  UserX,
+  Edit2,
   Calendar,
   Users,
   Box,
@@ -185,6 +187,8 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   const [employeeRole, setEmployeeRole] = useState<'cleaner' | 'supervisor' | 'admin'>("cleaner");
   const [employeePhone, setEmployeePhone] = useState("");
   const [empActionLoading, setEmpActionLoading] = useState(false);
+  const [editingEmployee, setEditingEmployee] = useState<Profile | null>(null);
+  const [deactivatingEmployee, setDeactivatingEmployee] = useState<Profile | null>(null);
 
   // Main load function for master & configuration data
   const loadAllData = async () => {
@@ -703,20 +707,53 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   };
 
   const handleToggleEmployeeStatus = async (p: Profile) => {
+    // If currently active, prompt for explicit confirmation
+    if (p.is_active === true) {
+      setDeactivatingEmployee(p);
+      return;
+    }
+    // If inactive, activate directly
+    await executeToggleEmployeeStatus(p, true);
+  };
+
+  const executeToggleEmployeeStatus = async (p: Profile, targetActive: boolean) => {
     try {
       setLoading(true);
-      const updated = {
-        ...p,
-        is_active: !p.is_active
-      };
-      await saveProfile(updated);
-      showToast(`تم ${!p.is_active ? "تفعيل" : "تعطيل"} حساب الموظف ${p.full_name} بنجاح ✅`, "success");
+      await saveProfile({
+        id: p.id,
+        is_active: targetActive
+      });
+      showToast(`تم ${targetActive ? "تفعيل" : "تعطيل"} حساب الموظف ${p.full_name} بنجاح ✅`, "success");
+      setDeactivatingEmployee(null);
       await loadAllData();
     } catch (err) {
       console.error(err);
       showToast("فشل تغيير حالة الموظف", "error");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleEditEmployee = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingEmployee) return;
+    try {
+      setEmpActionLoading(true);
+      await saveProfile({
+        id: editingEmployee.id,
+        full_name: editingEmployee.full_name.trim(),
+        phone: editingEmployee.phone?.trim() || undefined,
+        role: editingEmployee.role,
+        is_active: editingEmployee.is_active === true
+      });
+      showToast(`تم تحديث بيانات الموظف ${editingEmployee.full_name} بنجاح ✅`, "success");
+      setEditingEmployee(null);
+      await loadAllData();
+    } catch (err: any) {
+      console.error(err);
+      showToast(err.message || "فشل تحديث بيانات الموظف", "error");
+    } finally {
+      setEmpActionLoading(false);
     }
   };
 
@@ -2093,6 +2130,11 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                                 className="p-1 border border-slate-200 rounded-lg bg-white text-xs font-bold text-slate-700 focus:outline-none cursor-pointer"
                               >
                                 <option value="">غير محدد</option>
+                                {reviewingTask.assigned_to && !getEligibleCleaners(profiles).some(p => p.id === reviewingTask.assigned_to) && (
+                                  <option value={reviewingTask.assigned_to} disabled>
+                                    {(profiles.find(p => p.id === reviewingTask.assigned_to)?.full_name || reviewingTask.assigned_to) + " (معطل حالياً)"}
+                                  </option>
+                                )}
                                 {getEligibleCleaners(profiles).map(p => (
                                   <option key={p.id} value={p.id}>{p.full_name}</option>
                                 ))}
@@ -2820,13 +2862,13 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                           <th className="p-3">البريد الإلكتروني للتوثيق</th>
                           <th className="p-3">الدور والمسؤولية</th>
                           <th className="p-3">رقم الهاتف</th>
-                          <th className="p-3 text-center">الحالة</th>
-                          <th className="p-3 text-center">إدارة الوصول بالتوثيق</th>
+                          <th className="p-3 text-center">الحالة التشغيلية</th>
+                          <th className="p-3 text-center">الإجراءات والتوثيق</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
                         {profiles.map((p) => {
-                          const isActive = p.is_active !== false;
+                          const isActive = p.is_active === true;
                           const email = `${p.username.toLowerCase()}@narisops.com`;
                           const roleLabel = p.role === 'admin' ? 'مدير العمليات' : p.role === 'supervisor' ? 'مشرف جودة' : 'موظف تشغيل ونظافة';
                           const roleColor = p.role === 'admin' ? 'bg-purple-50 text-purple-700 border-purple-200' : p.role === 'supervisor' ? 'bg-indigo-50 text-indigo-700 border-indigo-200' : 'bg-amber-50 text-amber-700 border-amber-200';
@@ -2840,7 +2882,10 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                                   }`}>
                                     {p.full_name.slice(0, 2)}
                                   </div>
-                                  <span className="font-bold text-slate-800">{p.full_name}</span>
+                                  <div>
+                                    <span className="font-bold text-slate-800 block">{p.full_name}</span>
+                                    <span className="text-[10px] text-slate-400 font-mono">ID: {p.id}</span>
+                                  </div>
                                 </div>
                               </td>
                               <td className="p-3 font-mono font-bold text-slate-700">{p.username}</td>
@@ -2855,24 +2900,46 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                                 <button
                                   type="button"
                                   onClick={() => handleToggleEmployeeStatus(p)}
-                                  className={`text-[10px] font-bold px-2 py-1 rounded-full cursor-pointer border transition ${
+                                  className={`text-[10px] font-bold px-2.5 py-1 rounded-full cursor-pointer border transition flex items-center justify-center gap-1 mx-auto ${
                                     isActive 
-                                      ? "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100" 
-                                      : "bg-red-50 text-red-700 border-red-200 hover:bg-red-100"
+                                      ? "bg-emerald-50 text-emerald-700 border-emerald-300 hover:bg-emerald-100" 
+                                      : "bg-red-50 text-red-700 border-red-300 hover:bg-red-100"
                                   }`}
+                                  title={isActive ? "انقر لتعطيل الموظف" : "انقر لتفعيل الموظف"}
                                 >
-                                  {isActive ? "نشط ●" : "معطل ○"}
+                                  {isActive ? (
+                                    <>
+                                      <UserCheck className="w-3 h-3 text-emerald-600" />
+                                      <span>نشط ●</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <UserX className="w-3 h-3 text-red-600" />
+                                      <span>معطل ○</span>
+                                    </>
+                                  )}
                                 </button>
                               </td>
                               <td className="p-3 text-center">
-                                <button
-                                  type="button"
-                                  onClick={() => handleProvisionAccess(p)}
-                                  className="text-[10px] font-bold px-2.5 py-1.5 rounded-xl border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition inline-flex items-center gap-1.5 cursor-pointer shadow-sm"
-                                >
-                                  <ShieldCheck className="w-3.5 h-3.5 text-indigo-500" />
-                                  تهيئة وتوثيق الحساب
-                                </button>
+                                <div className="flex items-center justify-center gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingEmployee({ ...p })}
+                                    className="text-[10px] font-bold px-2 py-1.5 rounded-lg border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 transition inline-flex items-center gap-1 cursor-pointer shadow-sm"
+                                    title="تعديل بيانات الموظف"
+                                  >
+                                    <Edit2 className="w-3 h-3 text-slate-500" />
+                                    تعديل
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleProvisionAccess(p)}
+                                    className="text-[10px] font-bold px-2.5 py-1.5 rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition inline-flex items-center gap-1.5 cursor-pointer shadow-sm"
+                                  >
+                                    <ShieldCheck className="w-3.5 h-3.5 text-indigo-500" />
+                                    تهيئة التوثيق
+                                  </button>
+                                </div>
                               </td>
                             </tr>
                           );
@@ -4220,6 +4287,163 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
             >
               نسخ البيانات بالكامل للمشاركة 📋
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* EDIT EMPLOYEE MODAL */}
+      {editingEmployee && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 text-right" dir="rtl">
+          <div className="bg-white rounded-2xl w-full max-w-md p-6 shadow-2xl flex flex-col gap-4 border border-slate-100">
+            <div className="flex justify-between items-center border-b border-slate-100 pb-3">
+              <h3 className="text-sm font-extrabold text-slate-800 flex items-center gap-2">
+                <Edit2 className="w-4 h-4 text-indigo-600" />
+                <span>تعديل بيانات الموظف: {editingEmployee.full_name}</span>
+              </h3>
+              <button 
+                onClick={() => setEditingEmployee(null)} 
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleEditEmployee} className="flex flex-col gap-4 text-xs">
+              <div className="flex flex-col gap-1">
+                <label className="text-slate-600 font-bold block mb-1">الاسم الكامل للموظف:</label>
+                <input
+                  type="text"
+                  required
+                  value={editingEmployee.full_name}
+                  onChange={(e) => setEditingEmployee({ ...editingEmployee, full_name: e.target.value })}
+                  className="p-2.5 border border-slate-200 rounded-lg outline-none font-bold text-slate-800 w-full"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="flex flex-col gap-1">
+                  <label className="text-slate-600 block mb-1">اسم المستخدم (للقراءة فقط):</label>
+                  <input
+                    type="text"
+                    disabled
+                    value={editingEmployee.username}
+                    className="p-2.5 border border-slate-200 rounded-lg bg-slate-100 text-slate-500 font-mono w-full cursor-not-allowed text-left"
+                  />
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <label className="text-slate-600 block mb-1">رقم الهاتف:</label>
+                  <input
+                    type="text"
+                    placeholder="مثال: 010xxxxxxxx"
+                    value={editingEmployee.phone || ""}
+                    onChange={(e) => setEditingEmployee({ ...editingEmployee, phone: e.target.value })}
+                    className="p-2.5 border border-slate-200 rounded-lg outline-none font-mono text-slate-800 w-full text-left"
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-1 text-right">
+                <label className="text-slate-600 font-bold block mb-1">الدور والمسؤولية:</label>
+                <select
+                  value={editingEmployee.role}
+                  onChange={(e: any) => setEditingEmployee({ ...editingEmployee, role: e.target.value })}
+                  className="p-2.5 border border-slate-200 rounded-lg bg-white text-slate-800 w-full font-bold"
+                >
+                  <option value="cleaner">موظف تشغيل ونظافة (Cleaner)</option>
+                  <option value="supervisor">مشرف جودة (Supervisor)</option>
+                  <option value="admin">مدير العمليات (Admin)</option>
+                </select>
+              </div>
+
+              <div className="flex flex-col gap-1 text-right bg-slate-50 p-3 rounded-xl border border-slate-200">
+                <label className="text-slate-700 font-bold block mb-1">حالة التفعيل التشغيلية:</label>
+                <div className="flex items-center gap-3 mt-1">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="is_active_edit"
+                      checked={editingEmployee.is_active === true}
+                      onChange={() => setEditingEmployee({ ...editingEmployee, is_active: true })}
+                      className="text-emerald-600 focus:ring-emerald-500"
+                    />
+                    <span className="font-bold text-emerald-700">نشط (مؤهل للعمل والتوزيع)</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="is_active_edit"
+                      checked={editingEmployee.is_active !== true}
+                      onChange={() => setEditingEmployee({ ...editingEmployee, is_active: false })}
+                      className="text-red-600 focus:ring-red-500"
+                    />
+                    <span className="font-bold text-red-700">معطل (مستبعد من التوزيع)</span>
+                  </label>
+                </div>
+              </div>
+
+              <div className="flex gap-2 mt-2">
+                <button
+                  type="submit"
+                  disabled={empActionLoading}
+                  className="flex-1 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-400 text-white font-bold py-3 rounded-xl cursor-pointer transition shadow flex items-center justify-center gap-2"
+                >
+                  {empActionLoading ? "جاري الحفظ..." : "حفظ التعديلات ✅"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditingEmployee(null)}
+                  className="px-4 py-3 rounded-xl border border-slate-200 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold cursor-pointer transition"
+                >
+                  إلغاء
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* DEACTIVATION CONFIRMATION DIALOG */}
+      {deactivatingEmployee && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 text-right" dir="rtl">
+          <div className="bg-white rounded-2xl w-full max-w-md p-6 shadow-2xl flex flex-col gap-4 border border-red-100">
+            <div className="flex items-center gap-3 border-b border-slate-100 pb-3">
+              <div className="w-10 h-10 rounded-full bg-red-100 text-red-600 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-extrabold text-slate-800">تأكيد تعطيل حساب الموظف</h3>
+                <p className="text-[11px] text-slate-500 font-medium">يرجى قراءة تبعات التعطيل بعناية</p>
+              </div>
+            </div>
+
+            <div className="bg-red-50 border border-red-200 rounded-xl p-3.5 text-xs text-red-800 leading-relaxed font-semibold">
+              <p className="font-bold mb-1.5">هل أنت متأكد من تعطيل حساب الموظف <span className="underline font-extrabold">{deactivatingEmployee.full_name}</span>؟</p>
+              <ul className="list-disc list-inside space-y-1 text-[11px] text-red-700">
+                <li>سيتم استبعاد الموظف فوراً من أي توزيع تلقائي للمهام من الـ SOP.</li>
+                <li>لن يتم إسناد أي مهام جديدة له.</li>
+                <li>لن يتمكن الموظف من تسجيل الدخول إلى النظام حتى يتم تفعيله يدويًا.</li>
+                <li>السجلات والمهام التاريخية المكتملة السابقة ستبقى محفوظة وموثقة باسمه دون تغيير.</li>
+              </ul>
+            </div>
+
+            <div className="flex gap-2 mt-2">
+              <button
+                type="button"
+                onClick={() => executeToggleEmployeeStatus(deactivatingEmployee, false)}
+                className="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-2.5 rounded-xl cursor-pointer transition shadow flex items-center justify-center gap-1.5 text-xs"
+              >
+                <UserX className="w-4 h-4" />
+                تأكيد التعطيل الآن
+              </button>
+              <button
+                type="button"
+                onClick={() => setDeactivatingEmployee(null)}
+                className="px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold cursor-pointer transition text-xs"
+              >
+                تراجع
+              </button>
+            </div>
           </div>
         </div>
       )}
