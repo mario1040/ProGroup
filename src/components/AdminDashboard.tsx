@@ -234,7 +234,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       setLoading(true);
       setLoadingZones(true);
       setLoadingProfiles(true);
-      const [allProfiles, allZones, allKpis, allTemplates, allOps, allSwitches] = await Promise.all([
+      const results = await Promise.allSettled([
         getProfiles(),
         getZones(),
         getKpis(),
@@ -243,10 +243,24 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
         getDeviceSwitches()
       ]);
 
-      // Deduplicate task templates by title and zone
+      const [profilesResult, zonesResult, kpisResult, templatesResult, opsResult, switchesResult] = results;
+      const allProfiles = profilesResult.status === "fulfilled" ? profilesResult.value : [];
+      const allZones = zonesResult.status === "fulfilled" ? zonesResult.value : [];
+      const allKpis = kpisResult.status === "fulfilled" ? kpisResult.value : [];
+      const allTemplates = templatesResult.status === "fulfilled" ? templatesResult.value : [];
+      const allOps = opsResult.status === "fulfilled" ? opsResult.value : [];
+      const allSwitches = switchesResult.status === "fulfilled" ? switchesResult.value : [];
+
+      results.forEach((result, index) => {
+        if (result.status === "rejected") {
+          console.warn(`[AdminDashboard] Data source ${index} unavailable; using an empty section.`, result.reason);
+        }
+      });
+
+      // Deduplicate only by stable identity; same-title templates can be legitimate.
       const seenTpl = new Set<string>();
       const uniqueTemplates = allTemplates.filter(t => {
-        const key = `${(t.title || "").trim().toLowerCase()}_${t.zone_id || ""}`;
+        const key = t.id || t.task_code || `${(t.title || "").trim().toLowerCase()}_${t.zone_id || ""}`;
         if (seenTpl.has(key)) return false;
         seenTpl.add(key);
         return true;

@@ -1,8 +1,14 @@
 // src/lib/cloudinary.ts
 // Cloudinary upload client — replaces Firebase Storage for image uploads
 
-const CLOUDINARY_CLOUD_NAME = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME || "kcs6fxei";
-const CLOUDINARY_UPLOAD_PRESET = import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET || "naris_ops_unsigned";
+const CLOUDINARY_CLOUD_NAME = String(import.meta.env.VITE_CLOUDINARY_CLOUD_NAME || "").trim();
+const CLOUDINARY_UPLOAD_PRESET = String(import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET || "").trim();
+
+function assertCloudinaryConfiguration(): void {
+  if (!CLOUDINARY_CLOUD_NAME || !CLOUDINARY_UPLOAD_PRESET) {
+    throw new Error("إعدادات رفع الصور غير مكتملة. أضف VITE_CLOUDINARY_CLOUD_NAME وVITE_CLOUDINARY_UPLOAD_PRESET إلى بيئة التشغيل.");
+  }
+}
 
 export interface CloudinaryUploadResult {
   url: string;
@@ -41,6 +47,8 @@ export async function uploadToCloudinary(
   } else {
     file = blobOrBase64;
   }
+
+  assertCloudinaryConfiguration();
 
   const formData = new FormData();
   formData.append("file", file);
@@ -124,6 +132,7 @@ export function getCloudinaryUrl(
     if (options.format) t.push(`f_${options.format}`);
     if (t.length > 0) transformations = t.join(",") + "/";
   }
+  if (!CLOUDINARY_CLOUD_NAME) return "";
   return `https://res.cloudinary.com/${CLOUDINARY_CLOUD_NAME}/image/upload/${transformations}${publicId}`;
 }
 

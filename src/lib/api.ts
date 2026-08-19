@@ -2001,11 +2001,20 @@ export async function getTasksForRange(startDate: string, endDate: string): Prom
     });
   }
 
-  const [templates, zones, profiles] = await Promise.all([
+  const metadataResults = await Promise.allSettled([
     getTemplates(),
     getRawZones(),
     getProfiles()
   ]);
+  const templates = metadataResults[0].status === "fulfilled" ? metadataResults[0].value : [];
+  const zones = metadataResults[1].status === "fulfilled" ? metadataResults[1].value : [];
+  const profiles = metadataResults[2].status === "fulfilled" ? metadataResults[2].value : [];
+
+  metadataResults.forEach((result, index) => {
+    if (result.status === "rejected") {
+      console.warn(`[Tasks Range] Metadata source ${index} unavailable; returning tasks without that enrichment.`, result.reason);
+    }
+  });
 
   return instances.map((ti) => {
     const zone = zones.find((z) => z.id === ti.zone_id);
