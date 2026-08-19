@@ -60,6 +60,7 @@ import {
   KpiSummary,
   getLocalDateString,
   getTasksForRange,
+  normalizeTaskPhotoUrls,
   uploadPhoto,
   compressImage,
   saveZone
@@ -815,10 +816,10 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       setLoadingHistorical(true);
       setHasSearched(true);
       const allRangeTasks = await getTasksForRange(reportStartDate, reportEndDate);
-      const filtered = reportEmployeeId === "all" 
-        ? allRangeTasks 
+      const filtered = reportEmployeeId === "all"
+        ? allRangeTasks
         : allRangeTasks.filter(t => t.assigned_to === reportEmployeeId);
-      setHistoricalTasks(filtered);
+      setHistoricalTasks(filtered.map(normalizeTaskPhotoUrls));
       showToast(`تم استرجاع عدد ${filtered.length} مهمة بنجاح`, "success");
     } catch (err: any) {
       console.error(err);

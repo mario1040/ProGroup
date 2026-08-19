@@ -1047,6 +1047,23 @@ export function isEligibleCleaner(profile: Profile | Partial<Profile>): boolean 
   return profile.role === "cleaner" && profile.is_active === true;
 }
 
+/**
+ * Normalize legacy and current task photo schemas for every consumer.
+ * Current records use photo_before_url/photo_after_url, while older records
+ * may still store the same URLs under photos.before/photos.after.
+ * Current fields always win when both formats are present.
+ */
+export function normalizeTaskPhotoUrls<T extends TaskInstance>(task: T): T {
+  const beforeUrl = task.photo_before_url || task.photos?.before;
+  const afterUrl = task.photo_after_url || task.photos?.after;
+
+  return {
+    ...task,
+    photo_before_url: beforeUrl || undefined,
+    photo_after_url: afterUrl || undefined,
+  };
+}
+
 export function getEligibleCleaners(profiles: Profile[]): Profile[] {
   return profiles.filter((p) => isEligibleCleaner(p));
 }
@@ -1735,7 +1752,7 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
 
   const instances: TaskInstance[] = [];
   instancesSnap.forEach((docSnap) => {
-    instances.push(docSnap.data() as TaskInstance);
+    instances.push(normalizeTaskPhotoUrls(docSnap.data() as TaskInstance));
   });
 
   // Load profiles and zones early to support smart "Flexible Auto-Distribution"
@@ -1822,7 +1839,7 @@ export function listenTasksForDate(
     try {
       const instances: TaskInstance[] = [];
       snap.forEach((docSnap) => {
-        instances.push(docSnap.data() as TaskInstance);
+        instances.push(normalizeTaskPhotoUrls(docSnap.data() as TaskInstance));
       });
 
       const filteredInstances = userId
@@ -1901,7 +1918,7 @@ export async function getTasksForRange(startDate: string, endDate: string): Prom
   const instances: TaskInstance[] = [];
   if (instancesSnap) {
     instancesSnap.forEach((docSnap) => {
-      instances.push(docSnap.data() as TaskInstance);
+      instances.push(normalizeTaskPhotoUrls(docSnap.data() as TaskInstance));
     });
   }
 
@@ -2325,7 +2342,7 @@ export async function getKpis(dateRange?: { startDate?: string; endDate?: string
   const tasks: TaskInstance[] = [];
   if (instancesSnap) {
     instancesSnap.forEach((docSnap) => {
-      tasks.push(docSnap.data() as TaskInstance);
+      tasks.push(normalizeTaskPhotoUrls(docSnap.data() as TaskInstance));
     });
   }
 

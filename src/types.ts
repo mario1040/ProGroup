@@ -63,6 +63,11 @@ export interface TaskTemplate {
 
 export type SOPItem = TaskTemplate;
 
+export interface LegacyTaskPhotos {
+  before?: string;
+  after?: string;
+}
+
 export interface TaskInstance {
   id: string;
   template_id?: string;
@@ -83,6 +88,7 @@ export interface TaskInstance {
   requires_gps?: boolean;
   requires_signature?: boolean;
   photo_before_url?: string;
+  photos?: LegacyTaskPhotos;
   photo_before_taken_at?: string;
   photo_before_uploaded_at?: string;
   photo_before_size?: number;
