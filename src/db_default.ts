@@ -46,7 +46,7 @@ export function getSeededDB() {
         "role": "cleaner",
         "phone": "01122334455",
         "avatar_url": "",
-        "is_active": true,
+        "is_active": false,
         "shift_start": "14:00",
         "shift_end": "22:00",
         "work_days": [
@@ -122,7 +122,7 @@ export function getSeededDB() {
         "name": "Proxessory Station",
         "code": "SOP_PXSC17",
         "floor": "بدروم",
-        "responsible_employee_id": "p3",
+        "responsible_employee_id": "p2",
         "cover_image_url": "",
         "sort_order": 4
       },
@@ -132,7 +132,7 @@ export function getSeededDB() {
         "name": "دورات المياة الثلاثة",
         "code": "SOP_BR26",
         "floor": "1/ بدروم",
-        "responsible_employee_id": "p3",
+        "responsible_employee_id": "p2",
         "cover_image_url": "",
         "sort_order": 5
       },
@@ -142,7 +142,7 @@ export function getSeededDB() {
         "name": "Material Lab",
         "code": "SOP_MLB36",
         "floor": "1",
-        "responsible_employee_id": "p3",
+        "responsible_employee_id": "p2",
         "cover_image_url": "",
         "sort_order": 6
       },
@@ -152,7 +152,7 @@ export function getSeededDB() {
         "name": "VR Experience",
         "code": "SOP_VRE41",
         "floor": "1",
-        "responsible_employee_id": "p3",
+        "responsible_employee_id": "p2",
         "cover_image_url": "",
         "sort_order": 7
       },
@@ -162,7 +162,7 @@ export function getSeededDB() {
         "name": "Bult-IN Station",
         "code": "SOP_BIN47",
         "floor": "1",
-        "responsible_employee_id": "p3",
+        "responsible_employee_id": "p2",
         "cover_image_url": "",
         "sort_order": 8
       },
@@ -241,7 +241,7 @@ export function getSeededDB() {
     "requires_signature": false,
     "is_reopenable": true,
     "auto_escalate_if_late": true,
-    "default_assignee_id": "p3",
+    "default_assignee_id": "p2",
     "is_active": true
   },
   {
@@ -387,7 +387,7 @@ export function getSeededDB() {
     "requires_signature": false,
     "is_reopenable": true,
     "auto_escalate_if_late": true,
-    "default_assignee_id": "p3",
+    "default_assignee_id": "p2",
     "is_active": true
   },
   {
@@ -503,7 +503,7 @@ export function getSeededDB() {
     "requires_signature": false,
     "is_reopenable": true,
     "auto_escalate_if_late": true,
-    "default_assignee_id": "p3",
+    "default_assignee_id": "p2",
     "is_active": true
   },
   {
@@ -589,7 +589,7 @@ export function getSeededDB() {
     "requires_signature": false,
     "is_reopenable": true,
     "auto_escalate_if_late": true,
-    "default_assignee_id": "p3",
+    "default_assignee_id": "p2",
     "is_active": true
   },
   {
@@ -1044,7 +1044,7 @@ export function getSeededDB() {
     "requires_signature": false,
     "is_reopenable": true,
     "auto_escalate_if_late": false,
-    "default_assignee_id": "p3",
+    "default_assignee_id": "p2",
     "is_active": true
   },
   {
@@ -1095,7 +1095,7 @@ export function getSeededDB() {
     "requires_signature": false,
     "is_reopenable": true,
     "auto_escalate_if_late": false,
-    "default_assignee_id": "p3",
+    "default_assignee_id": "p2",
     "is_active": true
   },
   {
@@ -1173,7 +1173,7 @@ export function getSeededDB() {
     "requires_signature": false,
     "is_reopenable": true,
     "auto_escalate_if_late": false,
-    "default_assignee_id": "p3",
+    "default_assignee_id": "p2",
     "is_active": true
   },
   {
@@ -1334,7 +1334,7 @@ export function getSeededDB() {
     "requires_signature": false,
     "is_reopenable": true,
     "auto_escalate_if_late": false,
-    "default_assignee_id": "p3",
+    "default_assignee_id": "p2",
     "is_active": true
   }
     ],
@@ -1374,7 +1374,7 @@ export function getSeededDB() {
         "schedule_windows": [
           { "from": "09:00", "to": "22:00", "mode": "تشغيل مستمر هادئ 🎵" }
         ],
-        "responsible_employee_id": "p3",
+        "responsible_employee_id": "p2",
         "switch_codes": ["SWREC 012"],
         "is_active": true
       },
@@ -1410,7 +1410,7 @@ export function getSeededDB() {
         "schedule_windows": [
           { "from": "09:00", "to": "21:00", "mode": "تعطير مستمر تلقائي 🌸" }
         ],
-        "responsible_employee_id": "p3",
+        "responsible_employee_id": "p2",
         "switch_codes": ["SWREC 017"],
         "is_active": true
       }

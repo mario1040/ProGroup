@@ -352,4 +352,16 @@ describe('Naris Ops Strict Employee Status & Assignment Hardening Suite', () => 
     cacheState = null;
     expect(isFresh(2000)).toBe(false);
   });
+
+  it('TEST 18: Seed keeps Rehab inactive and removes future p3 assignment defaults', async () => {
+    const { getSeededDB } = await import('../db_default');
+    const seeded = getSeededDB();
+    const rehab = seeded.profiles.find((profile) => profile.id === 'p3');
+
+    expect(rehab?.role).toBe('cleaner');
+    expect(rehab?.is_active).toBe(false);
+    expect(seeded.zones.some((zone) => zone.responsible_employee_id === 'p3')).toBe(false);
+    expect(seeded.task_templates.some((template) => template.default_assignee_id === 'p3')).toBe(false);
+    expect(seeded.operational_tasks.some((task) => task.responsible_employee_id === 'p3')).toBe(false);
+  });
 });

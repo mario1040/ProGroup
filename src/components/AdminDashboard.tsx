@@ -53,6 +53,7 @@ import {
   saveTemplate, 
   deleteTemplate,
   saveProfile,
+  reassignPendingTasksFromInactiveCleaner,
   validateDatabase,
   DatabaseValidationReport,
   provisionEmployeeAuth,
@@ -188,6 +189,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   const [employeePhone, setEmployeePhone] = useState("");
   const [empActionLoading, setEmpActionLoading] = useState(false);
   const [editingEmployee, setEditingEmployee] = useState<Profile | null>(null);
+  const [editingEmployeeInitialActive, setEditingEmployeeInitialActive] = useState<boolean | null>(null);
   const [deactivatingEmployee, setDeactivatingEmployee] = useState<Profile | null>(null);
 
   // Main load function for master & configuration data
@@ -260,6 +262,16 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       setIsConfirmingDelete(false);
     }
   }, [isSopModalOpen, selectedTemplate]);
+
+  // Reset a task-board employee filter if its selected cleaner becomes inactive.
+  useEffect(() => {
+    if (
+      employeeFilter !== "all" &&
+      !getEligibleCleaners(profiles).some((profile) => profile.id === employeeFilter)
+    ) {
+      setEmployeeFilter("all");
+    }
+  }, [profiles, employeeFilter]);
 
   // Statistics Computations
   const statsCompleted = tasks.filter(t => t.status === "completed").length;
@@ -723,7 +735,24 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
         id: p.id,
         is_active: targetActive
       });
-      showToast(`تم ${targetActive ? "تفعيل" : "تعطيل"} حساب الموظف ${p.full_name} بنجاح ✅`, "success");
+
+      if (!targetActive && p.role === "cleaner") {
+        try {
+          const result = await reassignPendingTasksFromInactiveCleaner(p.id);
+          showToast(
+            `تم تعطيل حساب ${p.full_name} وإعادة إسناد ${result.updated} مهمة معلقة بنجاح ✅`,
+            "success"
+          );
+        } catch (repairError: any) {
+          console.error("Pending-task reassignment failed after deactivation:", repairError);
+          showToast(
+            `تم تعطيل حساب ${p.full_name}، لكن فشلت إعادة إسناد المهام المعلقة. راجع لوحة المهام فوراً.`,
+            "warning"
+          );
+        }
+      } else {
+        showToast(`تم ${targetActive ? "تفعيل" : "تعطيل"} حساب الموظف ${p.full_name} بنجاح ✅`, "success");
+      }
       setDeactivatingEmployee(null);
       await loadAllData();
     } catch (err) {
@@ -739,13 +768,18 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
     if (!editingEmployee) return;
     try {
       setEmpActionLoading(true);
-      await saveProfile({
+      // Unrelated edits must not carry a potentially stale activity flag from another tab.
+      // Include is_active only when the user explicitly changed the status in this editor.
+      const profileUpdate: Partial<Profile> = {
         id: editingEmployee.id,
         full_name: editingEmployee.full_name.trim(),
         phone: editingEmployee.phone?.trim() || undefined,
-        role: editingEmployee.role,
-        is_active: editingEmployee.is_active === true
-      });
+        role: editingEmployee.role
+      };
+      if (editingEmployeeInitialActive !== null && editingEmployee.is_active !== editingEmployeeInitialActive) {
+        profileUpdate.is_active = editingEmployee.is_active === true;
+      }
+      await saveProfile(profileUpdate);
       showToast(`تم تحديث بيانات الموظف ${editingEmployee.full_name} بنجاح ✅`, "success");
       setEditingEmployee(null);
       await loadAllData();
@@ -1458,7 +1492,9 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                             <div className="mt-4 border-t border-slate-100 pt-3 flex justify-between items-center text-[10px]">
                               <span className="text-slate-500 font-bold flex items-center gap-1">
                                 <User className="w-3.5 h-3.5 text-slate-400" />
-                                {zone.responsible_employee?.full_name || "عفاف أحمد"}
+                                {zone.responsible_employee?.is_active === true
+                                  ? zone.responsible_employee.full_name
+                                  : "لا يوجد مسؤول نشط"}
                               </span>
                               <span className={`py-0.5 px-2 rounded font-black ${badgeClass}`}>
                                 {doneCount} / {totalCount} مهام
@@ -1833,7 +1869,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                         className="p-2 border border-slate-200 rounded-lg bg-white"
                       >
                         <option value="all">جميع الموظفين</option>
-                        {profiles.filter(p => p.role === "cleaner").map(p => (
+                        {getEligibleCleaners(profiles).map(p => (
                           <option key={p.id} value={p.id}>{p.full_name}</option>
                         ))}
                       </select>
@@ -1897,6 +1933,11 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                                   className="p-1.5 text-xs border border-slate-200 rounded-lg bg-white outline-none font-bold text-slate-700 cursor-pointer focus:border-slate-400"
                                 >
                                   <option value="">غير محدد</option>
+                                  {task.assigned_to && task.assignee && !isEligibleCleaner(task.assignee) && (
+                                    <option value={task.assigned_to} disabled>
+                                      {task.assignee.full_name} (غير نشطة)
+                                    </option>
+                                  )}
                                   {getEligibleCleaners(profiles).map(p => (
                                     <option key={p.id} value={p.id}>{p.full_name}</option>
                                   ))}
@@ -2815,7 +2856,11 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                           <div className="flex items-center gap-4 self-end md:self-auto">
                             <div className="text-left text-xs">
                               <span className="text-[10px] text-slate-400 block font-bold">المشغل المسؤول:</span>
-                              <span className="font-semibold text-slate-700">{ot.responsible_employee?.full_name || "عفاف أحمد"}</span>
+                              <span className="font-semibold text-slate-700">
+                                {ot.responsible_employee?.is_active === true
+                                  ? ot.responsible_employee.full_name
+                                  : "لا يوجد مسؤول نشط"}
+                              </span>
                             </div>
                             
                             <span className="bg-emerald-100 text-emerald-800 font-bold text-[10px] py-1 px-3 rounded-full border border-emerald-200">
@@ -2924,7 +2969,10 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                                 <div className="flex items-center justify-center gap-2">
                                   <button
                                     type="button"
-                                    onClick={() => setEditingEmployee({ ...p })}
+                                    onClick={() => {
+                                     setEditingEmployee({ ...p });
+                                     setEditingEmployeeInitialActive(p.is_active === true);
+                                   }}
                                     className="text-[10px] font-bold px-2 py-1.5 rounded-lg border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 transition inline-flex items-center gap-1 cursor-pointer shadow-sm"
                                     title="تعديل بيانات الموظف"
                                   >
