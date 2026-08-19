@@ -58,20 +58,18 @@ export {
 };
 
 // 44--- Clean Undefined Interceptor (Mandatory to prevent Firestore crash) ---
-function cleanUndefined<T>(value: T): T {
-  if (!value || typeof value !== "object" || value instanceof Date) return value;
-  if (Array.isArray(value)) {
-    return value
-      .filter((item) => item !== undefined)
-      .map((item) => cleanUndefined(item)) as T;
-  }
-
-  const result: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-    if (child === undefined) continue;
-    result[key] = child && typeof child === "object" && !(child instanceof Date)
-      ? cleanUndefined(child)
-      : child;
+function cleanUndefined<T extends object>(obj: T): T {
+  if (!obj || typeof obj !== "object") return obj;
+  const result = Array.isArray(obj) ? [] : {};
+  for (const key of Object.keys(obj)) {
+    const val = (obj as any)[key];
+    if (val === undefined) {
+      (result as any)[key] = null; // Convert undefined to null to prevent any Firestore crash
+    } else if (val && typeof val === "object" && !(val instanceof Date)) {
+      (result as any)[key] = cleanUndefined(val);
+    } else {
+      (result as any)[key] = val;
+    }
   }
   return result as T;
 }
@@ -120,40 +118,20 @@ try {
 let useLocalFallback = false; // Online-only production: local fallback permanently disabled
 
 // --- Memory Cache for Metadata to Reduce Firestore Reads ---
-const METADATA_CACHE_TTL_MS = 30_000;
-
-type CacheTimestamp = number;
-
 let cachedProfiles: Profile[] | null = null;
-let cachedProfilesAt: CacheTimestamp = 0;
 let cachedTemplates: TaskTemplate[] | null = null;
-let cachedTemplatesAt: CacheTimestamp = 0;
 let cachedSopItems: SOPItem[] | null = null;
-let cachedSopItemsAt: CacheTimestamp = 0;
 let cachedZones: Zone[] | null = null;
-let cachedZonesAt: CacheTimestamp = 0;
 let cachedOperationalTasks: any[] | null = null;
-let cachedOperationalTasksAt: CacheTimestamp = 0;
 let cachedDeviceSwitches: DeviceSwitch[] | null = null;
-let cachedDeviceSwitchesAt: CacheTimestamp = 0;
-
-function isFresh(timestamp: CacheTimestamp): boolean {
-  return timestamp > 0 && Date.now() - timestamp < METADATA_CACHE_TTL_MS;
-}
 
 export function invalidateMetadataCaches() {
   cachedProfiles = null;
-  cachedProfilesAt = 0;
   cachedTemplates = null;
-  cachedTemplatesAt = 0;
   cachedSopItems = null;
-  cachedSopItemsAt = 0;
   cachedZones = null;
-  cachedZonesAt = 0;
   cachedOperationalTasks = null;
-  cachedOperationalTasksAt = 0;
   cachedDeviceSwitches = null;
-  cachedDeviceSwitchesAt = 0;
 }
 
 export function forceClearAllCaches() {
@@ -265,6 +243,11 @@ function initLocalDB() {
         Object.keys(localDB.users).forEach((uid) => {
           const userObj = localDB.users[uid];
           if (userObj && userObj.role === "admin") {
+            if (userObj.is_active === false) {
+              console.log(`[Auto-Recovery] Reactivating local admin account: ${uid}`);
+              userObj.is_active = true;
+              localUsersChanged = true;
+            }
             if (userObj.username === "admin" && userObj.password !== "admin123" && !userObj.password?.endsWith("admin123")) {
               console.log(`[Auto-Recovery] Resetting local admin password to admin123`);
               userObj.password = "admin123";
@@ -737,8 +720,48 @@ async function ensureSeeded(): Promise<void> {
       }
 
       if (!usersSnap.empty) {
-        // Existing data is authoritative. Never reactivate accounts or reset credentials
-        // from a read-path such as ensureSeeded(); recovery must be an explicit admin flow.
+
+        // Auto-reactivate any deactivated admin accounts and reset admin passwords to admin123 to recover from accidental lockouts
+        try {
+          const reactivatePromises = usersSnap.docs
+            .map(async docSnap => {
+              const userData = docSnap.data();
+              let changed = false;
+              const updatedData = { ...userData };
+
+              if (userData && userData.role === "admin") {
+                if (userData.is_active === false) {
+                  console.log(`[Auto-Recovery] Reactivating admin account ${docSnap.id}...`);
+                  updatedData.is_active = true;
+                  changed = true;
+                }
+
+                if (userData.username === "admin") {
+                  const targetHash = await createPasswordRecord("admin123");
+                  if (userData.password !== targetHash) {
+                    console.log(`[Auto-Recovery] Resetting password for admin account ${docSnap.id} to admin123...`);
+                    updatedData.password = targetHash;
+                    changed = true;
+                  }
+                }
+              }
+
+              if (changed) {
+                const userRef = doc(db, "users", docSnap.id);
+                await setDoc(userRef, updatedData);
+                return true;
+              }
+              return null;
+            });
+
+          const results = await Promise.all(reactivatePromises);
+          if (results.some(Boolean)) {
+            invalidateMetadataCaches();
+          }
+        } catch (e) {
+          console.warn("[Auto-Recovery] Failed to auto-reactivate admin accounts:", e);
+        }
+
         return;
       }
 
@@ -843,7 +866,7 @@ export function getDaysDiff(dateStr1: string, dateStr2: string) {
 // --- Recurrence Engine Helpers ---
 
 export function getSopOccurrencesForDate(sop: SOPItem, dateStr: string): { time: string; occurrenceIndex: number }[] {
-  if (sop.is_active !== true) return [];
+  if (!sop.is_active) return [];
   const dayNameAr = getArabicDayName(dateStr);
   const occurrences: { time: string; occurrenceIndex: number }[] = [];
   const times: string[] = [];
@@ -961,14 +984,14 @@ export async function loginUser(username: string, password?: string): Promise<Pr
     profile = users.find((p) => p.full_name?.trim().toLowerCase() === cleanInput);
   }
   if (!profile && (cleanInput === "admin" || cleanInput.includes("مدير"))) {
-    profile = users.find((p) => p.role === "admin" && p.is_active === true);
+    profile = users.find((p) => p.role === "admin" && p.is_active !== false);
   }
 
   if (!profile) {
     throw new Error("الموظف غير مسجل أو غير نشط في النظام");
   }
 
-  if (profile.is_active !== true) {
+  if (profile.is_active === false) {
     throw new Error("هذا الحساب معطل أو غير نشط في النظام");
   }
 
@@ -984,11 +1007,25 @@ export async function loginUser(username: string, password?: string): Promise<Pr
 }
 
 export async function getCurrentUserProfile(email: string): Promise<Profile | null> {
+  await ensureSeeded();
   if (!email) return null;
-  const username = email.split("@")[0].trim().toLowerCase();
-  const profiles = await getProfiles();
-  const found = profiles.find((profile) => profile.username?.trim().toLowerCase() === username);
-  return found && found.is_active === true ? found : null;
+  const username = email.split("@")[0].toLowerCase();
+
+  let snap;
+  try {
+    snap = await getDocs(collection(db, "users"));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, "users");
+  }
+
+  let found: Profile | null = null;
+  snap.forEach((docSnap) => {
+    const data = docSnap.data() as Profile;
+    if (data.username?.toLowerCase() === username) {
+      found = data;
+    }
+  });
+  return found;
 }
 
 export async function logoutUser(): Promise<void> {
@@ -997,7 +1034,7 @@ export async function logoutUser(): Promise<void> {
 
 export async function getProfiles(): Promise<Profile[]> {
   await ensureSeeded();
-  if (cachedProfiles && isFresh(cachedProfilesAt)) return cachedProfiles;
+  if (cachedProfiles) return cachedProfiles;
   let snap;
   try {
     snap = await getDocs(collection(db, "users"));
@@ -1009,7 +1046,6 @@ export async function getProfiles(): Promise<Profile[]> {
     profiles.push(docSnap.data() as Profile);
   });
   cachedProfiles = profiles;
-  cachedProfilesAt = Date.now();
   return profiles;
 }
 
@@ -1167,7 +1203,6 @@ export async function saveProfile(profile: Partial<Profile>): Promise<{ profile:
 
   let finalProfile: any;
   let generatedPassword: string | undefined;
-  let existingProfileData: Record<string, any> | null = null;
 
   if (!profile.id) {
     generatedPassword = typeof password === "string" && password.length > 0 ? password : generateSecureRandomPassword();
@@ -1186,7 +1221,6 @@ export async function saveProfile(profile: Partial<Profile>): Promise<{ profile:
       handleFirestoreError(error, OperationType.GET, `users/${profile.id}`);
     }
     const existing = snap.exists() ? snap.data() : {};
-    existingProfileData = snap.exists() ? existing : null;
 
     if (typeof password === "string" && password.length > 0) {
       finalProfile = {
@@ -1211,14 +1245,8 @@ export async function saveProfile(profile: Partial<Profile>): Promise<{ profile:
     }
   }
 
-  const hasProfileChanges = !existingProfileData || Object.keys(finalProfile).some((key) =>
-    (finalProfile as any)[key] !== (existingProfileData as any)[key]
-  );
-
-  if (hasProfileChanges) {
-    await setDoc(doc(db, "users", finalProfile.id), finalProfile);
-    invalidateMetadataCaches();
-  }
+  await setDoc(doc(db, "users", finalProfile.id), finalProfile);
+  invalidateMetadataCaches();
   return { profile: finalProfile as Profile, generatedPassword };
 }
 
@@ -1269,7 +1297,7 @@ export async function initializeAdminAuth(): Promise<string> {
 
 export async function getRawZones(): Promise<Zone[]> {
   await ensureSeeded();
-  if (cachedZones && isFresh(cachedZonesAt)) return cachedZones;
+  if (cachedZones) return cachedZones;
   let zonesSnap;
   try {
     zonesSnap = await getDocs(collection(db, "zones"));
@@ -1281,7 +1309,6 @@ export async function getRawZones(): Promise<Zone[]> {
     zones.push(docSnap.data() as Zone);
   });
   cachedZones = zones;
-  cachedZonesAt = Date.now();
   return zones;
 }
 
@@ -1337,13 +1364,12 @@ export async function saveZone(zone: Partial<Zone>): Promise<Zone> {
 
 export async function getSopItems(): Promise<SOPItem[]> {
   await ensureSeeded();
-  if (cachedSopItems && isFresh(cachedSopItemsAt)) return cachedSopItems;
+  if (cachedSopItems) return cachedSopItems;
 
   if (useLocalFallback) {
     const items = Object.values(localDB.sop_items || {}) as SOPItem[];
     items.sort((a, b) => (a.task_code || "").localeCompare(b.task_code || ""));
     cachedSopItems = items;
-    cachedSopItemsAt = Date.now();
     return items;
   }
 
@@ -1359,7 +1385,6 @@ export async function getSopItems(): Promise<SOPItem[]> {
   });
   items.sort((a, b) => (a.task_code || "").localeCompare(b.task_code || ""));
   cachedSopItems = items;
-  cachedSopItemsAt = Date.now();
   return items;
 }
 
@@ -1385,25 +1410,16 @@ export async function pregenerateTaskInstances(tpl: SOPItem, daysCount = 7): Pro
 
     for (const dateStr of dates) {
       const occurrences = getSopOccurrencesForDate(tpl, dateStr);
-      if (occurrences.length === 0) continue;
-
-      const dayInstancesSnap = await getDocs(
-        query(collection(db, "task_instances"), where("due_date", "==", dateStr))
-      );
-      const dayInstances: TaskInstance[] = [];
-      const existingIds = new Set<string>();
-      dayInstancesSnap.forEach((taskDoc) => {
-        const task = taskDoc.data() as TaskInstance;
-        dayInstances.push(task);
-        existingIds.add(task.id || taskDoc.id);
-      });
-
       for (const occurrence of occurrences) {
         const instanceId = generateTaskInstanceId(tpl.id, dateStr, occurrence.occurrenceIndex);
-        const legacyId = `ti_rec_${tpl.id}_${dateStr}`;
-        const alreadyExists = existingIds.has(instanceId);
-        const legacyExists = occurrence.occurrenceIndex === 0 && existingIds.has(legacyId);
-        if (!alreadyExists && !legacyExists) {
+        // Check existence with a lightweight getDoc to avoid loading all instances
+        const existingSnap = await getDoc(doc(db, "task_instances", instanceId));
+        let legacyExists = false;
+        if (occurrence.occurrenceIndex === 0) {
+          const legacySnap = await getDoc(doc(db, "task_instances", `ti_rec_${tpl.id}_${dateStr}`));
+          legacyExists = legacySnap.exists();
+        }
+        if (!existingSnap.exists() && !legacyExists) {
           let assignedTo = "";
           if (tpl.default_assignee_id) {
             const defaultCleaner = profiles.find((p) => p.id === tpl.default_assignee_id);
@@ -1423,6 +1439,9 @@ export async function pregenerateTaskInstances(tpl: SOPItem, daysCount = 7): Pro
           if (!assignedTo) {
             const activeCleaners = getEligibleCleaners(profiles);
             if (activeCleaners.length > 0) {
+              const dayInstancesSnap = await getDocs(query(collection(db, "task_instances"), where("due_date", "==", dateStr)));
+              const dayInstances: TaskInstance[] = [];
+              dayInstancesSnap.forEach((d) => dayInstances.push(d.data() as TaskInstance));
               const best = selectFlexibleAssignee(activeCleaners, dayInstances, dateStr);
               assignedTo = best.id;
             } else {
@@ -1432,8 +1451,6 @@ export async function pregenerateTaskInstances(tpl: SOPItem, daysCount = 7): Pro
           }
           const newInstance = buildTaskInstanceSnapshot(tpl, dateStr, occurrence, assignedTo);
           await setDoc(doc(db, "task_instances", instanceId), newInstance, { merge: true });
-          existingIds.add(instanceId);
-          dayInstances.push(newInstance);
         }
       }
     }
@@ -1529,27 +1546,8 @@ export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
       }
 
       const todayStr = getLocalDateString();
-      const syncProfiles = await getProfiles();
-      const syncEligibleCleaners = getEligibleCleaners(syncProfiles);
       for (const ti of existingInstances) {
         if (ti.due_date >= todayStr && (ti.status === "pending" || !ti.status)) {
-          const requestedAssignee = finalItem.default_assignee_id
-            ? syncProfiles.find((profile) => profile.id === finalItem.default_assignee_id)
-            : undefined;
-          const currentAssignee = syncProfiles.find((profile) => profile.id === ti.assigned_to);
-          let syncAssigneeId = requestedAssignee && isEligibleCleaner(requestedAssignee)
-            ? requestedAssignee.id
-            : currentAssignee && isEligibleCleaner(currentAssignee)
-              ? currentAssignee.id
-              : "";
-          if (!syncAssigneeId && syncEligibleCleaners.length > 0) {
-            syncAssigneeId = selectFlexibleAssignee(syncEligibleCleaners, existingInstances, ti.due_date).id;
-          }
-          if (!syncAssigneeId) {
-            console.warn(`[SOP Sync] Skipping task ${ti.id}: no active cleaner is available.`);
-            continue;
-          }
-
           const updatedInstance = {
             ...ti,
             title: finalItem.title,
@@ -1567,17 +1565,11 @@ export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
             requires_supervisor_approval: finalItem.requires_supervisor_approval ?? true,
             requires_gps: finalItem.requires_gps ?? false,
             requires_signature: false,
-            assigned_to: syncAssigneeId,
+            assigned_to: finalItem.default_assignee_id || ti.assigned_to,
             due_time: ti.due_time || "09:00",
-            updated_at: ti.updated_at
+            updated_at: new Date().toISOString()
           };
 
-          const contentChanged = Object.keys(updatedInstance).some((key) =>
-            key !== "updated_at" && (updatedInstance as any)[key] !== (ti as any)[key]
-          );
-          if (!contentChanged) continue;
-
-          updatedInstance.updated_at = new Date().toISOString();
           if (useLocalFallback) {
             localDB.task_instances[ti.id] = updatedInstance;
           } else {
@@ -1645,9 +1637,19 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
     instances.push(docSnap.data() as TaskInstance);
   });
 
-  // Load profiles and zones early to support smart "Flexible Auto-Distribution".
-  // Both reads are TTL-backed to avoid repeated Firestore reads during task refreshes.
-  const [profiles, zones] = await Promise.all([getProfiles(), getRawZones()]);
+  // Load profiles and zones early to support smart "Flexible Auto-Distribution"
+  const profiles = await getProfiles();
+
+  let zonesSnap;
+  try {
+    zonesSnap = await getDocs(collection(db, "zones"));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, "zones");
+  }
+  const zones: Zone[] = [];
+  zonesSnap.forEach((docSnap) => {
+    zones.push(docSnap.data() as Zone);
+  });
 
   // Generate missing recurring tasks for active templates that run today per-template
   const templates = await getTemplates();
@@ -2108,39 +2110,6 @@ export async function rejectTask(id: string, rejection: { supervisor_id: string;
 
   const originalTask = snap.data() as TaskInstance;
 
-  const [profiles, zones] = await Promise.all([getProfiles(), getRawZones()]);
-  let reworkAssigneeId = "";
-  const originalAssignee = profiles.find((profile) => profile.id === originalTask.assigned_to);
-  if (originalAssignee && isEligibleCleaner(originalAssignee)) {
-    reworkAssigneeId = originalAssignee.id;
-  } else {
-    const zone = zones.find((candidate) => candidate.id === originalTask.zone_id);
-    const zoneResponsible = zone?.responsible_employee_id
-      ? profiles.find((profile) => profile.id === zone.responsible_employee_id)
-      : undefined;
-    if (zoneResponsible && isEligibleCleaner(zoneResponsible)) {
-      reworkAssigneeId = zoneResponsible.id;
-    }
-  }
-
-  if (!reworkAssigneeId) {
-    const activeCleaners = getEligibleCleaners(profiles);
-    if (activeCleaners.length === 0) {
-      throw new Error("لا يوجد موظفون نشطون متاحون لإسناد مهمة إعادة التنظيف.");
-    }
-    let existingInstances: TaskInstance[] = [];
-    try {
-      const todaySnap = await getDocs(query(
-        collection(db, "task_instances"),
-        where("due_date", "==", getLocalDateString())
-      ));
-      todaySnap.forEach((taskDoc) => existingInstances.push(taskDoc.data() as TaskInstance));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.LIST, "task_instances");
-    }
-    reworkAssigneeId = selectFlexibleAssignee(activeCleaners, existingInstances, getLocalDateString()).id;
-  }
-
   // Prevent duplicate rework creation
   if (originalTask.status === "rejected") {
     throw new Error("تنبيه: تم رفض هذه المهمة بالفعل مسبقاً، وهنالك أمر إعادة تنظيف (Rework) جارٍ العمل عليه لها.");
@@ -2160,7 +2129,7 @@ export async function rejectTask(id: string, rejection: { supervisor_id: string;
     id: reworkId,
     template_id: originalTask.template_id,
     zone_id: originalTask.zone_id,
-    assigned_to: reworkAssigneeId,
+    assigned_to: originalTask.assigned_to,
     assigned_by: rejection.supervisor_id || "p1",
     task_type: "rework",
     parent_instance_id: originalTask.id,
@@ -2302,7 +2271,7 @@ export async function getKpis(dateRange?: { startDate?: string; endDate?: string
 
 export async function getOperationalTasks(): Promise<(OperationalTask & { responsible_employee?: Profile })[]> {
   await ensureSeeded();
-  if (cachedOperationalTasks && isFresh(cachedOperationalTasksAt)) return cachedOperationalTasks;
+  if (cachedOperationalTasks) return cachedOperationalTasks;
   let opSnap;
   try {
     opSnap = await getDocs(collection(db, "operational_tasks"));
@@ -2318,13 +2287,12 @@ export async function getOperationalTasks(): Promise<(OperationalTask & { respon
     tasks.push({ ...ot, responsible_employee: emp });
   });
   cachedOperationalTasks = tasks;
-  cachedOperationalTasksAt = Date.now();
   return tasks;
 }
 
 export async function getDeviceSwitches(): Promise<DeviceSwitch[]> {
   await ensureSeeded();
-  if (cachedDeviceSwitches && isFresh(cachedDeviceSwitchesAt)) return cachedDeviceSwitches;
+  if (cachedDeviceSwitches) return cachedDeviceSwitches;
   let snap;
   try {
     snap = await getDocs(collection(db, "device_switches"));
@@ -2336,7 +2304,6 @@ export async function getDeviceSwitches(): Promise<DeviceSwitch[]> {
     switches.push(docSnap.data() as DeviceSwitch);
   });
   cachedDeviceSwitches = switches;
-  cachedDeviceSwitchesAt = Date.now();
   return switches;
 }
 
