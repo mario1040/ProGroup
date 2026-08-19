@@ -239,28 +239,24 @@ function initLocalDB() {
         }
       }
 
-      // Auto-recovery for deactivated admin accounts in local storage fallback
+      // Reconcile only profiles explicitly marked inactive in the current seed.
+      // Never auto-reactivate an existing account or reset a production password.
       let localUsersChanged = false;
-      if (localDB.users) {
-        Object.keys(localDB.users).forEach((uid) => {
-          const userObj = localDB.users[uid];
-          if (userObj && userObj.role === "admin") {
-            if (userObj.is_active === false) {
-              console.log(`[Auto-Recovery] Reactivating local admin account: ${uid}`);
-              userObj.is_active = true;
-              localUsersChanged = true;
-            }
-            if (userObj.username === "admin" && userObj.password !== "admin123" && !userObj.password?.endsWith("admin123")) {
-              console.log(`[Auto-Recovery] Resetting local admin password to admin123`);
-              userObj.password = "admin123";
-              localUsersChanged = true;
-            }
-          }
-        });
+      const seededInactiveProfiles = seeded.profiles.filter((profile) => profile.is_active === false);
+      for (const seededProfile of seededInactiveProfiles) {
+        const localEntry = Object.values(localDB.users).find((userObj: any) =>
+          userObj?.id === seededProfile.id ||
+          userObj?.username?.trim().toLowerCase() === seededProfile.username.trim().toLowerCase()
+        );
+        if (localEntry && localEntry.is_active !== false) {
+          console.warn(`[Profile Migration] Marking seeded inactive profile as inactive: ${seededProfile.username}`);
+          localEntry.is_active = false;
+          localUsersChanged = true;
+        }
       }
 
       if (localTemplatesChanged || localUsersChanged) {
-        console.log("[Local DB] Auto-purged old/obsolete templates and/or recovered locked out admin accounts.");
+        console.log("[Local DB] Auto-purged obsolete templates and reconciled seeded inactive profiles.");
         try {
           localStorage.setItem("narisops_local_db", JSON.stringify(localDB));
         } catch (e) {
@@ -723,45 +719,33 @@ async function ensureSeeded(): Promise<void> {
 
       if (!usersSnap.empty) {
 
-        // Auto-reactivate any deactivated admin accounts and reset admin passwords to admin123 to recover from accidental lockouts
+        // One-way reconciliation for profiles explicitly inactive in the current seed.
+        // Never reactivate an existing account and never reset a production password here.
         try {
-          const reactivatePromises = usersSnap.docs
-            .map(async docSnap => {
-              const userData = docSnap.data();
-              let changed = false;
-              const updatedData = { ...userData };
+          const seededInactiveProfiles = getSeededDB().profiles.filter((profile) => profile.is_active === false);
+          const inactiveProfileMigrations = usersSnap.docs.map(async (docSnap) => {
+            const userData = docSnap.data() as Profile;
+            const seededInactiveProfile = seededInactiveProfiles.find((profile) =>
+              profile.id === docSnap.id ||
+              profile.username.trim().toLowerCase() === userData.username?.trim().toLowerCase()
+            );
 
-              if (userData && userData.role === "admin") {
-                if (userData.is_active === false) {
-                  console.log(`[Auto-Recovery] Reactivating admin account ${docSnap.id}...`);
-                  updatedData.is_active = true;
-                  changed = true;
-                }
+            if (seededInactiveProfile && userData.is_active !== false) {
+              console.warn(`[Profile Migration] Marking profile inactive: ${seededInactiveProfile.username}`);
+              await firebaseUpdateDoc(firebaseDoc(db, "users", docSnap.id), {
+                is_active: false
+              });
+              return true;
+            }
+            return false;
+          });
 
-                if (userData.username === "admin") {
-                  const targetHash = await createPasswordRecord("admin123");
-                  if (userData.password !== targetHash) {
-                    console.log(`[Auto-Recovery] Resetting password for admin account ${docSnap.id} to admin123...`);
-                    updatedData.password = targetHash;
-                    changed = true;
-                  }
-                }
-              }
-
-              if (changed) {
-                const userRef = doc(db, "users", docSnap.id);
-                await setDoc(userRef, updatedData);
-                return true;
-              }
-              return null;
-            });
-
-          const results = await Promise.all(reactivatePromises);
-          if (results.some(Boolean)) {
+          const migrated = await Promise.all(inactiveProfileMigrations);
+          if (migrated.some(Boolean)) {
             invalidateMetadataCaches();
           }
-        } catch (e) {
-          console.warn("[Auto-Recovery] Failed to auto-reactivate admin accounts:", e);
+        } catch (migrationError) {
+          console.warn("[Profile Migration] Failed to reconcile seeded inactive profiles:", migrationError);
         }
 
         return;
