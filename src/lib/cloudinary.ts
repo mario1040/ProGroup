@@ -65,11 +65,20 @@ export async function uploadToCloudinary(
   );
 
   if (!response.ok) {
-    const errorData = await response.json();
-    throw new Error(`Cloudinary upload failed: ${errorData.error?.message || response.statusText}`);
+    let message = response.statusText || "تعذر رفع الصورة";
+    try {
+      const errorData = await response.json();
+      message = errorData?.error?.message || message;
+    } catch {
+      // Keep the HTTP status message when Cloudinary returns a non-JSON error.
+    }
+    throw new Error(`Cloudinary upload failed: ${message}`);
   }
 
   const data = await response.json();
+  if (!data?.secure_url || !data?.public_id) {
+    throw new Error("استجابة Cloudinary غير مكتملة ولم يتم حفظ رابط الصورة بأمان.");
+  }
   return {
     url: data.url,
     secure_url: data.secure_url,
@@ -159,5 +168,5 @@ export async function imageUrlToDataUrl(url: string): Promise<string | null> {
 
 export function isUsableImageUrl(url: unknown): url is string {
   return typeof url === "string" &&
-    (url.startsWith("https://") || url.startsWith("http://") || url.startsWith("data:image/"));
+    (url.startsWith("https://") || url.startsWith("data:image/"));
 }

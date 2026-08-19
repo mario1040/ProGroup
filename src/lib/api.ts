@@ -27,7 +27,7 @@ import {
   UploadTask,
   deleteObject
 } from "firebase/storage";
-import { uploadToCloudinary } from "./cloudinary";
+import { isUsableImageUrl, uploadToCloudinary } from "./cloudinary";
 import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
@@ -1071,9 +1071,7 @@ export function getTaskPhotoUrls(task: TaskInstance): { before?: string; after?:
     const candidate = values.find((value): value is string => {
       if (typeof value !== "string") return false;
       const normalized = value.trim();
-      return normalized.startsWith("https://") ||
-        normalized.startsWith("http://") ||
-        normalized.startsWith("data:image/");
+      return isUsableImageUrl(normalized);
     });
     return candidate?.trim();
   };
@@ -2122,7 +2120,7 @@ function validateTaskInstanceUpdate(merged: TaskInstance, updates: Partial<TaskI
   }
 
   // Prevent lifting After photo before Before photo
-  if (updates.photo_after_url && requiresBefore && !merged.photo_before_url) {
+    if (getTaskPhotoUrls(merged).after && requiresBefore && !getTaskPhotoUrls(merged).before) {
     throw new Error("خطأ حماية: لا يمكن رفع صورة الإثبات بعد العمل قبل رفع صورة الإثبات قبل العمل.");
   }
 
@@ -2197,7 +2195,7 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
       : (template ? template.requires_photo_before : true);
     if (requiresBefore && (updates.status === "in_progress" || updates.status === "completed")) {
       const beforeUrl = getTaskPhotoUrls(merged).before;
-      if (!beforeUrl || beforeUrl.trim() === "" || beforeUrl.startsWith("data:")) {
+      if (!beforeUrl || !isUsableImageUrl(beforeUrl)) {
         throw new Error("خطأ حماية: لا يمكن بدء أو إكمال هذه المهمة بدون التقاط ورفع صورة إثبات ما قبل البدء (Before Photo) إلى التخزين السحابي.");
       }
     }
@@ -2208,7 +2206,7 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
       : (template ? template.requires_photo_after : true);
     if (requiresAfter && updates.status === "completed") {
       const afterUrl = getTaskPhotoUrls(merged).after;
-      if (!afterUrl || afterUrl.trim() === "" || afterUrl.startsWith("data:")) {
+      if (!afterUrl || !isUsableImageUrl(afterUrl)) {
         throw new Error("خطأ حماية: لا يمكن إغلاق وإكمال هذه المهمة بدون التقاط ورفع صورة إثبات جودة العمل (After Photo) إلى التخزين السحابي.");
       }
     }

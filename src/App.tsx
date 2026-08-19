@@ -138,6 +138,53 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!user) return;
+
+    let cancelled = false;
+    let checking = false;
+
+    const clearInvalidSession = () => {
+      localStorage.removeItem(SESSION_KEY);
+      localStorage.removeItem(LEGACY_SESSION_KEY);
+      if (!cancelled) {
+        setUser(null);
+        setCleanerView("tasks");
+        setError("تم تعطيل هذا الحساب. تم تسجيل خروجك لحماية النظام.");
+      }
+    };
+
+    const revalidateActiveSession = async () => {
+      if (checking || cancelled) return;
+      checking = true;
+      try {
+        const current = await getCurrentUserProfile(makeProfileEmail(user.username));
+        if (!current || current.is_active !== true) {
+          clearInvalidSession();
+          return;
+        }
+        if (!cancelled) setUser(current);
+      } catch (error) {
+        // A transient network failure must not silently deactivate a valid user.
+        console.warn("Active session revalidation failed; keeping the current session temporarily.", error);
+      } finally {
+        checking = false;
+      }
+    };
+
+    const interval = window.setInterval(() => void revalidateActiveSession(), 60_000);
+    window.addEventListener("focus", revalidateActiveSession);
+    document.addEventListener("visibilitychange", revalidateActiveSession);
+    void revalidateActiveSession();
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", revalidateActiveSession);
+      document.removeEventListener("visibilitychange", revalidateActiveSession);
+    };
+  }, [user?.id, user?.username]);
+
+  useEffect(() => {
     if (!successMessage) return;
     const timer = window.setTimeout(() => setSuccessMessage(null), 2500);
     return () => window.clearTimeout(timer);

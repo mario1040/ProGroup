@@ -20,6 +20,7 @@ import {
 import { Profile, TaskInstance, Zone, TaskTemplate } from "../types";
 import { getTasks, listenTodayTasks, updateTask, getLocalDateString, deletePhoto } from "../lib/api";
 import { isOnline } from "../lib/offlineManager";
+import { isUsableImageUrl } from "../lib/cloudinary";
 import PhotoCapture from "./PhotoCapture";
 import ProfessorLogo from "./ProfessorLogo";
 import FirestoreQuotaBanner from "./FirestoreQuotaBanner";
@@ -138,16 +139,16 @@ export default function TodayTasksPage({
 
 
 
-    useEffect(() => {
+  useEffect(() => {
     setLoading(true);
     const unsubscribe = listenTodayTasks(user.id, (myTasks) => {
       setTasks(myTasks);
       setLoading(false);
       
       setSelectedTask((prevSelected) => {
-         if (!prevSelected) return null;
+        if (!prevSelected) return null;
         const updatedTask = myTasks.find(t => t.id === prevSelected.id);
-         return updatedTask || null;
+        return updatedTask || null;
       });
     });
 
@@ -291,7 +292,7 @@ export default function TodayTasksPage({
   };
 
   const handlePhotoAfterSubmitted = (meta: { url: string; size: number; mimeType: string; takenAt: string }) => {
-    if (!meta.url || !meta.url.startsWith("http")) {
+    if (!isUsableImageUrl(meta.url)) {
       showToast("رابط صورة بعد العمل غير صالح.", "error");
       return;
     }
@@ -316,7 +317,7 @@ export default function TodayTasksPage({
       ? selectedTask.requires_photo_after
       : true;
 
-    if (requiresPhotoAfter && (!photoAfter || !photoAfter.startsWith("http"))) {
+    if (requiresPhotoAfter && (!photoAfter || !isUsableImageUrl(photoAfter))) {
       showToast("صورة ما بعد التنظيف مطلوبة لإتمام هذه المهمة. يرجى التقاطها وتأكيد رفعها أولاً.", "warning");
       setExecutingStep('after_photo');
       return;

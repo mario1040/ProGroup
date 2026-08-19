@@ -150,43 +150,56 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
       mimeType: "image/jpeg"
     });
 
+    let progressInterval: ReturnType<typeof setInterval> | undefined;
     try {
-      // Cloudinary unsigned uploads don't support real progress — simulate it
-      const progressInterval = setInterval(() => {
+      // Cloudinary unsigned uploads don't support real progress — simulate it.
+      progressInterval = setInterval(() => {
         setProgress((prev) => {
           if (prev >= 90) return prev;
           return prev + Math.floor(Math.random() * 15) + 5;
         });
       }, 300);
 
-      const result = await uploadToCloudinary(payload, folder);
-      
-      clearInterval(progressInterval);
-      setProgress(100);
-      setUploadedUrl(result.secure_url);
-      setUploadedPublicId(result.public_id || null);
-      
-      const finalSize = result.bytes || compressedSize || originalSize || 0;
-      const finalMimeType = "image/jpeg";
-      const finalTakenAt = takenAt || new Date().toISOString();
+      let uploadedMetadata: { url: string; size: number; mimeType: string; takenAt: string };
+      let publicId: string | null = null;
+      let usedInlineFallback = false;
 
-      const metadata = {
-        url: result.secure_url,
-        size: finalSize,
-        mimeType: finalMimeType,
-        takenAt: finalTakenAt
-      };
-
-      console.log("[PhotoCapture] ✅ Photo uploaded successfully to Cloudinary:", metadata);
-      onPhotoUploaded(metadata);
-    } catch (err: any) {
-      console.error("[PhotoCapture] ❌ Cloudinary upload failed:", err);
-      let errorMsg = "تعذر رفع الصورة إلى خوادم التخزين السحابي. يرجى التأكد من جودة الإنترنت والمحاولة مرة أخرى.";
-      if (err?.message) {
-        errorMsg = `فشل الرفع السحابي: ${err.message}`;
+      try {
+        const result = await uploadToCloudinary(payload, folder);
+        publicId = result.public_id || null;
+        uploadedMetadata = {
+          url: result.secure_url,
+          size: result.bytes || compressedSize || originalSize || 0,
+          mimeType: "image/jpeg",
+          takenAt: takenAt || new Date().toISOString(),
+        };
+        console.log("[PhotoCapture] Photo uploaded successfully to Cloudinary:", uploadedMetadata);
+      } catch (uploadError) {
+        // Keep the intentional Firestore-safe fallback for CORS/configuration failures.
+        if (!payload.startsWith("data:image/")) throw uploadError;
+        usedInlineFallback = true;
+        uploadedMetadata = {
+          url: payload,
+          size: compressedSize || originalSize || 0,
+          mimeType: "image/jpeg",
+          takenAt: takenAt || new Date().toISOString(),
+        };
+        console.warn("[PhotoCapture] Cloudinary unavailable; retaining compressed Base64 fallback.", uploadError);
       }
-      setError(errorMsg);
+
+      if (progressInterval) clearInterval(progressInterval);
+      setProgress(100);
+      setUploadedUrl(uploadedMetadata.url);
+      setUploadedPublicId(publicId);
+      onPhotoUploaded(uploadedMetadata);
+      if (usedInlineFallback) {
+        setError("تم حفظ الصورة مؤقتاً داخل المهمة بسبب تعذر الوصول إلى Cloudinary.");
+      }
+    } catch (err: any) {
+      console.error("[PhotoCapture] Photo persistence failed:", err);
+      setError(err?.message || "تعذر حفظ الصورة. يرجى المحاولة مرة أخرى.");
     } finally {
+      if (progressInterval) clearInterval(progressInterval);
       isUploadingRef.current = false;
       setUploading(false);
     }
