@@ -67,6 +67,7 @@ import {
 } from "../lib/api";
 import { Profile, Zone, TaskTemplate, TaskInstance, OperationalTask, DeviceSwitch } from "../types";
 import InventoryManager from "./InventoryManager";
+import { imageUrlToDataUrl } from "../lib/cloudinary";
 
 // Import Test Recharts for KPI charts
 import { 
@@ -88,6 +89,40 @@ import {
 interface AdminDashboardProps {
   user: Profile;
   onLogout: () => void;
+}
+
+function ReportImage({
+  url,
+  alt,
+  emptyLabel,
+  onOpen,
+}: {
+  url?: string;
+  alt: string;
+  emptyLabel: string;
+  onOpen?: () => void;
+}) {
+  const [failed, setFailed] = useState(false);
+
+  if (!url || failed) {
+    return (
+      <div className="h-full rounded-lg bg-slate-50/50 border border-dashed border-slate-200 flex flex-col items-center justify-center text-slate-400 text-center px-2">
+        <span className="text-xl">📷</span>
+        <span className="text-[10px] mt-1">{failed ? "تعذر تحميل الصورة" : emptyLabel}</span>
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={url}
+      alt={alt}
+      className="max-h-full object-contain cursor-zoom-in transition duration-200 hover:scale-105"
+      referrerPolicy="no-referrer"
+      onError={() => setFailed(true)}
+      onClick={onOpen}
+    />
+  );
 }
 
 export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) {
@@ -942,10 +977,21 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
         }
       }
 
+      // Convert remote images to data URLs before canvas capture. This avoids
+      // silent image loss when Cloudinary/Storage CORS headers are unavailable.
+      const imageDataBySource = new Map<string, string>();
+      const sourceImages = Array.from(elementToExport.querySelectorAll("img"));
+      await Promise.all(sourceImages.map(async (image) => {
+        const source = image.getAttribute("src");
+        if (!source || source.startsWith("data:")) return;
+        const dataUrl = await imageUrlToDataUrl(source);
+        if (dataUrl) imageDataBySource.set(source, dataUrl);
+      }));
+
       // Capture element as canvas using html2canvas
       const canvas = await html2canvas(elementToExport, {
         scale: 2, // High resolution crisp PDF
-        useCORS: true, // Bypass cross-origin restrictions for images (like photos)
+        useCORS: true, // Fallback for images that cannot be converted
         logging: false,
         backgroundColor: "#ffffff",
         windowWidth: elementToExport.scrollWidth || 1200,
@@ -971,6 +1017,18 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
             const styleAttr = el.getAttribute("style");
             if (styleAttr && styleAttr.includes("oklch")) {
               el.setAttribute("style", convertOklchInCssText(styleAttr));
+            }
+          });
+
+          clonedDoc.querySelectorAll("img").forEach((image) => {
+            const source = image.getAttribute("src");
+            if (!source) return;
+            const dataUrl = imageDataBySource.get(source);
+            if (dataUrl) {
+              image.setAttribute("src", dataUrl);
+            } else {
+              image.setAttribute("data-image-load-error", "true");
+              image.setAttribute("alt", `${image.getAttribute("alt") || "الصورة"} - تعذر تحميلها للتصدير`);
             }
           });
         }
@@ -3441,43 +3499,27 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                                 {/* Photo Before */}
                                 <div className="border border-slate-200 rounded-xl p-3 bg-white flex flex-col justify-between h-44">
                                   <span className="text-[10px] font-bold text-slate-500 mb-2 block border-b border-slate-100 pb-1">📸 صورة قبل البدء بالعمل (SOP)</span>
-                                  {task.photo_before_url ? (
-                                    <div className="relative group overflow-hidden rounded-lg border border-slate-100 h-full flex items-center justify-center bg-slate-50">
-                                      <img 
-                                        src={task.photo_before_url} 
-                                        alt="صورة قبل العمل" 
-                                        className="max-h-full object-contain cursor-zoom-in transition duration-200 hover:scale-105" 
-                                        referrerPolicy="no-referrer"
-                                        onClick={() => window.open(task.photo_before_url!, '_blank')}
-                                      />
-                                    </div>
-                                  ) : (
-                                    <div className="h-full rounded-lg bg-slate-50/50 border border-dashed border-slate-200 flex flex-col items-center justify-center text-slate-400">
-                                      <span className="text-xl">📷</span>
-                                      <span className="text-[10px] mt-1">لم يتم طلب أو رفع صورة قبل</span>
-                                    </div>
-                                  )}
+                                  <div className="relative group overflow-hidden rounded-lg border border-slate-100 h-full flex items-center justify-center bg-slate-50">
+                                    <ReportImage
+                                      url={task.photo_before_url}
+                                      alt="صورة قبل العمل"
+                                      emptyLabel="لم يتم طلب أو رفع صورة قبل"
+                                      onOpen={() => window.open(task.photo_before_url!, "_blank")}
+                                    />
+                                  </div>
                                 </div>
 
                                 {/* Photo After */}
                                 <div className="border border-slate-200 rounded-xl p-3 bg-white flex flex-col justify-between h-44">
                                   <span className="text-[10px] font-bold text-slate-500 mb-2 block border-b border-slate-100 pb-1">📸 صورة بعد الانتهاء واللمعان</span>
-                                  {task.photo_after_url ? (
-                                    <div className="relative group overflow-hidden rounded-lg border border-slate-100 h-full flex items-center justify-center bg-slate-50">
-                                      <img 
-                                        src={task.photo_after_url} 
-                                        alt="صورة بعد العمل" 
-                                        className="max-h-full object-contain cursor-zoom-in transition duration-200 hover:scale-105" 
-                                        referrerPolicy="no-referrer"
-                                        onClick={() => window.open(task.photo_after_url!, '_blank')}
-                                      />
-                                    </div>
-                                  ) : (
-                                    <div className="h-full rounded-lg bg-slate-50/50 border border-dashed border-slate-200 flex flex-col items-center justify-center text-slate-400">
-                                      <span className="text-xl">📷</span>
-                                      <span className="text-[10px] mt-1">لم يتم رفع صورة بعد</span>
-                                    </div>
-                                  )}
+                                  <div className="relative group overflow-hidden rounded-lg border border-slate-100 h-full flex items-center justify-center bg-slate-50">
+                                    <ReportImage
+                                      url={task.photo_after_url}
+                                      alt="صورة بعد العمل"
+                                      emptyLabel="لم يتم رفع صورة بعد"
+                                      onOpen={() => window.open(task.photo_after_url!, "_blank")}
+                                    />
+                                  </div>
                                 </div>
                               </div>
 

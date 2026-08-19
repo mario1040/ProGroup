@@ -66,6 +66,18 @@ export type SOPItem = TaskTemplate;
 export interface LegacyTaskPhotos {
   before?: string;
   after?: string;
+  before_url?: string;
+  after_url?: string;
+}
+
+export interface TaskAuditEvent {
+  id: string;
+  task_id?: string;
+  action: string;
+  actor_id?: string;
+  actor_name?: string;
+  metadata?: Record<string, unknown>;
+  created_at: string;
 }
 
 export interface TaskInstance {
@@ -89,6 +101,12 @@ export interface TaskInstance {
   requires_signature?: boolean;
   photo_before_url?: string;
   photos?: LegacyTaskPhotos;
+  before_photo_url?: string;
+  after_photo_url?: string;
+  before_photo?: string;
+  after_photo?: string;
+  photoBefore?: string;
+  photoAfter?: string;
   photo_before_taken_at?: string;
   photo_before_uploaded_at?: string;
   photo_before_size?: number;

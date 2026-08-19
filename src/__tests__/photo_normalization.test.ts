@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeTaskPhotoUrls } from "../lib/api";
+import { getTaskPhotoUrls, normalizeTaskPhotoUrls } from "../lib/api";
 import { TaskInstance } from "../types";
 
 const baseTask: TaskInstance = {
@@ -40,6 +40,32 @@ describe("Task photo URL normalization", () => {
 
     expect(normalized.photo_before_url).toBe("https://example.com/current-before.jpg");
     expect(normalized.photo_after_url).toBe("https://example.com/current-after.jpg");
+  });
+
+  it("supports all known legacy field names", () => {
+    const urls = getTaskPhotoUrls({
+      ...baseTask,
+      before_photo_url: "https://example.com/before-photo-url.jpg",
+      after_photo_url: "https://example.com/after-photo-url.jpg"
+    });
+
+    expect(urls.before).toBe("https://example.com/before-photo-url.jpg");
+    expect(urls.after).toBe("https://example.com/after-photo-url.jpg");
+  });
+
+  it("ignores empty and unsupported URL values", () => {
+    const urls = getTaskPhotoUrls({
+      ...baseTask,
+      photo_before_url: "",
+      photo_after_url: "javascript:alert(1)",
+      photos: {
+        before: "https://example.com/fallback-before.jpg",
+        after: ""
+      }
+    });
+
+    expect(urls.before).toBe("https://example.com/fallback-before.jpg");
+    expect(urls.after).toBeUndefined();
   });
 
   it("does not invent URLs when neither schema contains a photo", () => {

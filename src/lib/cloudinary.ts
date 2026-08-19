@@ -126,3 +126,29 @@ export function getCloudinaryUrl(
   }
   return `https://res.cloudinary.com/${CLOUDINARY_CLOUD_NAME}/image/upload/${transformations}${publicId}`;
 }
+
+/** Fetch a remote image as a data URL for reliable canvas/PDF rendering. */
+export async function imageUrlToDataUrl(url: string): Promise<string | null> {
+  if (!url) return null;
+  if (url.startsWith("data:image/")) return url;
+
+  try {
+    const response = await fetch(url, { mode: "cors", credentials: "omit" });
+    if (!response.ok) return null;
+    const blob = await response.blob();
+    return await new Promise<string | null>((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(typeof reader.result === "string" ? reader.result : null);
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(blob);
+    });
+  } catch (error) {
+    console.warn("[Cloudinary] Could not convert image for export:", url, error);
+    return null;
+  }
+}
+
+export function isUsableImageUrl(url: unknown): url is string {
+  return typeof url === "string" &&
+    (url.startsWith("https://") || url.startsWith("http://") || url.startsWith("data:image/"));
+}

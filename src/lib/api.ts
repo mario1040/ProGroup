@@ -1,4 +1,4 @@
-import { Profile, Zone, TaskTemplate, SOPItem, TaskInstance, OperationalTask, DeviceSwitch } from "../types";
+import { Profile, Zone, TaskTemplate, SOPItem, TaskInstance, OperationalTask, DeviceSwitch, TaskAuditEvent } from "../types";
 import {
   db,
   auth,
@@ -1048,20 +1048,79 @@ export function isEligibleCleaner(profile: Profile | Partial<Profile>): boolean 
 }
 
 /**
- * Normalize legacy and current task photo schemas for every consumer.
- * Current records use photo_before_url/photo_after_url, while older records
- * may still store the same URLs under photos.before/photos.after.
- * Current fields always win when both formats are present.
+ * Return the first usable URL from modern and legacy task-photo fields.
+ * Modern fields always win when multiple schemas are present.
  */
-export function normalizeTaskPhotoUrls<T extends TaskInstance>(task: T): T {
-  const beforeUrl = task.photo_before_url || task.photos?.before;
-  const afterUrl = task.photo_after_url || task.photos?.after;
+export function getTaskPhotoUrls(task: TaskInstance): { before?: string; after?: string } {
+  const record = task as TaskInstance & {
+    photos?: {
+      before?: string;
+      after?: string;
+      before_url?: string;
+      after_url?: string;
+    };
+    before_photo_url?: string;
+    after_photo_url?: string;
+    before_photo?: string;
+    after_photo?: string;
+    photoBefore?: string;
+    photoAfter?: string;
+  };
+
+  const firstUsableUrl = (values: unknown[]): string | undefined => {
+    const candidate = values.find((value): value is string => {
+      if (typeof value !== "string") return false;
+      const normalized = value.trim();
+      return normalized.startsWith("https://") ||
+        normalized.startsWith("http://") ||
+        normalized.startsWith("data:image/");
+    });
+    return candidate?.trim();
+  };
 
   return {
-    ...task,
-    photo_before_url: beforeUrl || undefined,
-    photo_after_url: afterUrl || undefined,
+    before: firstUsableUrl([
+      record.photo_before_url,
+      record.photos?.before,
+      record.photos?.before_url,
+      record.before_photo_url,
+      record.before_photo,
+      record.photoBefore,
+    ]),
+    after: firstUsableUrl([
+      record.photo_after_url,
+      record.photos?.after,
+      record.photos?.after_url,
+      record.after_photo_url,
+      record.after_photo,
+      record.photoAfter,
+    ]),
   };
+}
+
+/** Normalize every known task-photo schema for all consumers. */
+export function normalizeTaskPhotoUrls<T extends TaskInstance>(task: T): T {
+  const { before, after } = getTaskPhotoUrls(task);
+  return {
+    ...task,
+    photo_before_url: before,
+    photo_after_url: after,
+  };
+}
+
+/** Best-effort audit trail. Business mutations must not fail because logging failed. */
+export async function recordTaskAuditEvent(event: Omit<TaskAuditEvent, "id" | "created_at">): Promise<void> {
+  const auditEvent: TaskAuditEvent = {
+    ...event,
+    id: `audit_${randomHex(12)}`,
+    created_at: new Date().toISOString(),
+  };
+
+  try {
+    await firebaseSetDoc(firebaseDoc(db, "audit_logs", auditEvent.id), cleanUndefined(auditEvent));
+  } catch (error) {
+    console.warn("[Audit] Failed to persist audit event; mutation remains successful.", error);
+  }
 }
 
 export function getEligibleCleaners(profiles: Profile[]): Profile[] {
@@ -1358,6 +1417,15 @@ export async function saveProfile(profile: Partial<Profile>): Promise<{ profile:
   }
 
   await setDoc(doc(db, "users", finalProfile.id), finalProfile);
+  await recordTaskAuditEvent({
+    action: profile.id ? "profile_updated" : "profile_created",
+    metadata: {
+      profile_id: finalProfile.id,
+      changed_fields: Object.keys(profile).filter((field) => field !== "password"),
+      is_active: finalProfile.is_active,
+      role: finalProfile.role,
+    }
+  });
   invalidateMetadataCaches();
   return { profile: finalProfile as Profile, generatedPassword };
 }
@@ -1380,6 +1448,10 @@ export async function provisionEmployeeAuth(profileId: string): Promise<string> 
   await setDoc(docRef, {
     ...profile,
     password: await createPasswordRecord(generatedPassword)
+  });
+  await recordTaskAuditEvent({
+    action: "profile_password_provisioned",
+    metadata: { profile_id: profileId }
   });
 
   return generatedPassword;
@@ -1637,6 +1709,7 @@ export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
     console.log(`[SOP Detail Sync] Syncing updated SOP configurations for ${finalItem.title} to future pending task instances...`);
     try {
       let existingInstances: TaskInstance[] = [];
+      const todayStr = getLocalDateString();
       if (useLocalFallback) {
         existingInstances = Object.values(localDB.task_instances || {}).filter(
           (ti: any) => (ti.sop_item_id === finalItem.id || ti.template_id === finalItem.id)
@@ -1644,7 +1717,8 @@ export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
       } else {
         const q = query(
           collection(db, "task_instances"),
-          where("sop_item_id", "==", finalItem.id)
+          where("sop_item_id", "==", finalItem.id),
+          where("due_date", ">=", todayStr)
         );
         const snap = await getDocs(q);
         snap.forEach((docSnap) => {
@@ -1653,7 +1727,8 @@ export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
 
         const qLegacy = query(
           collection(db, "task_instances"),
-          where("template_id", "==", finalItem.id)
+          where("template_id", "==", finalItem.id),
+          where("due_date", ">=", todayStr)
         );
         const snapLegacy = await getDocs(qLegacy);
         snapLegacy.forEach((docSnap) => {
@@ -1663,7 +1738,6 @@ export async function saveSopItem(item: Partial<SOPItem>): Promise<SOPItem> {
         });
       }
 
-      const todayStr = getLocalDateString();
       for (const ti of existingInstances) {
         if (ti.due_date >= todayStr && (ti.status === "pending" || !ti.status)) {
           const updatedInstance = {
@@ -1846,26 +1920,31 @@ export function listenTasksForDate(
         ? instances.filter(ti => ti.assigned_to === userId)
         : instances;
 
-      // بعد (مُصلح):
-      const [zones, profiles, templates] = await Promise.all([
-        getRawZones(),   // ← cache-enabled, same as getTasks()
+      // Keep the task snapshot visible even when one metadata collection is unavailable.
+      const metadataResults = await Promise.allSettled([
+        getRawZones(),
         getProfiles(),
         getTemplates()
       ]);
-
-      // Deduplicate task instances by title, zone, date, and time
-      const seenTask = new Set<string>();
-      const uniqueInstances = filteredInstances.filter(t => {
-        const key = `${(t.title || "").trim().toLowerCase()}_${t.zone_id || ""}_${t.due_date || ""}_${t.due_time || ""}`;
-        if (seenTask.has(key)) return false;
-        seenTask.add(key);
-        return true;
+      const zones = metadataResults[0].status === "fulfilled" ? metadataResults[0].value : [];
+      const profiles = metadataResults[1].status === "fulfilled" ? metadataResults[1].value : [];
+      const templates = metadataResults[2].status === "fulfilled" ? metadataResults[2].value : [];
+      metadataResults.forEach((result, index) => {
+        if (result.status === "rejected") {
+          console.warn(`[Tasks Listener] Metadata source ${index} unavailable; showing raw task data.`, result.reason);
+        }
       });
+
+      // Firestore document IDs are authoritative. Do not collapse legitimate tasks
+      // that happen to share title, zone, date, and time.
+      const uniqueInstances = Array.from(
+        new Map(filteredInstances.map((task) => [task.id, task])).values()
+      );
 
       const enrichedTasks = uniqueInstances.map((ti) => {
         const zone = zones.find((z) => z.id === ti.zone_id);
         const assignee = profiles.find((p) => p.id === ti.assigned_to);
-        const template = templates.find((tpl) => tpl.id === ti.template_id);
+        const template = templates.find((tpl) => tpl.id === ti.template_id || tpl.id === ti.sop_item_id);
         return {
           ...ti,
           zone,
@@ -2002,14 +2081,25 @@ export async function createTask(task: Partial<TaskInstance>): Promise<TaskInsta
   };
 
   await setDoc(doc(db, "task_instances", id), newInstance);
+  await recordTaskAuditEvent({
+    task_id: id,
+    action: "task_created",
+    metadata: {
+      task_type: newInstance.task_type,
+      assigned_to: newInstance.assigned_to,
+      due_date: newInstance.due_date,
+    }
+  });
   return newInstance;
 }
 
 function validateTaskInstanceUpdate(merged: TaskInstance, updates: Partial<TaskInstance>) {
+  const photoUrls = getTaskPhotoUrls(merged);
+
   // 1. Enforce "before photo" requirement
   const requiresBefore = merged.requires_photo_before === true;
   if (requiresBefore && (updates.status === "in_progress" || updates.status === "completed" || merged.status === "completed")) {
-    if (!merged.photo_before_url) {
+    if (!photoUrls.before) {
       throw new Error("خطأ حماية: لا يمكن بدء أو إكمال هذه المهمة بدون التقاط ورفع صورة إثبات ما قبل البدء (Before Photo).");
     }
   }
@@ -2017,7 +2107,7 @@ function validateTaskInstanceUpdate(merged: TaskInstance, updates: Partial<TaskI
   // 2. Enforce "after photo" requirement
   const requiresAfter = merged.requires_photo_after === true;
   if (requiresAfter && (updates.status === "completed" || merged.status === "completed")) {
-    if (!merged.photo_after_url) {
+    if (!photoUrls.after) {
       throw new Error("خطأ حماية: لا يمكن إغلاق وإكمال هذه المهمة بدون التقاط ورفع صورة إثبات جودة العمل (After Photo).");
     }
   }
@@ -2084,14 +2174,20 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
       }
     }
 
-    const merged = { ...currentTask, ...updates, updated_at: new Date().toISOString() };
+    const merged = normalizeTaskPhotoUrls({
+      ...currentTask,
+      ...updates,
+      updated_at: new Date().toISOString()
+    } as TaskInstance);
+
+    validateTaskInstanceUpdate(merged, updates);
 
     // 2. Enforce "before photo" requirement — use task instance snapshot first, SOP fallback only if undefined
     const requiresBefore = currentTask.requires_photo_before !== undefined
       ? currentTask.requires_photo_before
       : (template ? template.requires_photo_before : true);
     if (requiresBefore && (updates.status === "in_progress" || updates.status === "completed")) {
-      const beforeUrl = merged.photo_before_url;
+      const beforeUrl = getTaskPhotoUrls(merged).before;
       if (!beforeUrl || beforeUrl.trim() === "" || beforeUrl.startsWith("data:")) {
         throw new Error("خطأ حماية: لا يمكن بدء أو إكمال هذه المهمة بدون التقاط ورفع صورة إثبات ما قبل البدء (Before Photo) إلى التخزين السحابي.");
       }
@@ -2102,14 +2198,14 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
       ? currentTask.requires_photo_after
       : (template ? template.requires_photo_after : true);
     if (requiresAfter && updates.status === "completed") {
-      const afterUrl = merged.photo_after_url;
+      const afterUrl = getTaskPhotoUrls(merged).after;
       if (!afterUrl || afterUrl.trim() === "" || afterUrl.startsWith("data:")) {
         throw new Error("خطأ حماية: لا يمكن إغلاق وإكمال هذه المهمة بدون التقاط ورفع صورة إثبات جودة العمل (After Photo) إلى التخزين السحابي.");
       }
     }
 
     // Prevent lifting After photo before Before photo
-    if (updates.photo_after_url && requiresBefore && !merged.photo_before_url) {
+    if (getTaskPhotoUrls(merged).after && requiresBefore && !getTaskPhotoUrls(merged).before) {
       throw new Error("خطأ حماية: لا يمكن رفع صورة الإثبات بعد العمل قبل رفع صورة الإثبات قبل العمل.");
     }
 
@@ -2135,13 +2231,13 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
       merged.photo_after_uploaded_at = updates.photo_after_uploaded_at || new Date().toISOString();
 
       if (currentTask.due_time && currentTask.due_date) {
-        try {
-          const dueDateTime = new Date(`${currentTask.due_date}T${currentTask.due_time}:00`);
-          const completedTime = new Date(merged.completed_at);
+        const dueDateTime = new Date(`${currentTask.due_date}T${currentTask.due_time}:00`);
+        const completedTime = new Date(merged.completed_at);
+        if (!Number.isNaN(dueDateTime.getTime()) && !Number.isNaN(completedTime.getTime())) {
           const diffMs = completedTime.getTime() - dueDateTime.getTime();
           merged.delay_minutes = diffMs > 0 ? Math.floor(diffMs / 60000) : 0;
-        } catch (e) {
-          console.error("Error parsing date for delay calc", e);
+        } else {
+          console.warn(`[updateTask] Skipping delay calculation for invalid date/time on ${id}.`);
         }
       }
 
@@ -2161,6 +2257,27 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
       console.error("[Online Engine] setDoc failed:", error);
       throw new Error("تعذر حفظ تحديث المهمة. يرجى التحقق من اتصالك بالإنترنت.");
     }
+
+    const changedFields = Object.keys(updates);
+    const action = changedFields.some((field) => field.startsWith("photo_"))
+      ? "task_photo_updated"
+      : changedFields.includes("assigned_to")
+        ? "task_reassigned"
+        : changedFields.includes("status")
+          ? `task_status_${updates.status}`
+          : "task_updated";
+    await recordTaskAuditEvent({
+      task_id: id,
+      action,
+      metadata: {
+        changed_fields: changedFields,
+        status_before: currentTask.status,
+        status_after: merged.status,
+        assigned_to_before: currentTask.assigned_to,
+        assigned_to_after: merged.assigned_to,
+      }
+    });
+
     return merged;
   } catch (error: any) {
     if (error.message && (error.message.includes("خطأ حماية") || error.message.includes("تنبيه") || error.message.includes("اتصال بالإنترنت") || error.message.includes("الاتصال بقاعدة البيانات") || error.message.includes("تعذر حفظ تحديث المهمة"))) {
@@ -2200,6 +2317,15 @@ export async function approveTask(id: string, approval: { supervisor_id: string;
   task.updated_at = new Date().toISOString();
 
   await setDoc(docRef, task);
+  await recordTaskAuditEvent({
+    task_id: id,
+    action: "task_approved",
+    metadata: {
+      supervisor_id: approval.supervisor_id,
+      quality_grade: task.quality_grade,
+      supervisor_notes: task.supervisor_notes,
+    }
+  });
   return task;
 }
 
@@ -2291,6 +2417,16 @@ export async function rejectTask(id: string, rejection: { supervisor_id: string;
   };
 
   await setDoc(doc(db, "task_instances", reworkId), reworkTask);
+  await recordTaskAuditEvent({
+    task_id: id,
+    action: "task_rejected_rework_created",
+    metadata: {
+      rework_task_id: reworkId,
+      supervisor_id: rejection.supervisor_id,
+      rework_assigned_to: reworkAssignee,
+      supervisor_notes: rejection.supervisor_notes,
+    }
+  });
   return { original: originalTask, rework: reworkTask };
 }
 
