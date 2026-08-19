@@ -27,8 +27,6 @@ import {
   ShieldCheck, 
   Trash2, 
   UserCheck,
-  UserX,
-  Edit2,
   Calendar,
   Users,
   Box,
@@ -187,8 +185,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   const [employeeRole, setEmployeeRole] = useState<'cleaner' | 'supervisor' | 'admin'>("cleaner");
   const [employeePhone, setEmployeePhone] = useState("");
   const [empActionLoading, setEmpActionLoading] = useState(false);
-  const [editingEmployee, setEditingEmployee] = useState<Profile | null>(null);
-  const [deactivatingEmployee, setDeactivatingEmployee] = useState<Profile | null>(null);
 
   // Main load function for master & configuration data
   const loadAllData = async () => {
@@ -252,8 +248,10 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   }, [selectedDate]);
 
   useEffect(() => {
+    // Metadata is loaded once at startup; mutations explicitly refresh it when needed.
+    // Avoid re-reading every collection whenever the user switches tabs.
     loadAllData();
-  }, [activeTab]);
+  }, []);
 
   useEffect(() => {
     if (!isSopModalOpen) {
@@ -355,30 +353,34 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   }, [tasks]);
 
   // Filter Tasks Board
-  const getFilteredTasks = () => {
-    return tasks.filter((task) => {
-      // Search query
-      const matchQuery = task.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
-                         (task.description || "").toLowerCase().includes(searchQuery.toLowerCase()) ||
-                         (task.task_code || "").toLowerCase().includes(searchQuery.toLowerCase());
-      
-      // Employee filter
-      const matchEmployee = employeeFilter === "all" || task.assigned_to === employeeFilter;
-      
-      // Zone filter
-      const matchZone = zoneFilter === "all" || task.zone_id === zoneFilter;
-      
-      // Tab filter inside Tasks Board
-      let matchSubTab = true;
-      if (tasksSubFilter === "recurring") matchSubTab = task.task_type === "recurring";
-      else if (tasksSubFilter === "one_time") matchSubTab = task.task_type === "one_time";
-      else if (tasksSubFilter === "rework") matchSubTab = task.task_type === "rework";
-      else if (tasksSubFilter === "late") matchSubTab = task.status === "late" || (task.status === "completed" && (task.delay_minutes || 0) > 0);
-      else if (tasksSubFilter === "pending_approval") matchSubTab = task.status === "completed" && task.supervisor_approved !== true;
+  // Keep inactive cleaners visible only when they own a task currently in the loaded view,
+  // so historical/current assignments remain auditable without exposing them as new assignees.
+  const taskAssigneeIds = new Set(tasks.map((task) => task.assigned_to));
+  const employeeFilterProfiles = profiles.filter(
+    (profile) => profile.role === "cleaner" &&
+      (profile.is_active === true || taskAssigneeIds.has(profile.id))
+  );
 
-      return matchQuery && matchEmployee && matchZone && matchSubTab;
-    });
-  };
+  const filteredTasks = React.useMemo(() => tasks.filter((task) => {
+    const query = searchQuery.toLowerCase();
+    const matchQuery = task.title.toLowerCase().includes(query) ||
+      (task.description || "").toLowerCase().includes(query) ||
+      (task.task_code || "").toLowerCase().includes(query);
+    const matchEmployee = employeeFilter === "all" || task.assigned_to === employeeFilter;
+    const matchZone = zoneFilter === "all" || task.zone_id === zoneFilter;
+
+    let matchSubTab = true;
+    if (tasksSubFilter === "recurring") matchSubTab = task.task_type === "recurring";
+    else if (tasksSubFilter === "one_time") matchSubTab = task.task_type === "one_time";
+    else if (tasksSubFilter === "rework") matchSubTab = task.task_type === "rework";
+    else if (tasksSubFilter === "late") matchSubTab = task.status === "late" || (task.status === "completed" && (task.delay_minutes || 0) > 0);
+    else if (tasksSubFilter === "pending_approval") matchSubTab = task.status === "completed" && task.supervisor_approved !== true;
+
+    return matchQuery && matchEmployee && matchZone && matchSubTab;
+  }), [tasks, searchQuery, employeeFilter, zoneFilter, tasksSubFilter]);
+
+  // Keep existing call sites readable while reusing the memoized result.
+  const getFilteredTasks = () => filteredTasks;
 
   // Create Task Submission
   const handleAssignTaskSubmit = async (e: React.FormEvent) => {
@@ -707,53 +709,20 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   };
 
   const handleToggleEmployeeStatus = async (p: Profile) => {
-    // If currently active, prompt for explicit confirmation
-    if (p.is_active === true) {
-      setDeactivatingEmployee(p);
-      return;
-    }
-    // If inactive, activate directly
-    await executeToggleEmployeeStatus(p, true);
-  };
-
-  const executeToggleEmployeeStatus = async (p: Profile, targetActive: boolean) => {
     try {
       setLoading(true);
-      await saveProfile({
-        id: p.id,
-        is_active: targetActive
-      });
-      showToast(`تم ${targetActive ? "تفعيل" : "تعطيل"} حساب الموظف ${p.full_name} بنجاح ✅`, "success");
-      setDeactivatingEmployee(null);
+      const updated = {
+        ...p,
+        is_active: !p.is_active
+      };
+      await saveProfile(updated);
+      showToast(`تم ${!p.is_active ? "تفعيل" : "تعطيل"} حساب الموظف ${p.full_name} بنجاح ✅`, "success");
       await loadAllData();
     } catch (err) {
       console.error(err);
       showToast("فشل تغيير حالة الموظف", "error");
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleEditEmployee = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!editingEmployee) return;
-    try {
-      setEmpActionLoading(true);
-      await saveProfile({
-        id: editingEmployee.id,
-        full_name: editingEmployee.full_name.trim(),
-        phone: editingEmployee.phone?.trim() || undefined,
-        role: editingEmployee.role,
-        is_active: editingEmployee.is_active === true
-      });
-      showToast(`تم تحديث بيانات الموظف ${editingEmployee.full_name} بنجاح ✅`, "success");
-      setEditingEmployee(null);
-      await loadAllData();
-    } catch (err: any) {
-      console.error(err);
-      showToast(err.message || "فشل تحديث بيانات الموظف", "error");
-    } finally {
-      setEmpActionLoading(false);
     }
   };
 
@@ -1458,7 +1427,9 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                             <div className="mt-4 border-t border-slate-100 pt-3 flex justify-between items-center text-[10px]">
                               <span className="text-slate-500 font-bold flex items-center gap-1">
                                 <User className="w-3.5 h-3.5 text-slate-400" />
-                                {zone.responsible_employee?.full_name || "عفاف أحمد"}
+                                {zone.responsible_employee
+                                  ? `${zone.responsible_employee.full_name}${zone.responsible_employee.is_active === true ? "" : " (غير نشط)"}`
+                                  : "غير مُعيّن"}
                               </span>
                               <span className={`py-0.5 px-2 rounded font-black ${badgeClass}`}>
                                 {doneCount} / {totalCount} مهام
@@ -1833,8 +1804,10 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                         className="p-2 border border-slate-200 rounded-lg bg-white"
                       >
                         <option value="all">جميع الموظفين</option>
-                        {profiles.filter(p => p.role === "cleaner").map(p => (
-                          <option key={p.id} value={p.id}>{p.full_name}</option>
+                        {employeeFilterProfiles.map((profile) => (
+                          <option key={profile.id} value={profile.id}>
+                            {profile.full_name}{profile.is_active === true ? "" : " (غير نشط)"}
+                          </option>
                         ))}
                       </select>
                     </div>
@@ -2130,11 +2103,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                                 className="p-1 border border-slate-200 rounded-lg bg-white text-xs font-bold text-slate-700 focus:outline-none cursor-pointer"
                               >
                                 <option value="">غير محدد</option>
-                                {reviewingTask.assigned_to && !getEligibleCleaners(profiles).some(p => p.id === reviewingTask.assigned_to) && (
-                                  <option value={reviewingTask.assigned_to} disabled>
-                                    {(profiles.find(p => p.id === reviewingTask.assigned_to)?.full_name || reviewingTask.assigned_to) + " (معطل حالياً)"}
-                                  </option>
-                                )}
                                 {getEligibleCleaners(profiles).map(p => (
                                   <option key={p.id} value={p.id}>{p.full_name}</option>
                                 ))}
@@ -2815,7 +2783,9 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                           <div className="flex items-center gap-4 self-end md:self-auto">
                             <div className="text-left text-xs">
                               <span className="text-[10px] text-slate-400 block font-bold">المشغل المسؤول:</span>
-                              <span className="font-semibold text-slate-700">{ot.responsible_employee?.full_name || "عفاف أحمد"}</span>
+                              <span className="font-semibold text-slate-700">{ot.responsible_employee
+                                ? `${ot.responsible_employee.full_name}${ot.responsible_employee.is_active === true ? "" : " (غير نشط)"}`
+                                : "غير مُعيّن"}</span>
                             </div>
                             
                             <span className="bg-emerald-100 text-emerald-800 font-bold text-[10px] py-1 px-3 rounded-full border border-emerald-200">
@@ -2862,8 +2832,8 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                           <th className="p-3">البريد الإلكتروني للتوثيق</th>
                           <th className="p-3">الدور والمسؤولية</th>
                           <th className="p-3">رقم الهاتف</th>
-                          <th className="p-3 text-center">الحالة التشغيلية</th>
-                          <th className="p-3 text-center">الإجراءات والتوثيق</th>
+                          <th className="p-3 text-center">الحالة</th>
+                          <th className="p-3 text-center">إدارة الوصول بالتوثيق</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
@@ -2882,10 +2852,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                                   }`}>
                                     {p.full_name.slice(0, 2)}
                                   </div>
-                                  <div>
-                                    <span className="font-bold text-slate-800 block">{p.full_name}</span>
-                                    <span className="text-[10px] text-slate-400 font-mono">ID: {p.id}</span>
-                                  </div>
+                                  <span className="font-bold text-slate-800">{p.full_name}</span>
                                 </div>
                               </td>
                               <td className="p-3 font-mono font-bold text-slate-700">{p.username}</td>
@@ -2900,46 +2867,24 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                                 <button
                                   type="button"
                                   onClick={() => handleToggleEmployeeStatus(p)}
-                                  className={`text-[10px] font-bold px-2.5 py-1 rounded-full cursor-pointer border transition flex items-center justify-center gap-1 mx-auto ${
+                                  className={`text-[10px] font-bold px-2 py-1 rounded-full cursor-pointer border transition ${
                                     isActive 
-                                      ? "bg-emerald-50 text-emerald-700 border-emerald-300 hover:bg-emerald-100" 
-                                      : "bg-red-50 text-red-700 border-red-300 hover:bg-red-100"
+                                      ? "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100" 
+                                      : "bg-red-50 text-red-700 border-red-200 hover:bg-red-100"
                                   }`}
-                                  title={isActive ? "انقر لتعطيل الموظف" : "انقر لتفعيل الموظف"}
                                 >
-                                  {isActive ? (
-                                    <>
-                                      <UserCheck className="w-3 h-3 text-emerald-600" />
-                                      <span>نشط ●</span>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <UserX className="w-3 h-3 text-red-600" />
-                                      <span>معطل ○</span>
-                                    </>
-                                  )}
+                                  {isActive ? "نشط ●" : "معطل ○"}
                                 </button>
                               </td>
                               <td className="p-3 text-center">
-                                <div className="flex items-center justify-center gap-2">
-                                  <button
-                                    type="button"
-                                    onClick={() => setEditingEmployee({ ...p })}
-                                    className="text-[10px] font-bold px-2 py-1.5 rounded-lg border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 transition inline-flex items-center gap-1 cursor-pointer shadow-sm"
-                                    title="تعديل بيانات الموظف"
-                                  >
-                                    <Edit2 className="w-3 h-3 text-slate-500" />
-                                    تعديل
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleProvisionAccess(p)}
-                                    className="text-[10px] font-bold px-2.5 py-1.5 rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition inline-flex items-center gap-1.5 cursor-pointer shadow-sm"
-                                  >
-                                    <ShieldCheck className="w-3.5 h-3.5 text-indigo-500" />
-                                    تهيئة التوثيق
-                                  </button>
-                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => handleProvisionAccess(p)}
+                                  className="text-[10px] font-bold px-2.5 py-1.5 rounded-xl border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition inline-flex items-center gap-1.5 cursor-pointer shadow-sm"
+                                >
+                                  <ShieldCheck className="w-3.5 h-3.5 text-indigo-500" />
+                                  تهيئة وتوثيق الحساب
+                                </button>
                               </td>
                             </tr>
                           );
@@ -3019,8 +2964,10 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                           className="p-2.5 border border-slate-200 rounded-xl bg-slate-50/50 outline-none text-xs font-bold text-slate-700"
                         >
                           <option value="all">جميع الموظفين (الكل)</option>
-                          {profiles.map(p => (
-                            <option key={p.id} value={p.id}>{p.full_name} ({p.role === "admin" ? "مدير" : p.role === "supervisor" ? "مشرف" : "منظف"})</option>
+                          {profiles.map((profile) => (
+                            <option key={profile.id} value={profile.id}>
+                              {profile.full_name} ({profile.role === "admin" ? "مدير" : profile.role === "supervisor" ? "مشرف" : "منظف"} — {profile.is_active === true ? "نشط" : "غير نشط"})
+                            </option>
                           ))}
                         </select>
                       </div>
@@ -4287,163 +4234,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
             >
               نسخ البيانات بالكامل للمشاركة 📋
             </button>
-          </div>
-        </div>
-      )}
-
-      {/* EDIT EMPLOYEE MODAL */}
-      {editingEmployee && (
-        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 text-right" dir="rtl">
-          <div className="bg-white rounded-2xl w-full max-w-md p-6 shadow-2xl flex flex-col gap-4 border border-slate-100">
-            <div className="flex justify-between items-center border-b border-slate-100 pb-3">
-              <h3 className="text-sm font-extrabold text-slate-800 flex items-center gap-2">
-                <Edit2 className="w-4 h-4 text-indigo-600" />
-                <span>تعديل بيانات الموظف: {editingEmployee.full_name}</span>
-              </h3>
-              <button 
-                onClick={() => setEditingEmployee(null)} 
-                className="text-slate-400 hover:text-slate-600 cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <form onSubmit={handleEditEmployee} className="flex flex-col gap-4 text-xs">
-              <div className="flex flex-col gap-1">
-                <label className="text-slate-600 font-bold block mb-1">الاسم الكامل للموظف:</label>
-                <input
-                  type="text"
-                  required
-                  value={editingEmployee.full_name}
-                  onChange={(e) => setEditingEmployee({ ...editingEmployee, full_name: e.target.value })}
-                  className="p-2.5 border border-slate-200 rounded-lg outline-none font-bold text-slate-800 w-full"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div className="flex flex-col gap-1">
-                  <label className="text-slate-600 block mb-1">اسم المستخدم (للقراءة فقط):</label>
-                  <input
-                    type="text"
-                    disabled
-                    value={editingEmployee.username}
-                    className="p-2.5 border border-slate-200 rounded-lg bg-slate-100 text-slate-500 font-mono w-full cursor-not-allowed text-left"
-                  />
-                </div>
-
-                <div className="flex flex-col gap-1">
-                  <label className="text-slate-600 block mb-1">رقم الهاتف:</label>
-                  <input
-                    type="text"
-                    placeholder="مثال: 010xxxxxxxx"
-                    value={editingEmployee.phone || ""}
-                    onChange={(e) => setEditingEmployee({ ...editingEmployee, phone: e.target.value })}
-                    className="p-2.5 border border-slate-200 rounded-lg outline-none font-mono text-slate-800 w-full text-left"
-                  />
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-1 text-right">
-                <label className="text-slate-600 font-bold block mb-1">الدور والمسؤولية:</label>
-                <select
-                  value={editingEmployee.role}
-                  onChange={(e: any) => setEditingEmployee({ ...editingEmployee, role: e.target.value })}
-                  className="p-2.5 border border-slate-200 rounded-lg bg-white text-slate-800 w-full font-bold"
-                >
-                  <option value="cleaner">موظف تشغيل ونظافة (Cleaner)</option>
-                  <option value="supervisor">مشرف جودة (Supervisor)</option>
-                  <option value="admin">مدير العمليات (Admin)</option>
-                </select>
-              </div>
-
-              <div className="flex flex-col gap-1 text-right bg-slate-50 p-3 rounded-xl border border-slate-200">
-                <label className="text-slate-700 font-bold block mb-1">حالة التفعيل التشغيلية:</label>
-                <div className="flex items-center gap-3 mt-1">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="radio"
-                      name="is_active_edit"
-                      checked={editingEmployee.is_active === true}
-                      onChange={() => setEditingEmployee({ ...editingEmployee, is_active: true })}
-                      className="text-emerald-600 focus:ring-emerald-500"
-                    />
-                    <span className="font-bold text-emerald-700">نشط (مؤهل للعمل والتوزيع)</span>
-                  </label>
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="radio"
-                      name="is_active_edit"
-                      checked={editingEmployee.is_active !== true}
-                      onChange={() => setEditingEmployee({ ...editingEmployee, is_active: false })}
-                      className="text-red-600 focus:ring-red-500"
-                    />
-                    <span className="font-bold text-red-700">معطل (مستبعد من التوزيع)</span>
-                  </label>
-                </div>
-              </div>
-
-              <div className="flex gap-2 mt-2">
-                <button
-                  type="submit"
-                  disabled={empActionLoading}
-                  className="flex-1 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-400 text-white font-bold py-3 rounded-xl cursor-pointer transition shadow flex items-center justify-center gap-2"
-                >
-                  {empActionLoading ? "جاري الحفظ..." : "حفظ التعديلات ✅"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setEditingEmployee(null)}
-                  className="px-4 py-3 rounded-xl border border-slate-200 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold cursor-pointer transition"
-                >
-                  إلغاء
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* DEACTIVATION CONFIRMATION DIALOG */}
-      {deactivatingEmployee && (
-        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 text-right" dir="rtl">
-          <div className="bg-white rounded-2xl w-full max-w-md p-6 shadow-2xl flex flex-col gap-4 border border-red-100">
-            <div className="flex items-center gap-3 border-b border-slate-100 pb-3">
-              <div className="w-10 h-10 rounded-full bg-red-100 text-red-600 flex items-center justify-center shrink-0">
-                <AlertTriangle className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="text-sm font-extrabold text-slate-800">تأكيد تعطيل حساب الموظف</h3>
-                <p className="text-[11px] text-slate-500 font-medium">يرجى قراءة تبعات التعطيل بعناية</p>
-              </div>
-            </div>
-
-            <div className="bg-red-50 border border-red-200 rounded-xl p-3.5 text-xs text-red-800 leading-relaxed font-semibold">
-              <p className="font-bold mb-1.5">هل أنت متأكد من تعطيل حساب الموظف <span className="underline font-extrabold">{deactivatingEmployee.full_name}</span>؟</p>
-              <ul className="list-disc list-inside space-y-1 text-[11px] text-red-700">
-                <li>سيتم استبعاد الموظف فوراً من أي توزيع تلقائي للمهام من الـ SOP.</li>
-                <li>لن يتم إسناد أي مهام جديدة له.</li>
-                <li>لن يتمكن الموظف من تسجيل الدخول إلى النظام حتى يتم تفعيله يدويًا.</li>
-                <li>السجلات والمهام التاريخية المكتملة السابقة ستبقى محفوظة وموثقة باسمه دون تغيير.</li>
-              </ul>
-            </div>
-
-            <div className="flex gap-2 mt-2">
-              <button
-                type="button"
-                onClick={() => executeToggleEmployeeStatus(deactivatingEmployee, false)}
-                className="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-2.5 rounded-xl cursor-pointer transition shadow flex items-center justify-center gap-1.5 text-xs"
-              >
-                <UserX className="w-4 h-4" />
-                تأكيد التعطيل الآن
-              </button>
-              <button
-                type="button"
-                onClick={() => setDeactivatingEmployee(null)}
-                className="px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold cursor-pointer transition text-xs"
-              >
-                تراجع
-              </button>
-            </div>
           </div>
         </div>
       )}
