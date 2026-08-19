@@ -68,6 +68,7 @@ import {
 import { Profile, Zone, TaskTemplate, TaskInstance, OperationalTask, DeviceSwitch } from "../types";
 import InventoryManager from "./InventoryManager";
 import { imageUrlToDataUrl } from "../lib/cloudinary";
+import { sanitizeCssColors } from "../lib/colorUtils";
 
 // Import Test Recharts for KPI charts
 import { 
@@ -878,67 +879,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
     }
   };
 
-  const oklchToRgba = (oklchStr: string): string => {
-    try {
-      const content = oklchStr.slice(6, -1).trim();
-      let parts: string[] = [];
-      let alpha = "1";
-      
-      if (content.includes("/")) {
-        const splitSlash = content.split("/");
-        alpha = splitSlash[1].trim();
-        parts = splitSlash[0].trim().split(/\s+/);
-      } else {
-        parts = content.split(/\s+/);
-      }
-      
-      if (parts.length < 3) return "rgba(120, 120, 120, 1)";
-      
-      const L_val = parts[0];
-      const C_val = parts[1];
-      const H_val = parts[2];
-      
-      const L = L_val.endsWith("%") ? parseFloat(L_val) / 100 : parseFloat(L_val);
-      const C = parseFloat(C_val);
-      const H = parseFloat(H_val);
-      
-      const A = alpha.endsWith("%") ? parseFloat(alpha) / 100 : parseFloat(alpha);
-      
-      const hRad = (H * Math.PI) / 180;
-      const okl_a = C * Math.cos(hRad);
-      const okl_b = C * Math.sin(hRad);
-      
-      const l_ = L + 0.3963377774 * okl_a + 0.2158037573 * okl_b;
-      const m_ = L - 0.1055613458 * okl_a - 0.0638541728 * okl_b;
-      const s_ = L - 0.0894841775 * okl_a - 1.2914855480 * okl_b;
-      
-      const l = l_ * l_ * l_;
-      const m = m_ * m_ * m_;
-      const s = s_ * s_ * s_;
-      
-      const rLinear = +4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s;
-      const gLinear = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s;
-      const bLinear = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s;
-      
-      const f = (val: number) => {
-        return val > 0.0031308 ? 1.055 * Math.pow(val, 1 / 2.4) - 0.055 : 12.92 * val;
-      };
-      
-      const rOut = Math.max(0, Math.min(255, Math.round(f(rLinear) * 255)));
-      const gOut = Math.max(0, Math.min(255, Math.round(f(gLinear) * 255)));
-      const bOut = Math.max(0, Math.min(255, Math.round(f(bLinear) * 255)));
-      
-      return `rgba(${rOut}, ${gOut}, ${bOut}, ${A})`;
-    } catch (err) {
-      console.error("Failed to parse oklch:", oklchStr, err);
-      return "rgba(120, 120, 120, 1)";
-    }
-  };
-
-  const convertOklchInCssText = (cssText: string): string => {
-    return cssText.replace(/oklch\([^)]+\)/g, (match) => oklchToRgba(match));
-  };
-
   const exportToPDF = async () => {
     showToast("جاري تجهيز وتوليد ملف الـ PDF... يرجى الانتظار ⏳", "success");
     
@@ -966,13 +906,13 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
         throw new Error("لم يتم العثور على العنصر المراد تصديره");
       }
 
-      // Pre-process and pre-fetch stylesheets to eliminate OKLCH crashing html2canvas
+      // Pre-process and pre-fetch stylesheets to eliminate OKLCH/OKLAB/LAB/LCH crashing html2canvas
       let processedStyles = "";
       
       // 1. Process inline style tags
       document.querySelectorAll("style").forEach((style) => {
         if (style.textContent) {
-          processedStyles += convertOklchInCssText(style.textContent) + "\n";
+          processedStyles += sanitizeCssColors(style.textContent) + "\n";
         }
       });
 
@@ -984,7 +924,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
           const response = await fetch(link.href);
           if (response.ok) {
             const rawCss = await response.text();
-            processedStyles += convertOklchInCssText(rawCss) + "\n";
+            processedStyles += sanitizeCssColors(rawCss) + "\n";
           }
         } catch (e) {
           console.warn("[exportToPDF] Failed to pre-fetch stylesheet:", link.href, e);
@@ -1015,7 +955,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
             el.remove();
           });
 
-          // Inject our pre-processed style tag containing converted rgba colors instead of oklch
+          // Inject our pre-processed style tag containing converted rgba colors
           const newStyle = clonedDoc.createElement("style");
           newStyle.textContent = processedStyles;
           clonedDoc.head.appendChild(newStyle);
@@ -1026,11 +966,11 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
             el.style.display = "none";
           });
 
-          // Convert inline style attribute oklch occurrences as well
+          // Convert inline style attribute modern color occurrences (oklab, oklch, lab, lch)
           clonedDoc.querySelectorAll("[style]").forEach((el: any) => {
             const styleAttr = el.getAttribute("style");
-            if (styleAttr && styleAttr.includes("oklch")) {
-              el.setAttribute("style", convertOklchInCssText(styleAttr));
+            if (styleAttr && (styleAttr.includes("okl") || styleAttr.includes("lab") || styleAttr.includes("lch"))) {
+              el.setAttribute("style", sanitizeCssColors(styleAttr));
             }
           });
 
