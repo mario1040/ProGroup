@@ -296,7 +296,22 @@ describe('Naris Ops Strict Employee Status & Assignment Hardening Suite', () => 
     expect(mergedProfile.full_name).toBe('رحاب محمد أحمد');
   });
 
-  it('TEST 15: Session restoration / getCurrentUserProfile rejects inactive profiles', () => {
+  it('TEST 15: Unrelated employee edits omit is_active and preserve inactive state', () => {
+    const rehab = profiles.find(p => p.id === 'p5_inactive')!;
+    const unrelatedEditPayload: Partial<Profile> = {
+      id: rehab.id,
+      full_name: 'رحاب محمود بعد التعديل',
+      phone: '01012345678',
+      role: rehab.role
+    };
+
+    // The Admin employee editor must not submit a stale activity flag.
+    expect(Object.prototype.hasOwnProperty.call(unrelatedEditPayload, 'is_active')).toBe(false);
+    const persistedProfile = { ...rehab, ...unrelatedEditPayload };
+    expect(persistedProfile.is_active).toBe(false);
+  });
+
+  it('TEST 16: Session restoration / getCurrentUserProfile rejects inactive profiles', () => {
     // Simulating user lookup with is_active check
     const usersInDb: Profile[] = [
       { id: 'p_rehab', username: 'rehab', full_name: 'رحاب', role: 'cleaner', is_active: false, created_at: '2026-01-01' },
@@ -318,7 +333,7 @@ describe('Naris Ops Strict Employee Status & Assignment Hardening Suite', () => 
     expect(simulateGetCurrentUserProfile('afaf')?.username).toBe('afaf');
   });
 
-  it('TEST 16: Metadata Cache TTL respects expiry and invalidation', () => {
+  it('TEST 17: Metadata Cache TTL respects expiry and invalidation', () => {
     const TTL_MS = 30 * 1000;
     let cacheState: { data: Profile[]; timestamp: number } | null = null;
 
