@@ -6,6 +6,9 @@
   --admin-cyan: #22d3ee;
   position: relative;
   isolation: isolate;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
   background:
     radial-gradient(circle at 88% 12%, rgba(99, 102, 241, 0.08), transparent 24rem),
     linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
@@ -213,23 +216,19 @@
     inset-inline-start: 0;
     width: min(88vw, 20rem);
     height: 100svh;
-    transform: translateX(-105%);
-    transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 240ms ease;
+    transform: translate3d(105%, 0, 0);
+    visibility: hidden;
+    pointer-events: none;
+    will-change: transform;
+    transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 240ms ease, visibility 0s linear 240ms;
     box-shadow: none;
   }
 
-  [dir="rtl"] .admin-sidebar {
-    inset-inline-start: auto;
-    inset-inline-end: 0;
-    transform: translateX(105%);
-  }
-
   .admin-sidebar.is-open {
-    transform: translateX(0);
-    box-shadow: 24px 0 70px rgba(2, 6, 23, 0.34);
-  }
-
-  [dir="rtl"] .admin-sidebar.is-open {
+    transform: translate3d(0, 0, 0);
+    visibility: visible;
+    pointer-events: auto;
+    transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 240ms ease;
     box-shadow: -24px 0 70px rgba(2, 6, 23, 0.34);
   }
 
