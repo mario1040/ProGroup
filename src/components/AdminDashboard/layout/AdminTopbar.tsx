@@ -35,7 +35,9 @@ export default function AdminTopbar({
         px-3 py-3
         sm:px-5
         lg:px-7
+        sticky top-0 z-40 w-full px-3 py-3 sm:px-5 lg:px-7
       "
+      style={{ position: "sticky", top: 0, zIndex: 40 }}
       dir="rtl"
     >
       <div
