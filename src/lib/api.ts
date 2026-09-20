@@ -995,7 +995,7 @@ export async function loginUser(username: string, password?: string): Promise<Pr
 export async function getCurrentUserProfile(email: string): Promise<Profile | null> {
   await ensureSeeded();
   if (!email) return null;
-  const username = email.split("@")[0].toLowerCase();
+  const username = email.split("@")[0].trim().toLowerCase();
 
   let snap;
   try {
@@ -1007,14 +1007,11 @@ export async function getCurrentUserProfile(email: string): Promise<Profile | nu
   let found: Profile | null = null;
   snap.forEach((docSnap) => {
     const data = docSnap.data() as Profile;
-    if (data.username?.toLowerCase() === username) {
+    const u = data.username?.trim().toLowerCase();
+    if (u === username || data.phone?.trim() === username || data.id === username) {
       found = data;
     }
   });
-
-  if (found && found.is_active !== true) {
-    return null;
-  }
 
   return found;
 }

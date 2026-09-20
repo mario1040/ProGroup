@@ -38,29 +38,33 @@ function makeProfileEmail(username: string): string {
   return clean.includes("@") ? clean : `${clean}@${DEFAULT_DOMAIN}`;
 }
 
-function isSessionSummary(value: unknown): value is SessionSummary {
-  if (!value || typeof value !== "object") return false;
-  const v = value as Record<string, unknown>;
-  return (
-    typeof v.id === "string" &&
-    typeof v.username === "string" &&
-    (v.role === "admin" || v.role === "cleaner" || v.role === "supervisor")
-  );
-}
-
-function toSessionSummary(profile: Profile): SessionSummary {
-  return {
-    id: profile.id,
-    username: profile.username,
-    role: profile.role,
-  };
-}
-
-function parseStoredSession(raw: string | null): SessionSummary | null {
+function parseStoredProfile(raw: string | null): Profile | null {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as unknown;
-    return isSessionSummary(parsed) ? parsed : null;
+    if (!parsed || typeof parsed !== "object") return null;
+    const v = parsed as Record<string, unknown>;
+    if (
+      typeof v.id === "string" &&
+      typeof v.username === "string" &&
+      (v.role === "admin" || v.role === "cleaner" || v.role === "supervisor")
+    ) {
+      return {
+        id: v.id,
+        username: v.username,
+        full_name: typeof v.full_name === "string" ? v.full_name : v.username,
+        role: v.role as Profile["role"],
+        phone: typeof v.phone === "string" ? v.phone : "",
+        is_active: v.is_active !== false,
+        shift_start: typeof v.shift_start === "string" ? v.shift_start : "08:00",
+        shift_end: typeof v.shift_end === "string" ? v.shift_end : "16:00",
+        assigned_zones: Array.isArray(v.assigned_zones) ? (v.assigned_zones as string[]) : [],
+        assigned_locations: Array.isArray(v.assigned_locations) ? (v.assigned_locations as string[]) : [],
+        ...((v.created_at ? { created_at: v.created_at } : {}) as any),
+        ...((v.password ? { password: v.password } : {}) as any),
+      };
+    }
+    return null;
   } catch {
     return null;
   }
@@ -98,34 +102,48 @@ export default function App() {
     let cancelled = false;
 
     const restoreSession = async () => {
-      setAuthLoading(true);
-
       try {
         const raw = localStorage.getItem(SESSION_KEY) ?? localStorage.getItem(LEGACY_SESSION_KEY);
-        const stored = parseStoredSession(raw);
+        const storedProfile = parseStoredProfile(raw);
 
-        if (!stored) {
-          localStorage.removeItem(SESSION_KEY);
-          localStorage.removeItem(LEGACY_SESSION_KEY);
-          if (!cancelled) setUser(null);
+        if (!storedProfile) {
+          if (!cancelled) {
+            setUser(null);
+            setAuthLoading(false);
+          }
           return;
         }
 
-        const current = await getCurrentUserProfile(makeProfileEmail(stored.username));
-        if (!current || current.is_active !== true) {
-          localStorage.removeItem(SESSION_KEY);
-          localStorage.removeItem(LEGACY_SESSION_KEY);
-          if (!cancelled) setUser(null);
-          return;
+        // Instantly restore user session so cleaners enter the application immediately
+        if (!cancelled) {
+          setUser(storedProfile);
+          setAuthLoading(false);
         }
 
-        if (!cancelled) setUser(current);
+        // Background non-blocking verification with Firestore: only sign out if explicitly deactivated by admin
+        try {
+          const current = await getCurrentUserProfile(makeProfileEmail(storedProfile.username));
+          if (current) {
+            if (current.is_active === false) {
+              localStorage.removeItem(SESSION_KEY);
+              localStorage.removeItem(LEGACY_SESSION_KEY);
+              if (!cancelled) {
+                setUser(null);
+                setError("تم تعطيل هذا الحساب من قِبل الإدارة.");
+              }
+              return;
+            }
+            if (!cancelled) {
+              setUser(current);
+              localStorage.setItem(SESSION_KEY, JSON.stringify(current));
+            }
+          }
+        } catch (fetchErr) {
+          // Keep the existing cached session if offline or if network is slow
+          console.warn("Background profile verification skipped due to network condition; maintaining active session:", fetchErr);
+        }
       } catch (e) {
         console.error("Failed to restore session profile", e);
-        localStorage.removeItem(SESSION_KEY);
-        localStorage.removeItem(LEGACY_SESSION_KEY);
-        if (!cancelled) setUser(null);
-      } finally {
         if (!cancelled) setAuthLoading(false);
       }
     };
@@ -158,14 +176,18 @@ export default function App() {
       checking = true;
       try {
         const current = await getCurrentUserProfile(makeProfileEmail(user.username));
-        if (!current || current.is_active !== true) {
+        // ONLY clear session if server responded AND user is explicitly inactive
+        if (current && current.is_active === false) {
           clearInvalidSession();
           return;
         }
-        if (!cancelled) setUser(current);
+        if (current && !cancelled) {
+          setUser(current);
+          localStorage.setItem(SESSION_KEY, JSON.stringify(current));
+        }
       } catch (error) {
-        // A transient network failure must not silently deactivate a valid user.
-        console.warn("Active session revalidation failed; keeping the current session temporarily.", error);
+        // A transient network failure must never log out a worker.
+        console.warn("Active session revalidation failed; keeping the current session securely.", error);
       } finally {
         checking = false;
       }
@@ -174,7 +196,6 @@ export default function App() {
     const interval = window.setInterval(() => void revalidateActiveSession(), 60_000);
     window.addEventListener("focus", revalidateActiveSession);
     document.addEventListener("visibilitychange", revalidateActiveSession);
-    void revalidateActiveSession();
 
     return () => {
       cancelled = true;
@@ -210,7 +231,7 @@ export default function App() {
     try {
       const profile = await loginUser(cleanUsername, password);
       setUser(profile);
-      localStorage.setItem(SESSION_KEY, JSON.stringify(toSessionSummary(profile)));
+      localStorage.setItem(SESSION_KEY, JSON.stringify(profile));
       localStorage.removeItem(LEGACY_SESSION_KEY);
       setPassword("");
       setSuccessMessage("تم تسجيل الدخول بنجاح");
