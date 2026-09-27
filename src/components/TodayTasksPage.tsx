@@ -158,10 +158,12 @@ export default function TodayTasksPage({
   const loadTodayTasks = async () => {
     setLoading(true);
     try {
-      const allTasks = await getTasks(getLocalDateString());
-      const myTasks = allTasks.filter((t) => t.assigned_to === user.id);
-      setTasks(myTasks);
-      setLoading(false);
+      // Efficient retry using cleaner-specific listener
+      const unsubscribe = listenTodayTasks(user.id, (myTasks) => {
+        setTasks(myTasks);
+        setLoading(false);
+      });
+      return () => unsubscribe();
     } catch (err) {
       console.error(err);
       setLoading(false);

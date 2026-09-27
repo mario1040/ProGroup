@@ -4,7 +4,9 @@ import html2canvas from "html2canvas";
 import ProfessorLogo from "./ProfessorLogo";
 import SwitchLabelsGuide from "./SwitchLabelsGuide";
 import FirestoreQuotaBanner from "./FirestoreQuotaBanner";
-import { BookOpen } from "lucide-react";
+import QuotaScannerModal from "./QuotaScannerModal";
+import { useQuotaTelemetry } from "../lib/quotaManager";
+import { BookOpen, Activity } from "lucide-react";
 import { 
   CheckCircle, 
   Clock, 
@@ -33,7 +35,8 @@ import {
   Users,
   Box,
   Zap,
-  Loader2
+  Loader2,
+  RefreshCw
 } from "lucide-react";
 import { 
   getTasks, 
@@ -228,26 +231,28 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   const [editingEmployee, setEditingEmployee] = useState<Profile | null>(null);
   const [editingEmployeeInitialActive, setEditingEmployeeInitialActive] = useState<boolean | null>(null);
   const [deactivatingEmployee, setDeactivatingEmployee] = useState<Profile | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [lastSyncTime, setLastSyncTime] = useState<Date>(new Date());
+  const [isQuotaScannerOpen, setIsQuotaScannerOpen] = useState(false);
+  const quotaStats = useQuotaTelemetry();
 
-  // Main load function for master & configuration data
-  const loadAllData = async () => {
+  // Main load function for master & configuration data with intelligent caching to conserve Firestore reads
+  const loadAllData = async (forceRefresh = false) => {
     try {
       setLoading(true);
       setLoadingZones(true);
       setLoadingProfiles(true);
       const results = await Promise.allSettled([
-        getProfiles(),
-        getZones(),
-        getKpis(),
-        getTemplates(),
-        getOperationalTasks(),
-        getDeviceSwitches()
+        getProfiles(forceRefresh),
+        getZones(forceRefresh),
+        getTemplates(forceRefresh),
+        getOperationalTasks(forceRefresh),
+        getDeviceSwitches(forceRefresh)
       ]);
 
-      const [profilesResult, zonesResult, kpisResult, templatesResult, opsResult, switchesResult] = results;
+      const [profilesResult, zonesResult, templatesResult, opsResult, switchesResult] = results;
       const allProfiles = profilesResult.status === "fulfilled" ? profilesResult.value : [];
       const allZones = zonesResult.status === "fulfilled" ? zonesResult.value : [];
-      const allKpis = kpisResult.status === "fulfilled" ? kpisResult.value : [];
       const allTemplates = templatesResult.status === "fulfilled" ? templatesResult.value : [];
       const allOps = opsResult.status === "fulfilled" ? opsResult.value : [];
       const allSwitches = switchesResult.status === "fulfilled" ? switchesResult.value : [];
@@ -269,12 +274,10 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
 
       setProfiles(allProfiles);
       setZones(allZones);
-      setKpis(allKpis);
       setTemplates(uniqueTemplates);
       setOperationalTasks(allOps);
       setDeviceSwitches(allSwitches);
-      setLoadingZones(false);
-      setLoadingProfiles(false);
+      setLastSyncTime(new Date());
     } catch (err) {
       console.error(err);
       showToast("خطأ أثناء تحميل بيانات لوحة التحكم", "error");
@@ -282,6 +285,17 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       setLoading(false);
       setLoadingZones(false);
       setLoadingProfiles(false);
+    }
+  };
+
+  // Dedicated loader for KPIs: Only called when viewing Overview or KPIs tab, and cached for 15 minutes
+  const loadKpisData = async (forceRefresh = false) => {
+    try {
+      const allKpis = await getKpis(undefined, forceRefresh);
+      setKpis(allKpis);
+      setLastSyncTime(new Date());
+    } catch (err) {
+      console.warn("[AdminDashboard] Failed to load KPIs:", err);
     }
   };
 
@@ -304,8 +318,16 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
     };
   }, [selectedDate]);
 
+  // Initial load once on mount (prevents burning 6 collection reads every time admin switches tabs)
   useEffect(() => {
-    loadAllData();
+    loadAllData(false);
+  }, []);
+
+  // Load KPIs only when visiting the KPI analytics or Overview tab
+  useEffect(() => {
+    if (activeTab === 'kpis' || activeTab === 'overview') {
+      loadKpisData(false);
+    }
   }, [activeTab]);
 
   useEffect(() => {
@@ -481,7 +503,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
         requires_photo_after: true,
         requires_supervisor_approval: true
       });
-      loadAllData();
     } catch (err: any) {
       console.error(err);
       showToast(err?.message || "حدث خطأ أثناء إسناد المهمة الجديدة", "error");
@@ -497,7 +518,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       setLoading(true);
       await updateTask(taskId, { assigned_to: newAssigneeId });
       showToast("تم إعادة تعيين الموظف المسؤول للمهمة بنجاح 👥✅", "success");
-      loadAllData();
     } catch (err: any) {
       console.error(err);
       showToast(err.message || "فشل إعادة تعيين الموظف", "error");
@@ -519,7 +539,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       showToast(`تم اعتماد المهمة بنجاح بتقدير (${qualityGrade}) 🎉`, "success");
       setReviewingTask(null);
       setSupervisorNotes("");
-      loadAllData();
     } catch (err) {
       console.error(err);
       showToast("فشل في اعتماد المهمة", "error");
@@ -545,7 +564,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       setReviewingTask(null);
       setRejectionReason("");
       setIsRejecting(false);
-      loadAllData();
     } catch (err) {
       console.error(err);
       showToast("فشل في مراجعة ورفض المهمة", "error");
@@ -1590,6 +1608,88 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
               Administrator
             </span>
           </div>
+
+          {/* Manual Data Refresh Button (Quota-optimized) */}
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                setIsRefreshing(true);
+                await Promise.all([loadAllData(true), loadKpisData(true)]);
+                showToast("تم تحديث البيانات وقاعدة البيانات بنجاح 🔄✨", "success");
+              } catch (_) {
+                showToast("حدث خطأ أثناء تحديث البيانات", "error");
+              } finally {
+                setIsRefreshing(false);
+              }
+            }}
+            disabled={isRefreshing}
+            title={`آخر مزامنة: ${lastSyncTime.toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })} (توفير الكوتة نشط)`}
+            className="
+              flex
+              items-center
+              justify-center
+              gap-1.5
+              h-8
+              rounded-lg
+              border
+              border-emerald-200
+              dark:border-emerald-800
+              bg-emerald-50/80
+              dark:bg-emerald-950/40
+              px-2.5
+              text-[10px]
+              font-bold
+              text-emerald-700
+              dark:text-emerald-300
+              hover:bg-emerald-100
+              dark:hover:bg-emerald-900/60
+              transition-all
+              duration-150
+              cursor-pointer
+              active:scale-95
+            "
+          >
+            <RefreshCw className={`w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 ${isRefreshing ? "animate-spin" : ""}`} />
+            <span className="hidden sm:inline">تحديث البيانات</span>
+          </button>
+
+          {/* Quota Scanner & Live Radar Button */}
+          <button
+            type="button"
+            onClick={() => setIsQuotaScannerOpen(true)}
+            title="فحص وتحليل استهلاك الكوتة السحابية (Radar & Scan)"
+            className="
+              flex
+              items-center
+              justify-center
+              gap-1.5
+              h-8
+              rounded-lg
+              border
+              border-indigo-200
+              dark:border-indigo-800
+              bg-indigo-50/80
+              dark:bg-indigo-950/40
+              px-2.5
+              text-[10px]
+              font-bold
+              text-indigo-700
+              dark:text-indigo-300
+              hover:bg-indigo-100
+              dark:hover:bg-indigo-900/60
+              transition-all
+              duration-150
+              cursor-pointer
+              active:scale-95
+            "
+          >
+            <Activity className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400 animate-pulse" />
+            <span className="hidden sm:inline">رادار الكوتة 📊</span>
+            <span className="px-1.5 py-0.2 rounded-full text-[9px] bg-indigo-200/80 dark:bg-indigo-900/80 text-indigo-800 dark:text-indigo-200 font-mono font-bold">
+              {(quotaStats.totalCloudReads + quotaStats.totalRealtimeReads).toLocaleString()}
+            </span>
+          </button>
 
           {/* Logout */}
           <button
@@ -4954,6 +5054,12 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
           </div>
         </div>
       )}
+
+      {/* Cloud Quota Scanner & Live Audit Radar Modal */}
+      <QuotaScannerModal
+        isOpen={isQuotaScannerOpen}
+        onClose={() => setIsQuotaScannerOpen(false)}
+      />
 
     </div>
   );

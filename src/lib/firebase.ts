@@ -1,6 +1,11 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
-import { initializeFirestore, getFirestore } from "firebase/firestore";
+import { 
+  initializeFirestore, 
+  getFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager
+} from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 import { recordFirestoreError } from "./quotaManager";
 
@@ -19,18 +24,26 @@ export const firebaseConfig = {
 // Safe initialization of Firebase
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
-// CRITICAL: Initialize Firestore with custom database ID from config
+// CRITICAL: Initialize Firestore with persistent multi-tab cache to drastically reduce cloud reads & save quota
 let dbInstance: any;
 try {
-  dbInstance = initializeFirestore(app, {}, firebaseConfig.firestoreDatabaseId);
-  console.log("[Firebase Init] Firestore initialized via initializeFirestore.");
+  const cacheOption = typeof window !== "undefined" && typeof window.indexedDB !== "undefined"
+    ? {
+        localCache: persistentLocalCache({
+          tabManager: persistentMultipleTabManager()
+        })
+      }
+    : {};
+  dbInstance = initializeFirestore(app, cacheOption, firebaseConfig.firestoreDatabaseId);
+  console.log("[Firebase Init] Firestore initialized with persistent multi-tab cache.");
 } catch (e: any) {
-  console.warn("[Firebase Init] initializeFirestore failed, falling back to getFirestore:", e);
+  console.warn("[Firebase Init] initializeFirestore with persistentLocalCache failed, falling back to basic initializeFirestore:", e);
   try {
+    dbInstance = initializeFirestore(app, {}, firebaseConfig.firestoreDatabaseId);
+    console.log("[Firebase Init] Firestore initialized via basic initializeFirestore.");
+  } catch (errFallback: any) {
     dbInstance = getFirestore(app, firebaseConfig.firestoreDatabaseId);
     console.log("[Firebase Init] Firestore obtained via getFirestore fallback.");
-  } catch (err: any) {
-    console.error("[Firebase Init] Critical: getFirestore also failed:", err);
   }
 }
 

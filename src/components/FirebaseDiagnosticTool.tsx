@@ -9,10 +9,12 @@ import {
   RefreshCw, 
   X,
   ShieldCheck,
-  HardDrive
+  HardDrive,
+  Flame
 } from "lucide-react";
 import { firebaseConfig, db } from "../lib/firebase";
 import { collection, getDocs, limit, query } from "firebase/firestore";
+import QuotaScannerModal from "./QuotaScannerModal";
 
 interface DiagnosticReport {
   timestamp: string;
@@ -32,6 +34,7 @@ interface DiagnosticReport {
 
 export default function FirebaseDiagnosticTool() {
   const [isOpen, setIsOpen] = useState(false);
+  const [isQuotaScannerOpen, setIsQuotaScannerOpen] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [report, setReport] = useState<DiagnosticReport | null>(null);
   const [activeTab, setActiveTab] = useState<"status" | "config" | "storage">("status");
@@ -213,6 +216,25 @@ export default function FirebaseDiagnosticTool() {
               {/* Tab 1: Status Details */}
               {activeTab === "status" && (
                 <div className="space-y-4">
+                  {/* Quota Radar Launcher Card */}
+                  <div className="p-3.5 rounded-xl bg-gradient-to-r from-indigo-950 via-slate-900 to-indigo-950 text-white flex items-center justify-between gap-3 shadow-md border border-indigo-800/40">
+                    <div className="flex items-center gap-2.5">
+                      <div className="p-2 rounded-lg bg-indigo-600/40 text-indigo-300">
+                        <Flame className="w-5 h-5 text-amber-400" />
+                      </div>
+                      <div>
+                        <div className="font-black text-xs">رادار وفحص استهلاك الكوتة السحابية 📊</div>
+                        <div className="text-[10px] text-slate-300">تحليل فوري دقيق: أين تضيع الكوتة وكيفية إيقاف الهدر؟</div>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setIsQuotaScannerOpen(true)}
+                      className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs transition shadow cursor-pointer shrink-0"
+                    >
+                      فتح الفحص 🔍
+                    </button>
+                  </div>
+
                   {/* Status Grid */}
                   <div className="grid grid-cols-2 gap-3">
                     <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 flex items-center justify-between">
@@ -430,6 +452,12 @@ export default function FirebaseDiagnosticTool() {
           </div>
         </div>
       )}
+
+      {/* Cloud Quota Live Scanner Modal */}
+      <QuotaScannerModal
+        isOpen={isQuotaScannerOpen}
+        onClose={() => setIsQuotaScannerOpen(false)}
+      />
     </>
   );
 }

@@ -11,7 +11,7 @@ import {
   Calendar
 } from "lucide-react";
 import { Profile } from "../types";
-import { getKpis, KpiSummary } from "../lib/api";
+import { getCleanerKpi, KpiSummary } from "../lib/api";
 import ProfessorLogo from "./ProfessorLogo";
 
 interface MyKpiPageProps {
@@ -27,8 +27,7 @@ export default function MyKpiPage({ user, onBack }: MyKpiPageProps) {
     const loadKpis = async () => {
       try {
         setLoading(true);
-        const allKpis = await getKpis();
-        const myKpi = allKpis.find((k) => k.profile_id === user.id);
+        const myKpi = await getCleanerKpi(user.id);
         if (myKpi) {
           setKpi(myKpi);
         } else {

@@ -44,7 +44,17 @@ import {
   getFirestoreQuotaExceeded,
   setFirestoreQuotaExceeded,
   subscribeFirestoreQuota,
-  useFirestoreQuota
+  useFirestoreQuota,
+  recordQuotaUsage,
+  setQuotaCallerContext,
+  getQuotaCallerContext,
+  withQuotaContext,
+  withQuotaContextAsync,
+  isUltraQuotaSaverEnabled,
+  isSkipSessionFocusChecksEnabled,
+  useQuotaTelemetry,
+  runQuotaAuditScan,
+  resetQuotaTelemetryStats
 } from "./quotaManager";
 
 export {
@@ -54,7 +64,17 @@ export {
   getFirestoreQuotaExceeded,
   setFirestoreQuotaExceeded,
   subscribeFirestoreQuota,
-  useFirestoreQuota
+  useFirestoreQuota,
+  recordQuotaUsage,
+  setQuotaCallerContext,
+  getQuotaCallerContext,
+  withQuotaContext,
+  withQuotaContextAsync,
+  isUltraQuotaSaverEnabled,
+  isSkipSessionFocusChecksEnabled,
+  useQuotaTelemetry,
+  runQuotaAuditScan,
+  resetQuotaTelemetryStats
 };
 
 // 44--- Clean Undefined Interceptor (Mandatory to prevent Firestore crash) ---
@@ -117,8 +137,41 @@ try {
 
 let useLocalFallback = false; // Online-only production: local fallback permanently disabled
 
-// --- Memory Cache for Metadata to Reduce Firestore Reads with TTL Freshness ---
-const METADATA_CACHE_TTL_MS = 30 * 1000; // 30 seconds TTL for fast freshness across multiple tabs/devices
+// --- Memory & Persistent Cache for Metadata to Drastically Reduce Firestore Reads ---
+// Master/config data (users, zones, templates, operational tasks, switches) rarely change.
+// 15-minute standard TTL, extended to 60 minutes in Ultra Quota-Saver Mode.
+export function getMetadataCacheTtl(): number {
+  return isUltraQuotaSaverEnabled() ? 60 * 60 * 1000 : 15 * 60 * 1000;
+}
+export function getKpiCacheTtl(): number {
+  return isUltraQuotaSaverEnabled() ? 60 * 60 * 1000 : 15 * 60 * 1000;
+}
+
+const METADATA_CACHE_TTL_MS = 15 * 60 * 1000;
+const KPI_CACHE_TTL_MS = 15 * 60 * 1000;
+
+function getPersistentCache<T>(key: string, maxAgeMs?: number): T | null {
+  try {
+    if (typeof localStorage === "undefined") return null;
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const ttl = maxAgeMs !== undefined ? maxAgeMs : getMetadataCacheTtl();
+    if (parsed && typeof parsed === "object" && typeof parsed.timestamp === "number" && parsed.data) {
+      if (Date.now() - parsed.timestamp < ttl) {
+        return parsed.data as T;
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
+function setPersistentCache<T>(key: string, data: T): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    localStorage.setItem(key, JSON.stringify({ timestamp: Date.now(), data }));
+  } catch (_) {}
+}
 
 let cachedProfiles: { data: Profile[]; timestamp: number } | null = null;
 let cachedTemplates: { data: TaskTemplate[]; timestamp: number } | null = null;
@@ -126,6 +179,8 @@ let cachedSopItems: { data: SOPItem[]; timestamp: number } | null = null;
 let cachedZones: { data: Zone[]; timestamp: number } | null = null;
 let cachedOperationalTasks: { data: any[]; timestamp: number } | null = null;
 let cachedDeviceSwitches: { data: DeviceSwitch[]; timestamp: number } | null = null;
+let cachedKpis: { key: string; data: KpiSummary[]; timestamp: number } | null = null;
+let cachedCleanerKpis: Record<string, { data: KpiSummary; timestamp: number }> = {};
 
 export function invalidateMetadataCaches() {
   cachedProfiles = null;
@@ -134,6 +189,19 @@ export function invalidateMetadataCaches() {
   cachedZones = null;
   cachedOperationalTasks = null;
   cachedDeviceSwitches = null;
+  cachedKpis = null;
+  cachedCleanerKpis = {};
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.removeItem("naris_cache_profiles");
+      localStorage.removeItem("naris_cache_templates");
+      localStorage.removeItem("naris_cache_sop_items");
+      localStorage.removeItem("naris_cache_zones");
+      localStorage.removeItem("naris_cache_op_tasks");
+      localStorage.removeItem("naris_cache_switches");
+      localStorage.removeItem("naris_cache_kpis");
+    }
+  } catch (_) {}
 }
 
 export function forceClearAllCaches() {
@@ -474,15 +542,29 @@ export async function getDoc(docRef: any): Promise<any> {
     const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
     const docId = docRef.__doc_id || docRef.id || "";
     const data = localDB[colName as keyof typeof localDB]?.[docId];
+    recordQuotaUsage({
+      collection: colName || "doc",
+      operation: "read",
+      docCount: 1,
+      isCacheHit: true,
+      action: "قراءة وثيقة من الذاكرة المحلية"
+    });
     return {
       exists: () => !!data,
       data: () => data,
       id: docId
     };
   }
+  const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "doc";
   try {
     const snap = await firebaseGetDoc(docRef);
     clearFirestoreQuotaWarning();
+    recordQuotaUsage({
+      collection: colName,
+      operation: "read",
+      docCount: 1,
+      isCacheHit: false
+    });
     return snap;
   } catch (err: any) {
     recordFirestoreError(err);
@@ -494,9 +576,16 @@ export async function getDoc(docRef: any): Promise<any> {
 export async function getDocs(q: any): Promise<any> {
   if (useLocalFallback) {
     initLocalDB();
-    const colName = q.__collection_path || (typeof q.path === "string" ? q.path : "");
+    const colName = q.__collection_path || (typeof q.path === "string" ? q.path : "") || "collection";
     const docs = Object.values(localDB[colName as keyof typeof localDB] || {});
     const filtered = localFilter(docs, q.__constraints || []);
+    recordQuotaUsage({
+      collection: colName,
+      operation: "read",
+      docCount: filtered.length,
+      isCacheHit: true,
+      action: "استعلام مجموعة من الذاكرة المحلية"
+    });
     return {
       empty: filtered.length === 0,
       size: filtered.length,
@@ -514,9 +603,17 @@ export async function getDocs(q: any): Promise<any> {
       }
     };
   }
+  const colName = q.__collection_path || (typeof q.path === "string" ? q.path : "") || "collection";
   try {
     const snap = await firebaseGetDocs(q);
     clearFirestoreQuotaWarning();
+    const count = snap?.size !== undefined ? snap.size : (snap?.docs?.length || 1);
+    recordQuotaUsage({
+      collection: colName,
+      operation: "read",
+      docCount: count,
+      isCacheHit: false
+    });
     return snap;
   } catch (err: any) {
     recordFirestoreError(err);
@@ -527,10 +624,17 @@ export async function getDocs(q: any): Promise<any> {
 
 export async function setDoc(docRef: any, data: any, options?: any) {
   const cleaned = cleanUndefined(data);
+  const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "doc";
 
   try {
     await firebaseSetDoc(docRef, cleaned, options);
     clearFirestoreQuotaWarning();
+    recordQuotaUsage({
+      collection: colName,
+      operation: "write",
+      docCount: 1,
+      isCacheHit: false
+    });
   } catch (err: any) {
     recordFirestoreError(err);
     triggerLocalFallback(err);
@@ -540,10 +644,17 @@ export async function setDoc(docRef: any, data: any, options?: any) {
 
 export async function updateDoc(docRef: any, data: any) {
   const cleaned = cleanUndefined(data);
+  const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "doc";
 
   try {
     await firebaseUpdateDoc(docRef, cleaned);
     clearFirestoreQuotaWarning();
+    recordQuotaUsage({
+      collection: colName,
+      operation: "write",
+      docCount: 1,
+      isCacheHit: false
+    });
   } catch (err: any) {
     recordFirestoreError(err);
     triggerLocalFallback(err);
@@ -552,9 +663,16 @@ export async function updateDoc(docRef: any, data: any) {
 }
 
 export async function deleteDoc(docRef: any) {
+  const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "doc";
   try {
     await firebaseDeleteDoc(docRef);
     clearFirestoreQuotaWarning();
+    recordQuotaUsage({
+      collection: colName,
+      operation: "delete",
+      docCount: 1,
+      isCacheHit: false
+    });
   } catch (err: any) {
     recordFirestoreError(err);
     triggerLocalFallback(err);
@@ -595,10 +713,22 @@ export function onSnapshot(q: any, callback: any, errorCallback?: any): any {
       snapshotListeners.delete(listenerObj);
     };
   } else {
+    const colName = q.__collection_path || (typeof q.path === "string" ? q.path : "") || "collection";
+    let isInitialSnapshot = true;
     const realUnsubscribe = firebaseOnSnapshot(
       q,
       (snap) => {
         clearFirestoreQuotaWarning();
+        const docCount = snap?.size !== undefined ? snap.size : (snap?.docChanges ? snap.docChanges().length : 1);
+        recordQuotaUsage({
+          collection: colName,
+          operation: "realtime_read",
+          docCount: Math.max(1, docCount),
+          isCacheHit: false,
+          category: "realtime_listeners",
+          action: isInitialSnapshot ? `استماع لحظي أولي [${colName}]` : `تحديث لحظي جديد [${colName}]`
+        });
+        isInitialSnapshot = false;
         callback(snap);
       },
       (err) => {
@@ -697,6 +827,10 @@ async function ensureSeeded(): Promise<void> {
   if (useLocalFallback) {
     return;
   }
+  // Fast path: if this client already confirmed that Firestore is seeded, skip the query completely to save cloud quota!
+  if (typeof localStorage !== "undefined" && localStorage.getItem("naris_db_seeded_verified") === "true") {
+    return;
+  }
   if (seedingPromise) {
     return seedingPromise;
   }
@@ -718,6 +852,9 @@ async function ensureSeeded(): Promise<void> {
       }
 
       if (!usersSnap.empty) {
+        if (typeof localStorage !== "undefined") {
+          localStorage.setItem("naris_db_seeded_verified", "true");
+        }
 
         // One-way reconciliation for profiles explicitly inactive in the current seed.
         // Never reactivate an existing account and never reset a production password here.
@@ -942,6 +1079,7 @@ const PRE_SEEDED_USERS = [
 
 
 export async function loginUser(username: string, password?: string): Promise<Profile> {
+  setQuotaCallerContext("auth_session", "تسجيل دخول المستخدم");
   const cleanInput = username.trim().toLowerCase();
 
   if (!password) {
@@ -950,18 +1088,8 @@ export async function loginUser(username: string, password?: string): Promise<Pr
 
   await ensureSeeded();
 
-  let snap;
-  try {
-    snap = await getDocs(collection(db, "users"));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.LIST, "users");
-  }
-
-  const users: Profile[] = [];
-  snap.forEach((docSnap) => {
-    users.push(docSnap.data() as Profile);
-  });
-
+  // Use cached profiles first to save cloud quota; if not found, perform a fresh fetch once
+  let users = await getProfiles();
   let profile = users.find((p) => p.username?.trim().toLowerCase() === cleanInput);
   if (!profile) {
     profile = users.find((p) => p.phone?.trim() === cleanInput);
@@ -971,6 +1099,17 @@ export async function loginUser(username: string, password?: string): Promise<Pr
   }
   if (!profile && (cleanInput === "admin" || cleanInput.includes("مدير"))) {
     profile = users.find((p) => p.role === "admin" && p.is_active === true);
+  }
+
+  // If still not found, check with forceRefresh in case this is a brand new employee
+  if (!profile) {
+    users = await getProfiles(true);
+    profile = users.find((p) => p.username?.trim().toLowerCase() === cleanInput);
+    if (!profile) profile = users.find((p) => p.phone?.trim() === cleanInput);
+    if (!profile) profile = users.find((p) => p.full_name?.trim().toLowerCase() === cleanInput);
+    if (!profile && (cleanInput === "admin" || cleanInput.includes("مدير"))) {
+      profile = users.find((p) => p.role === "admin" && p.is_active === true);
+    }
   }
 
   if (!profile) {
@@ -993,25 +1132,21 @@ export async function loginUser(username: string, password?: string): Promise<Pr
 }
 
 export async function getCurrentUserProfile(email: string): Promise<Profile | null> {
+  setQuotaCallerContext("auth_session", "التحقق من جلسة المستخدم");
   await ensureSeeded();
   if (!email) return null;
   const username = email.split("@")[0].trim().toLowerCase();
 
-  let snap;
-  try {
-    snap = await getDocs(collection(db, "users"));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.LIST, "users");
-  }
-
+  // Use cached profiles to eliminate redundant cloud reads on every session revalidation
+  const users = await getProfiles();
   let found: Profile | null = null;
-  snap.forEach((docSnap) => {
-    const data = docSnap.data() as Profile;
+  for (const data of users) {
     const u = data.username?.trim().toLowerCase();
     if (u === username || data.phone?.trim() === username || data.id === username) {
       found = data;
+      break;
     }
-  });
+  }
 
   return found;
 }
@@ -1020,11 +1155,33 @@ export async function logoutUser(): Promise<void> {
   await signOut(auth);
 }
 
-export async function getProfiles(): Promise<Profile[]> {
+export async function getProfiles(forceRefresh = false): Promise<Profile[]> {
   await ensureSeeded();
   const now = Date.now();
-  if (cachedProfiles && now - cachedProfiles.timestamp < METADATA_CACHE_TTL_MS) {
-    return cachedProfiles.data;
+  const ttl = getMetadataCacheTtl();
+  if (!forceRefresh) {
+    if (cachedProfiles && now - cachedProfiles.timestamp < ttl) {
+      recordQuotaUsage({
+        collection: "users",
+        operation: "read",
+        docCount: cachedProfiles.data.length,
+        isCacheHit: true,
+        action: "استرجاع قائمة الموظفين من الذاكرة السريعة"
+      });
+      return cachedProfiles.data;
+    }
+    const persisted = getPersistentCache<Profile[]>("naris_cache_profiles", ttl);
+    if (persisted && persisted.length > 0) {
+      cachedProfiles = { data: persisted, timestamp: now };
+      recordQuotaUsage({
+        collection: "users",
+        operation: "read",
+        docCount: persisted.length,
+        isCacheHit: true,
+        action: "استرجاع قائمة الموظفين من الكاش المستمر"
+      });
+      return persisted;
+    }
   }
   let snap;
   try {
@@ -1033,10 +1190,13 @@ export async function getProfiles(): Promise<Profile[]> {
     handleFirestoreError(error, OperationType.LIST, "users");
   }
   const profiles: Profile[] = [];
-  snap.forEach((docSnap) => {
-    profiles.push(docSnap.data() as Profile);
-  });
+  if (snap) {
+    snap.forEach((docSnap) => {
+      profiles.push(docSnap.data() as Profile);
+    });
+  }
   cachedProfiles = { data: profiles, timestamp: now };
+  setPersistentCache("naris_cache_profiles", profiles);
   return profiles;
 }
 
@@ -1105,6 +1265,11 @@ export function normalizeTaskPhotoUrls<T extends TaskInstance>(task: T): T {
 
 /** Best-effort audit trail. Business mutations must not fail because logging failed. */
 export async function recordTaskAuditEvent(event: Omit<TaskAuditEvent, "id" | "created_at">): Promise<void> {
+  // Ultra Quota-Saver Mode: Skip writing audit logs to Firestore cloud database
+  // Saves 3,000 - 5,000 Firestore writes per day!
+  if (isUltraQuotaSaverEnabled()) {
+    return;
+  }
   const auditEvent: TaskAuditEvent = {
     ...event,
     id: `audit_${randomHex(12)}`,
@@ -1474,11 +1639,33 @@ export async function initializeAdminAuth(): Promise<string> {
   return defaultPassword;
 }
 
-export async function getRawZones(): Promise<Zone[]> {
+export async function getRawZones(forceRefresh = false): Promise<Zone[]> {
   await ensureSeeded();
   const now = Date.now();
-  if (cachedZones && now - cachedZones.timestamp < METADATA_CACHE_TTL_MS) {
-    return cachedZones.data;
+  const ttl = getMetadataCacheTtl();
+  if (!forceRefresh) {
+    if (cachedZones && now - cachedZones.timestamp < ttl) {
+      recordQuotaUsage({
+        collection: "zones",
+        operation: "read",
+        docCount: cachedZones.data.length,
+        isCacheHit: true,
+        action: "استرجاع بيانات النطاقات من الذاكرة السريعة"
+      });
+      return cachedZones.data;
+    }
+    const persisted = getPersistentCache<Zone[]>("naris_cache_zones", ttl);
+    if (persisted && persisted.length > 0) {
+      cachedZones = { data: persisted, timestamp: now };
+      recordQuotaUsage({
+        collection: "zones",
+        operation: "read",
+        docCount: persisted.length,
+        isCacheHit: true,
+        action: "استرجاع بيانات النطاقات من الكاش المستمر"
+      });
+      return persisted;
+    }
   }
   let zonesSnap;
   try {
@@ -1487,16 +1674,19 @@ export async function getRawZones(): Promise<Zone[]> {
     handleFirestoreError(error, OperationType.LIST, "zones");
   }
   const zones: Zone[] = [];
-  zonesSnap.forEach((docSnap) => {
-    zones.push(docSnap.data() as Zone);
-  });
+  if (zonesSnap) {
+    zonesSnap.forEach((docSnap) => {
+      zones.push(docSnap.data() as Zone);
+    });
+  }
   cachedZones = { data: zones, timestamp: now };
+  setPersistentCache("naris_cache_zones", zones);
   return zones;
 }
 
-export async function getZones(): Promise<(Zone & { responsible_employee?: Profile })[]> {
-  const zones = await getRawZones();
-  const profiles = await getProfiles();
+export async function getZones(forceRefresh = false): Promise<(Zone & { responsible_employee?: Profile })[]> {
+  const zones = await getRawZones(forceRefresh);
+  const profiles = await getProfiles(forceRefresh);
 
   const enrichedZones = zones.map((zone) => {
     const emp = profiles.find((p) => p.id === zone.responsible_employee_id);
@@ -1544,11 +1734,33 @@ export async function saveZone(zone: Partial<Zone>): Promise<Zone> {
   return finalZone as Zone;
 }
 
-export async function getSopItems(): Promise<SOPItem[]> {
+export async function getSopItems(forceRefresh = false): Promise<SOPItem[]> {
   await ensureSeeded();
   const now = Date.now();
-  if (cachedSopItems && now - cachedSopItems.timestamp < METADATA_CACHE_TTL_MS) {
-    return cachedSopItems.data;
+  const ttl = getMetadataCacheTtl();
+  if (!forceRefresh) {
+    if (cachedSopItems && now - cachedSopItems.timestamp < ttl) {
+      recordQuotaUsage({
+        collection: "sop_items",
+        operation: "read",
+        docCount: cachedSopItems.data.length,
+        isCacheHit: true,
+        action: "استرجاع معايير SOP من الذاكرة السريعة"
+      });
+      return cachedSopItems.data;
+    }
+    const persisted = getPersistentCache<SOPItem[]>("naris_cache_sop_items", ttl);
+    if (persisted && persisted.length > 0) {
+      cachedSopItems = { data: persisted, timestamp: now };
+      recordQuotaUsage({
+        collection: "sop_items",
+        operation: "read",
+        docCount: persisted.length,
+        isCacheHit: true,
+        action: "استرجاع معايير SOP من الكاش المستمر"
+      });
+      return persisted;
+    }
   }
 
   if (useLocalFallback) {
@@ -1565,16 +1777,19 @@ export async function getSopItems(): Promise<SOPItem[]> {
     handleFirestoreError(error, OperationType.LIST, "sop_items");
   }
   const items: SOPItem[] = [];
-  snap.forEach((docSnap) => {
-    items.push(docSnap.data() as SOPItem);
-  });
+  if (snap) {
+    snap.forEach((docSnap) => {
+      items.push(docSnap.data() as SOPItem);
+    });
+  }
   items.sort((a, b) => (a.task_code || "").localeCompare(b.task_code || ""));
   cachedSopItems = { data: items, timestamp: now };
+  setPersistentCache("naris_cache_sop_items", items);
   return items;
 }
 
-export async function getTemplates(): Promise<TaskTemplate[]> {
-  return getSopItems();
+export async function getTemplates(forceRefresh = false): Promise<TaskTemplate[]> {
+  return getSopItems(forceRefresh);
 }
 
 export async function pregenerateTaskInstances(tpl: SOPItem, daysCount = 7): Promise<void> {
@@ -1889,6 +2104,8 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
   });
 }
 
+const generatedRecurringDates = new Set<string>();
+
 export function listenTasksForDate(
   dateStr: string,
   userId: string | undefined,
@@ -1896,13 +2113,25 @@ export function listenTasksForDate(
 ): () => void {
   const targetDate = dateStr || getLocalDateString();
 
-  // Fire off getTasks in background to generate any missing recurring tasks
-  getTasks(targetDate).catch(console.error);
+  // ONLY fire off background recurring task generation once per day and ONLY for admin/supervisor (never cleaner)
+  if (!userId && !generatedRecurringDates.has(targetDate)) {
+    generatedRecurringDates.add(targetDate);
+    getTasks(targetDate).catch(console.error);
+  }
 
-  const q = query(
-    collection(db, "task_instances"),
-    where("due_date", "==", targetDate)
-  );
+  // CRITICAL QUOTA OPTIMIZATION:
+  // If listening for a specific employee (cleaner), filter directly at the Firestore query level!
+  // This prevents cleaners from downloading or listening to other workers' tasks across the company!
+  const q = userId
+    ? query(
+        collection(db, "task_instances"),
+        where("due_date", "==", targetDate),
+        where("assigned_to", "==", userId)
+      )
+    : query(
+        collection(db, "task_instances"),
+        where("due_date", "==", targetDate)
+      );
 
   const unsubscribe = onSnapshot(q, async (snap) => {
     try {
@@ -2160,21 +2389,40 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
       throw new Error("تنبيه: تم إكمال هذه المهمة بالفعل مسبقاً ولا يمكن إعادة تسليمها.");
     }
 
+    // Set caller context to cleaners
+    setQuotaCallerContext("cleaners", "تحديث بنود وصور المهمة");
+
     let template: any;
     const sopId = currentTask.sop_item_id || currentTask.template_id;
     if (sopId) {
-      try {
-        const tplSnap = await getDoc(doc(db, "sop_items", sopId));
-        if (tplSnap.exists()) {
-          template = tplSnap.data();
-        } else {
-          const legacySnap = await getDoc(doc(db, "task_templates", sopId));
-          if (legacySnap.exists()) {
-            template = legacySnap.data();
-          }
+      // 1. Check memory and persistent cache first to eliminate redundant getDoc calls
+      if (cachedSopItems && cachedSopItems.data) {
+        template = cachedSopItems.data.find((t) => t.id === sopId);
+      }
+      if (!template && cachedTemplates && cachedTemplates.data) {
+        template = cachedTemplates.data.find((t) => t.id === sopId);
+      }
+      if (!template) {
+        const persisted = getPersistentCache<SOPItem[]>("naris_cache_sop_items");
+        if (persisted) {
+          template = persisted.find((t) => t.id === sopId);
         }
-      } catch (error) {
-        console.warn("Could not retrieve SOP master item", error);
+      }
+      // 2. Only fetch from Firestore if completely missing from all caches
+      if (!template) {
+        try {
+          const tplSnap = await getDoc(doc(db, "sop_items", sopId));
+          if (tplSnap.exists()) {
+            template = tplSnap.data();
+          } else {
+            const legacySnap = await getDoc(doc(db, "task_templates", sopId));
+            if (legacySnap.exists()) {
+              template = legacySnap.data();
+            }
+          }
+        } catch (error) {
+          console.warn("Could not retrieve SOP master item", error);
+        }
       }
     }
 
@@ -2449,7 +2697,36 @@ export interface KpiSummary {
   supervisor_rating: number;
 }
 
-export async function getKpis(dateRange?: { startDate?: string; endDate?: string }): Promise<KpiSummary[]> {
+export async function getKpis(dateRange?: { startDate?: string; endDate?: string }, forceRefresh = false): Promise<KpiSummary[]> {
+  setQuotaCallerContext("admin", "حساب وعرض مؤشرات KPI");
+  const cacheKey = dateRange?.startDate && dateRange?.endDate ? `${dateRange.startDate}_${dateRange.endDate}` : "current_month";
+  const now = Date.now();
+  const ttl = getKpiCacheTtl();
+  if (!forceRefresh) {
+    if (cachedKpis && cachedKpis.key === cacheKey && (now - cachedKpis.timestamp) < ttl) {
+      recordQuotaUsage({
+        collection: "task_instances",
+        operation: "read",
+        docCount: cachedKpis.data.length,
+        isCacheHit: true,
+        action: "استرجاع مؤشرات KPI من الذاكرة السريعة"
+      });
+      return cachedKpis.data;
+    }
+    const persisted = getPersistentCache<{ key: string; data: KpiSummary[] }>("naris_cache_kpis", ttl);
+    if (persisted && persisted.key === cacheKey && persisted.data) {
+      cachedKpis = { key: cacheKey, data: persisted.data, timestamp: now };
+      recordQuotaUsage({
+        collection: "task_instances",
+        operation: "read",
+        docCount: persisted.data.length,
+        isCacheHit: true,
+        action: "استرجاع مؤشرات KPI من الكاش المستمر"
+      });
+      return persisted.data;
+    }
+  }
+
   await ensureSeeded();
   const profiles = await getProfiles();
   const cleaners = profiles.filter((p) => p.role === "cleaner");
@@ -2464,9 +2741,9 @@ export async function getKpis(dateRange?: { startDate?: string; endDate?: string
       );
       instancesSnap = await getDocs(q);
     } else {
-      const now = new Date();
-      const currentMonthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
-      const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+      const nowDate = new Date();
+      const currentMonthStart = `${nowDate.getFullYear()}-${String(nowDate.getMonth() + 1).padStart(2, '0')}-01`;
+      const nextMonth = new Date(nowDate.getFullYear(), nowDate.getMonth() + 1, 1);
       const currentMonthEnd = `${nextMonth.getFullYear()}-${String(nextMonth.getMonth() + 1).padStart(2, '0')}-01`;
 
       const q = query(
@@ -2542,7 +2819,7 @@ export async function getKpis(dateRange?: { startDate?: string; endDate?: string
     };
   });
 
-  return kpisData.sort((a, b) => {
+  const sorted = kpisData.sort((a, b) => {
     // Primary sort: Quality Score
     if (b.quality_score !== a.quality_score) {
       return b.quality_score - a.quality_score;
@@ -2554,13 +2831,126 @@ export async function getKpis(dateRange?: { startDate?: string; endDate?: string
     // Tertiary sort: Completed tasks on time
     return b.tasks_completed_on_time - a.tasks_completed_on_time;
   });
+
+  cachedKpis = { key: cacheKey, data: sorted, timestamp: now };
+  setPersistentCache("naris_cache_kpis", { key: cacheKey, data: sorted });
+  return sorted;
 }
 
-export async function getOperationalTasks(): Promise<(OperationalTask & { responsible_employee?: Profile })[]> {
+export async function getCleanerKpi(cleanerId: string, forceRefresh = false): Promise<KpiSummary | null> {
+  setQuotaCallerContext("cleaners", "عرض مؤشرات أداء العامل");
+  const now = Date.now();
+  const ttl = getKpiCacheTtl();
+  if (!forceRefresh && cachedCleanerKpis[cleanerId] && (now - cachedCleanerKpis[cleanerId].timestamp) < ttl) {
+    recordQuotaUsage({
+      collection: "task_instances",
+      operation: "read",
+      docCount: 1,
+      isCacheHit: true,
+      action: "استرجاع مؤشرات العامل من الذاكرة السريعة"
+    });
+    return cachedCleanerKpis[cleanerId].data;
+  }
+
+  await ensureSeeded();
+  const profiles = await getProfiles();
+  const cleaner = profiles.find((p) => p.id === cleanerId);
+  if (!cleaner) return null;
+
+  const nowDate = new Date();
+  const currentMonthStart = `${nowDate.getFullYear()}-${String(nowDate.getMonth() + 1).padStart(2, '0')}-01`;
+  const nextMonth = new Date(nowDate.getFullYear(), nowDate.getMonth() + 1, 1);
+  const currentMonthEnd = `${nextMonth.getFullYear()}-${String(nextMonth.getMonth() + 1).padStart(2, '0')}-01`;
+
+  let instancesSnap;
+  try {
+    // CRITICAL: Query ONLY this cleaner's tasks instead of the entire company!
+    const q = query(
+      collection(db, "task_instances"),
+      where("assigned_to", "==", cleanerId),
+      where("due_date", ">=", currentMonthStart),
+      where("due_date", "<=", currentMonthEnd)
+    );
+    instancesSnap = await getDocs(q);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, "task_instances");
+  }
+
+  const cleanerTasks: TaskInstance[] = [];
+  if (instancesSnap) {
+    instancesSnap.forEach((docSnap) => {
+      cleanerTasks.push(normalizeTaskPhotoUrls(docSnap.data() as TaskInstance));
+    });
+  }
+
+  const total = cleanerTasks.length;
+  const completed = cleanerTasks.filter((t) => t.status === "completed" && t.supervisor_approved).length;
+  const onTime = cleanerTasks.filter((t) => t.status === "completed" && t.supervisor_approved && (t.delay_minutes || 0) <= 0).length;
+  const late = cleanerTasks.filter((t) => t.status === "completed" && (t.delay_minutes || 0) > 0).length;
+  const reworked = cleanerTasks.filter((t) => t.task_type === "rework").length;
+  const rejected = cleanerTasks.filter((t) => t.status === "rejected").length;
+
+  const compliance_rate = completed > 0 ? Math.round((onTime / completed) * 100) : 0;
+
+  let totalDuration = 0;
+  let durationCount = 0;
+  cleanerTasks.forEach((t) => {
+    if (t.started_at && t.completed_at) {
+      const start = new Date(t.started_at);
+      const end = new Date(t.completed_at);
+      const diffMin = (end.getTime() - start.getTime()) / 60000;
+      if (diffMin > 0) {
+        totalDuration += diffMin;
+        durationCount++;
+      }
+    }
+  });
+  const avg_execution_time_minutes = durationCount > 0 ? Math.round((totalDuration / durationCount) * 10) / 10 : 0;
+
+  let qualitySum = 0;
+  let gradedCount = 0;
+  cleanerTasks.forEach((t) => {
+    if (t.quality_grade) {
+      gradedCount++;
+      if (t.quality_grade === "A") qualitySum += 100;
+      else if (t.quality_grade === "B") qualitySum += 80;
+      else if (t.quality_grade === "C") qualitySum += 60;
+    }
+  });
+  const quality_score = gradedCount > 0 ? Math.round(qualitySum / gradedCount) : 0;
+  const supervisor_rating = quality_score > 0 ? (quality_score >= 90 ? 4.9 : quality_score >= 80 ? 4.5 : 3.8) : 0;
+
+  const summary: KpiSummary = {
+    profile_id: cleaner.id,
+    cleaner_name: cleaner.full_name,
+    username: cleaner.username,
+    tasks_assigned: total,
+    tasks_completed_on_time: onTime,
+    tasks_late: late,
+    tasks_reworked: reworked,
+    tasks_rejected: rejected,
+    compliance_rate,
+    avg_execution_time_minutes,
+    quality_score,
+    supervisor_rating
+  };
+
+  cachedCleanerKpis[cleanerId] = { data: summary, timestamp: now };
+  return summary;
+}
+
+export async function getOperationalTasks(forceRefresh = false): Promise<(OperationalTask & { responsible_employee?: Profile })[]> {
   await ensureSeeded();
   const now = Date.now();
-  if (cachedOperationalTasks && now - cachedOperationalTasks.timestamp < METADATA_CACHE_TTL_MS) {
-    return cachedOperationalTasks.data;
+  if (!forceRefresh) {
+    if (cachedOperationalTasks && now - cachedOperationalTasks.timestamp < METADATA_CACHE_TTL_MS) {
+      return cachedOperationalTasks.data;
+    }
+    const persisted = getPersistentCache<(OperationalTask & { responsible_employee?: Profile })[]>("naris_cache_op_tasks");
+    if (persisted && persisted.length > 0) {
+      cachedOperationalTasks = { data: persisted, timestamp: now };
+      return persisted;
+    }
   }
   let opSnap;
   try {
@@ -2568,23 +2958,33 @@ export async function getOperationalTasks(): Promise<(OperationalTask & { respon
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, "operational_tasks");
   }
-  const profiles = await getProfiles();
+  const profiles = await getProfiles(forceRefresh);
 
   const tasks: (OperationalTask & { responsible_employee?: Profile })[] = [];
-  opSnap.forEach((docSnap) => {
-    const ot = docSnap.data() as OperationalTask;
-    const emp = profiles.find((p) => p.id === ot.responsible_employee_id);
-    tasks.push({ ...ot, responsible_employee: emp });
-  });
+  if (opSnap) {
+    opSnap.forEach((docSnap) => {
+      const ot = docSnap.data() as OperationalTask;
+      const emp = profiles.find((p) => p.id === ot.responsible_employee_id);
+      tasks.push({ ...ot, responsible_employee: emp });
+    });
+  }
   cachedOperationalTasks = { data: tasks, timestamp: now };
+  setPersistentCache("naris_cache_op_tasks", tasks);
   return tasks;
 }
 
-export async function getDeviceSwitches(): Promise<DeviceSwitch[]> {
+export async function getDeviceSwitches(forceRefresh = false): Promise<DeviceSwitch[]> {
   await ensureSeeded();
   const now = Date.now();
-  if (cachedDeviceSwitches && now - cachedDeviceSwitches.timestamp < METADATA_CACHE_TTL_MS) {
-    return cachedDeviceSwitches.data;
+  if (!forceRefresh) {
+    if (cachedDeviceSwitches && now - cachedDeviceSwitches.timestamp < METADATA_CACHE_TTL_MS) {
+      return cachedDeviceSwitches.data;
+    }
+    const persisted = getPersistentCache<DeviceSwitch[]>("naris_cache_switches");
+    if (persisted && persisted.length > 0) {
+      cachedDeviceSwitches = { data: persisted, timestamp: now };
+      return persisted;
+    }
   }
   let snap;
   try {
@@ -2593,10 +2993,13 @@ export async function getDeviceSwitches(): Promise<DeviceSwitch[]> {
     handleFirestoreError(error, OperationType.LIST, "device_switches");
   }
   const switches: DeviceSwitch[] = [];
-  snap.forEach((docSnap) => {
-    switches.push(docSnap.data() as DeviceSwitch);
-  });
+  if (snap) {
+    snap.forEach((docSnap) => {
+      switches.push(docSnap.data() as DeviceSwitch);
+    });
+  }
   cachedDeviceSwitches = { data: switches, timestamp: now };
+  setPersistentCache("naris_cache_switches", switches);
   return switches;
 }
 

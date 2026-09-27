@@ -13,6 +13,7 @@ import {
   getCurrentUserProfile,
   loginUser,
   logoutUser,
+  isSkipSessionFocusChecksEnabled,
 } from "./lib/api";
 import type { Profile } from "./types";
 import TodayTasksPage from "./components/TodayTasksPage";
@@ -171,8 +172,15 @@ export default function App() {
       }
     };
 
-    const revalidateActiveSession = async () => {
+    let lastChecked = Date.now();
+    const revalidateActiveSession = async (force = false) => {
       if (checking || cancelled) return;
+      // When skipSessionFocusChecks is enabled, never perform background queries on screen unlock/app switch
+      if (!force && isSkipSessionFocusChecksEnabled()) return;
+      const now = Date.now();
+      const minInterval = isSkipSessionFocusChecksEnabled() ? 60 * 60 * 1000 : 15 * 60 * 1000;
+      if (!force && (now - lastChecked < minInterval)) return;
+      lastChecked = now;
       checking = true;
       try {
         const current = await getCurrentUserProfile(makeProfileEmail(user.username));
@@ -193,15 +201,26 @@ export default function App() {
       }
     };
 
-    const interval = window.setInterval(() => void revalidateActiveSession(), 60_000);
-    window.addEventListener("focus", revalidateActiveSession);
-    document.addEventListener("visibilitychange", revalidateActiveSession);
+    // Recheck only once every 60 minutes instead of burning hundreds of reads every 5 minutes
+    const interval = window.setInterval(() => {
+      if (!isSkipSessionFocusChecksEnabled()) {
+        void revalidateActiveSession(true);
+      }
+    }, 60 * 60 * 1000);
+
+    const onVisibilityOrFocus = () => {
+      if (!isSkipSessionFocusChecksEnabled()) {
+        void revalidateActiveSession(false);
+      }
+    };
+    window.addEventListener("focus", onVisibilityOrFocus);
+    document.addEventListener("visibilitychange", onVisibilityOrFocus);
 
     return () => {
       cancelled = true;
       window.clearInterval(interval);
-      window.removeEventListener("focus", revalidateActiveSession);
-      document.removeEventListener("visibilitychange", revalidateActiveSession);
+      window.removeEventListener("focus", onVisibilityOrFocus);
+      document.removeEventListener("visibilitychange", onVisibilityOrFocus);
     };
   }, [user?.id, user?.username]);
 
