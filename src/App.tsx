@@ -291,23 +291,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans antialiased rtl-grid text-right flex flex-col">
-      {!isOnline && (
-        <div className="bg-rose-600 text-white px-4 py-2.5 text-xs md:text-sm font-bold flex items-center justify-between shadow-md border-b border-rose-700 gap-4 z-50">
-          <div className="flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-white shrink-0 animate-pulse" />
-            <span>
-              <strong>انقطاع الاتصال بالإنترنت:</strong> النظام يعمل بنمط السحابة المباشر (Online-Only). يرجى التحقق من اتصال شبكة الإنترنت لضمان إرسال وتحديث المهام والصور.
-            </span>
-          </div>
-          <button
-            onClick={() => window.location.reload()}
-            className="bg-slate-900 hover:bg-slate-800 text-white px-2.5 py-1 rounded-lg text-[10px] md:text-xs transition font-bold shrink-0 cursor-pointer"
-          >
-            إعادة المحاولة
-          </button>
-        </div>
-      )}
-      {isOnline && !user && <FirestoreQuotaBanner onRetry={() => window.location.reload()} />}
+      <FirestoreQuotaBanner onRetry={() => window.location.reload()} />
       {!user ? (
         <div className="min-h-screen flex flex-col items-center justify-center bg-slate-900 px-4 py-12 relative overflow-hidden">
           <div className="absolute w-96 h-96 bg-indigo-600/10 rounded-full blur-3xl -top-12 -right-12" />

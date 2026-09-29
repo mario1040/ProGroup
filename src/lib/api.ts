@@ -36,7 +36,16 @@ import {
 } from "firebase/auth";
 import { initializeApp, deleteApp } from "firebase/app";
 import { getSeededDB } from "../db_default";
-import { isOnline } from "./offlineManager";
+import {
+  isOnline,
+  queuePendingMutation,
+  getPendingMutations,
+  getPendingMutationsCount,
+  removePendingMutation,
+  executePendingSync,
+  usePendingMutationsCount,
+  useIsSyncing
+} from "./offlineManager";
 import {
   recordFirestoreError,
   clearFirestoreQuotaWarning,
@@ -58,6 +67,14 @@ import {
 } from "./quotaManager";
 
 export {
+  isOnline,
+  queuePendingMutation,
+  getPendingMutations,
+  getPendingMutationsCount,
+  removePendingMutation,
+  executePendingSync,
+  usePendingMutationsCount,
+  useIsSyncing,
   recordFirestoreError,
   clearFirestoreQuotaWarning,
   isFirestoreQuotaError,
@@ -537,17 +554,19 @@ export function doc(...args: any[]): any {
 }
 
 export async function getDoc(docRef: any): Promise<any> {
-  if (useLocalFallback) {
+  const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "doc";
+  const docId = docRef.__doc_id || docRef.id || "";
+
+  // 1. If offline or quota exceeded, fall back directly to localDB to prevent blocking user
+  if (!isOnline() || getFirestoreQuotaExceeded() || useLocalFallback) {
     initLocalDB();
-    const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "";
-    const docId = docRef.__doc_id || docRef.id || "";
     const data = localDB[colName as keyof typeof localDB]?.[docId];
     recordQuotaUsage({
       collection: colName || "doc",
       operation: "read",
       docCount: 1,
       isCacheHit: true,
-      action: "قراءة وثيقة من الذاكرة المحلية"
+      action: "قراءة وثيقة من الكاش المحلي الآمن"
     });
     return {
       exists: () => !!data,
@@ -555,7 +574,8 @@ export async function getDoc(docRef: any): Promise<any> {
       id: docId
     };
   }
-  const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "doc";
+
+  // 2. Normal cloud fetch with graceful localDB fallback on error
   try {
     const snap = await firebaseGetDoc(docRef);
     clearFirestoreQuotaWarning();
@@ -565,18 +585,45 @@ export async function getDoc(docRef: any): Promise<any> {
       docCount: 1,
       isCacheHit: false
     });
+    // Cache the fresh cloud doc locally
+    if (snap && snap.exists()) {
+      initLocalDB();
+      if (!localDB[colName as keyof typeof localDB]) {
+        (localDB as any)[colName] = {};
+      }
+      localDB[colName as keyof typeof localDB][docId] = snap.data();
+      saveLocalDB();
+    }
     return snap;
   } catch (err: any) {
     recordFirestoreError(err);
+    if (isFirestoreQuotaError(err) || !isOnline()) {
+      initLocalDB();
+      const data = localDB[colName as keyof typeof localDB]?.[docId];
+      recordQuotaUsage({
+        collection: colName,
+        operation: "read",
+        docCount: 1,
+        isCacheHit: true,
+        action: "استرجاع وثيقة من الكاش بعد تعذر السحابة"
+      });
+      return {
+        exists: () => !!data,
+        data: () => data,
+        id: docId
+      };
+    }
     triggerLocalFallback(err);
     throw err;
   }
 }
 
 export async function getDocs(q: any): Promise<any> {
-  if (useLocalFallback) {
+  const colName = q.__collection_path || (typeof q.path === "string" ? q.path : "") || "collection";
+
+  // 1. If offline or quota exceeded, serve from localDB immediately
+  if (!isOnline() || getFirestoreQuotaExceeded() || useLocalFallback) {
     initLocalDB();
-    const colName = q.__collection_path || (typeof q.path === "string" ? q.path : "") || "collection";
     const docs = Object.values(localDB[colName as keyof typeof localDB] || {});
     const filtered = localFilter(docs, q.__constraints || []);
     recordQuotaUsage({
@@ -584,7 +631,7 @@ export async function getDocs(q: any): Promise<any> {
       operation: "read",
       docCount: filtered.length,
       isCacheHit: true,
-      action: "استعلام مجموعة من الذاكرة المحلية"
+      action: "استعلام مجموعة من الكاش المحلي الآمن"
     });
     return {
       empty: filtered.length === 0,
@@ -603,7 +650,8 @@ export async function getDocs(q: any): Promise<any> {
       }
     };
   }
-  const colName = q.__collection_path || (typeof q.path === "string" ? q.path : "") || "collection";
+
+  // 2. Normal cloud fetch with graceful localDB fallback on error
   try {
     const snap = await firebaseGetDocs(q);
     clearFirestoreQuotaWarning();
@@ -614,9 +662,48 @@ export async function getDocs(q: any): Promise<any> {
       docCount: count,
       isCacheHit: false
     });
+    // Cache documents locally
+    if (snap && snap.docs) {
+      initLocalDB();
+      if (!localDB[colName as keyof typeof localDB]) {
+        (localDB as any)[colName] = {};
+      }
+      snap.docs.forEach((d: any) => {
+        localDB[colName as keyof typeof localDB][d.id] = d.data();
+      });
+      saveLocalDB();
+    }
     return snap;
   } catch (err: any) {
     recordFirestoreError(err);
+    if (isFirestoreQuotaError(err) || !isOnline()) {
+      initLocalDB();
+      const docs = Object.values(localDB[colName as keyof typeof localDB] || {});
+      const filtered = localFilter(docs, q.__constraints || []);
+      recordQuotaUsage({
+        collection: colName,
+        operation: "read",
+        docCount: filtered.length,
+        isCacheHit: true,
+        action: "استرجاع مجموعة من الكاش بعد تعذر السحابة"
+      });
+      return {
+        empty: filtered.length === 0,
+        size: filtered.length,
+        docs: filtered.map(item => ({
+          id: item.id,
+          data: () => item
+        })),
+        forEach: (cb: any) => {
+          filtered.forEach(item => {
+            cb({
+              id: item.id,
+              data: () => item
+            });
+          });
+        }
+      };
+    }
     triggerLocalFallback(err);
     throw err;
   }
@@ -625,7 +712,33 @@ export async function getDocs(q: any): Promise<any> {
 export async function setDoc(docRef: any, data: any, options?: any) {
   const cleaned = cleanUndefined(data);
   const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "doc";
+  const docId = docRef.__doc_id || docRef.id || (data && data.id) || "";
 
+  // 1. ALWAYS update localDB immediately so user sees their change without delay
+  initLocalDB();
+  if (!localDB[colName as keyof typeof localDB]) {
+    (localDB as any)[colName] = {};
+  }
+  const existingLocal = localDB[colName as keyof typeof localDB]?.[docId] || {};
+  const mergedLocal = options && options.merge ? { ...existingLocal, ...cleaned } : cleaned;
+  localDB[colName as keyof typeof localDB][docId] = mergedLocal;
+  saveLocalDB();
+  triggerSnapshotListeners(colName);
+
+  // 2. If offline or quota exceeded: queue mutation and return successfully! NO DATA LOSS!
+  if (!isOnline() || getFirestoreQuotaExceeded()) {
+    queuePendingMutation(colName, docId, "set", mergedLocal);
+    recordQuotaUsage({
+      collection: colName,
+      operation: "write",
+      docCount: 1,
+      isCacheHit: true,
+      action: "حفظ محلي في الكاش مع جدولة المزامنة"
+    });
+    return;
+  }
+
+  // 3. Normal cloud write with offline/quota failover
   try {
     await firebaseSetDoc(docRef, cleaned, options);
     clearFirestoreQuotaWarning();
@@ -637,6 +750,17 @@ export async function setDoc(docRef: any, data: any, options?: any) {
     });
   } catch (err: any) {
     recordFirestoreError(err);
+    if (isFirestoreQuotaError(err) || !isOnline()) {
+      queuePendingMutation(colName, docId, "set", mergedLocal);
+      recordQuotaUsage({
+        collection: colName,
+        operation: "write",
+        docCount: 1,
+        isCacheHit: true,
+        action: "حفظ محلي في الكاش (تجاوز حصة)"
+      });
+      return;
+    }
     triggerLocalFallback(err);
     throw err;
   }
@@ -645,7 +769,33 @@ export async function setDoc(docRef: any, data: any, options?: any) {
 export async function updateDoc(docRef: any, data: any) {
   const cleaned = cleanUndefined(data);
   const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "doc";
+  const docId = docRef.__doc_id || docRef.id || (data && data.id) || "";
 
+  // 1. Update localDB immediately
+  initLocalDB();
+  if (!localDB[colName as keyof typeof localDB]) {
+    (localDB as any)[colName] = {};
+  }
+  const existing = localDB[colName as keyof typeof localDB]?.[docId] || {};
+  const merged = { ...existing, ...cleaned };
+  localDB[colName as keyof typeof localDB][docId] = merged;
+  saveLocalDB();
+  triggerSnapshotListeners(colName);
+
+  // 2. If offline or quota exceeded, queue mutation safely
+  if (!isOnline() || getFirestoreQuotaExceeded()) {
+    queuePendingMutation(colName, docId, "update", merged);
+    recordQuotaUsage({
+      collection: colName,
+      operation: "write",
+      docCount: 1,
+      isCacheHit: true,
+      action: "تحديث محلي في الكاش مع جدولة المزامنة"
+    });
+    return;
+  }
+
+  // 3. Cloud write
   try {
     await firebaseUpdateDoc(docRef, cleaned);
     clearFirestoreQuotaWarning();
@@ -657,6 +807,17 @@ export async function updateDoc(docRef: any, data: any) {
     });
   } catch (err: any) {
     recordFirestoreError(err);
+    if (isFirestoreQuotaError(err) || !isOnline()) {
+      queuePendingMutation(colName, docId, "update", merged);
+      recordQuotaUsage({
+        collection: colName,
+        operation: "write",
+        docCount: 1,
+        isCacheHit: true,
+        action: "تحديث محلي في الكاش (تجاوز حصة)"
+      });
+      return;
+    }
     triggerLocalFallback(err);
     throw err;
   }
@@ -664,6 +825,29 @@ export async function updateDoc(docRef: any, data: any) {
 
 export async function deleteDoc(docRef: any) {
   const colName = docRef.__collection_path || docRef.path?.split("/")[0] || "doc";
+  const docId = docRef.__doc_id || docRef.id || "";
+
+  // 1. Delete from localDB immediately
+  initLocalDB();
+  if (localDB[colName as keyof typeof localDB]?.[docId]) {
+    delete localDB[colName as keyof typeof localDB][docId];
+    saveLocalDB();
+    triggerSnapshotListeners(colName);
+  }
+
+  // 2. If offline or quota exceeded, queue delete mutation
+  if (!isOnline() || getFirestoreQuotaExceeded()) {
+    queuePendingMutation(colName, docId, "delete", null);
+    recordQuotaUsage({
+      collection: colName,
+      operation: "delete",
+      docCount: 1,
+      isCacheHit: true,
+      action: "حذف محلي مع جدولة المزامنة"
+    });
+    return;
+  }
+
   try {
     await firebaseDeleteDoc(docRef);
     clearFirestoreQuotaWarning();
@@ -675,69 +859,89 @@ export async function deleteDoc(docRef: any) {
     });
   } catch (err: any) {
     recordFirestoreError(err);
+    if (isFirestoreQuotaError(err) || !isOnline()) {
+      queuePendingMutation(colName, docId, "delete", null);
+      return;
+    }
     triggerLocalFallback(err);
     throw err;
   }
 }
 
 export function onSnapshot(q: any, callback: any, errorCallback?: any): any {
-  if (useLocalFallback) {
-    initLocalDB();
-    const listenerObj = { query: q, callback, errorCallback };
-    snapshotListeners.add(listenerObj);
+  initLocalDB();
+  const colName = q.__collection_path || (typeof q.path === "string" ? q.path : "") || "collection";
 
-    const colName = q.__collection_path;
-    const docs = Object.values(localDB[colName as keyof typeof localDB] || {});
-    const filtered = localFilter(docs, q.__constraints || []);
-    const fakeSnap = {
-      empty: filtered.length === 0,
-      size: filtered.length,
-      docs: filtered.map(item => ({
-        id: item.id,
-        data: () => item
-      })),
-      forEach: (cb: any) => {
-        filtered.forEach((item) => {
-          cb({
-            id: item.id,
-            data: () => item
+  // Register listener for localDB changes (ensures offline/quota updates instantly reflect in UI)
+  const listenerObj = { query: q, callback, errorCallback };
+  snapshotListeners.add(listenerObj);
+
+  // Dispatch initial snapshot from localDB immediately so the UI is instantaneous
+  const docs = Object.values(localDB[colName as keyof typeof localDB] || {});
+  const filtered = localFilter(docs, q.__constraints || []);
+  const initialSnap = {
+    empty: filtered.length === 0,
+    size: filtered.length,
+    docs: filtered.map(item => ({
+      id: item.id,
+      data: () => item
+    })),
+    forEach: (cb: any) => {
+      filtered.forEach((item) => {
+        cb({
+          id: item.id,
+          data: () => item
+        });
+      });
+    }
+  };
+  setTimeout(() => {
+    callback(initialSnap);
+  }, 0);
+
+  // If online and quota available, also attach real Firebase snapshot
+  let firebaseUnsubscribe: (() => void) | null = null;
+  if (isOnline() && !getFirestoreQuotaExceeded()) {
+    try {
+      firebaseUnsubscribe = firebaseOnSnapshot(
+        q,
+        (snap) => {
+          clearFirestoreQuotaWarning();
+          const docCount = snap?.size !== undefined ? snap.size : (snap?.docChanges ? snap.docChanges().length : 1);
+          recordQuotaUsage({
+            collection: colName,
+            operation: "realtime_read",
+            docCount: Math.max(1, docCount),
+            isCacheHit: false,
+            category: "realtime_listeners",
+            action: `تحديث لحظي جديد [${colName}]`
           });
-        });
-      }
-    };
-    setTimeout(() => {
-      callback(fakeSnap);
-    }, 0);
-
-    return () => {
-      snapshotListeners.delete(listenerObj);
-    };
-  } else {
-    const colName = q.__collection_path || (typeof q.path === "string" ? q.path : "") || "collection";
-    let isInitialSnapshot = true;
-    const realUnsubscribe = firebaseOnSnapshot(
-      q,
-      (snap) => {
-        clearFirestoreQuotaWarning();
-        const docCount = snap?.size !== undefined ? snap.size : (snap?.docChanges ? snap.docChanges().length : 1);
-        recordQuotaUsage({
-          collection: colName,
-          operation: "realtime_read",
-          docCount: Math.max(1, docCount),
-          isCacheHit: false,
-          category: "realtime_listeners",
-          action: isInitialSnapshot ? `استماع لحظي أولي [${colName}]` : `تحديث لحظي جديد [${colName}]`
-        });
-        isInitialSnapshot = false;
-        callback(snap);
-      },
-      (err) => {
-        recordFirestoreError(err);
-        if (errorCallback) errorCallback(err);
-      }
-    );
-    return realUnsubscribe;
+          // Cache docs in localDB
+          if (snap && snap.docs) {
+            if (!localDB[colName as keyof typeof localDB]) {
+              (localDB as any)[colName] = {};
+            }
+            snap.docs.forEach((d: any) => {
+              localDB[colName as keyof typeof localDB][d.id] = d.data();
+            });
+            saveLocalDB();
+          }
+          callback(snap);
+        },
+        (err) => {
+          recordFirestoreError(err);
+          if (errorCallback) errorCallback(err);
+        }
+      );
+    } catch (_) {}
   }
+
+  return () => {
+    snapshotListeners.delete(listenerObj);
+    if (firebaseUnsubscribe) {
+      firebaseUnsubscribe();
+    }
+  };
 }
 
 let seedingPromise: Promise<void> | null = null;
@@ -2354,26 +2558,25 @@ function validateTaskInstanceUpdate(merged: TaskInstance, updates: Partial<TaskI
 }
 
 export async function updateTask(id: string, updates: Partial<TaskInstance>): Promise<TaskInstance> {
-  if (!isOnline()) {
-    throw new Error("لا يوجد اتصال بالإنترنت. يرجى إعادة الاتصال بالشبكة للمحاولة مرة أخرى.");
-  }
-
   try {
     await ensureSeeded();
     const docRef = doc(db, "task_instances", id);
-    let snap;
+    let snap: any = null;
     try {
       snap = await getDoc(docRef);
     } catch (error) {
-      console.error("[Online Engine] getDoc failed:", error);
-      throw new Error("تعذر الاتصال بقاعدة البيانات. يرجى التحقق من اتصالك بالإنترنت.");
+      console.warn("[Resilient Cache] getDoc failed or offline; checking local cache:", error);
     }
 
-    if (!snap.exists()) {
+    initLocalDB();
+    let currentTask = snap?.exists?.() ? (snap.data() as TaskInstance) : (localDB.task_instances?.[id] as TaskInstance);
+    if (!currentTask) {
+      currentTask = localDB.task_instances?.[id] as TaskInstance;
+    }
+
+    if (!currentTask) {
       throw new Error("المهمة المطلوبة غير موجودة في قاعدة البيانات");
     }
-
-    const currentTask = snap.data() as TaskInstance;
 
     // Validate reassignment: target employee MUST be active cleaner
     if (updates.assigned_to && updates.assigned_to !== currentTask.assigned_to) {
@@ -2506,8 +2709,8 @@ export async function updateTask(id: string, updates: Partial<TaskInstance>): Pr
     try {
       await setDoc(docRef, merged);
     } catch (error) {
-      console.error("[Online Engine] setDoc failed:", error);
-      throw new Error("تعذر حفظ تحديث المهمة. يرجى التحقق من اتصالك بالإنترنت.");
+      console.warn("[Resilient Cache] setDoc failed; queuing pending mutation for background sync:", error);
+      queuePendingMutation("task_instances", id, "set", merged);
     }
 
     const changedFields = Object.keys(updates);
@@ -3280,4 +3483,59 @@ export async function validateDatabase(): Promise<DatabaseValidationReport> {
   }
 
   return report;
+}
+
+/**
+ * Enterprise-grade Background Sync Engine:
+ * Synchronizes all queued pending mutations with Firestore cloud sequentially,
+ * merging updates idempotently to prevent any data loss or duplicate records.
+ */
+export async function syncAllPendingToFirestore(): Promise<{ successCount: number; remainingCount: number }> {
+  if (!isOnline() || getFirestoreQuotaExceeded()) {
+    return { successCount: 0, remainingCount: getPendingMutationsCount() };
+  }
+
+  console.log(`[Sync Engine] Starting sync for ${getPendingMutationsCount()} pending mutations...`);
+
+  return executePendingSync(async (mutation) => {
+    try {
+      const docRef = firebaseDoc(db, mutation.collection, mutation.docId);
+      if (mutation.operation === "delete") {
+        await firebaseDeleteDoc(docRef);
+      } else {
+        await firebaseSetDoc(docRef, cleanUndefined(mutation.data), { merge: true });
+      }
+      clearFirestoreQuotaWarning();
+      return true;
+    } catch (err: any) {
+      if (isFirestoreQuotaError(err)) {
+        recordFirestoreError(err);
+        return false;
+      }
+      console.warn(`[Sync Engine] Mutation ${mutation.id} deferred:`, err);
+      return false;
+    }
+  });
+}
+
+// Automatically trigger sync when connectivity is restored or quota resets
+if (typeof window !== "undefined") {
+  window.addEventListener("online", () => {
+    console.log("[Sync Engine] Online event detected; starting synchronization...");
+    syncAllPendingToFirestore().catch(console.warn);
+  });
+
+  window.addEventListener("firestore_quota_changed", (ev: any) => {
+    if (ev.detail && ev.detail.exceeded === false) {
+      console.log("[Sync Engine] Firestore quota restored; starting synchronization...");
+      syncAllPendingToFirestore().catch(console.warn);
+    }
+  });
+
+  // Attempt initial sync on load after a short delay
+  setTimeout(() => {
+    if (isOnline() && !getFirestoreQuotaExceeded() && getPendingMutationsCount() > 0) {
+      syncAllPendingToFirestore().catch(console.warn);
+    }
+  }, 3000);
 }

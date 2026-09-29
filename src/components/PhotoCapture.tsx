@@ -21,6 +21,7 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
   const [progress, setProgress] = useState(0);
   const [uploadedUrl, setUploadedUrl] = useState<string | null>(null);
   const [uploadedPublicId, setUploadedPublicId] = useState<string | null>(null);
+  const [isOfflineSaved, setIsOfflineSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
   const isUploadingRef = useRef(false);
@@ -124,14 +125,26 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
       return;
     }
 
-    if (typeof navigator !== "undefined" && !navigator.onLine) {
-      setError("لا يوجد اتصال بالإنترنت حالياً. يتطلب التطبيق اتصالاً نشطاً لرفع الصور وحفظها.");
-      return;
-    }
-
     const payload = compressedBase64 || rawBase64;
     if (!payload) {
       setError("لم يتم اختيار صورة بعد. يرجى فتح الكاميرا والتقاط صورة أولاً.");
+      return;
+    }
+
+    // If offline, save compressed image directly in cache/local task
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      console.log("[PhotoCapture] Offline mode: safely caching compressed photo locally...");
+      const offlineMetadata = {
+        url: payload,
+        size: compressedSize || originalSize || 0,
+        mimeType: "image/jpeg",
+        takenAt: takenAt || new Date().toISOString(),
+      };
+      setUploadedUrl(payload);
+      setUploadedPublicId(null);
+      setIsOfflineSaved(true);
+      setProgress(100);
+      onPhotoUploaded(offlineMetadata);
       return;
     }
 
@@ -142,6 +155,7 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
     setUploading(true);
     setProgress(0);
     setError(null);
+    setIsOfflineSaved(false);
 
     console.log("[PhotoCapture] 🚀 Starting upload to Cloudinary:", {
       folder,
@@ -175,16 +189,20 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
         };
         console.log("[PhotoCapture] Photo uploaded successfully to Cloudinary:", uploadedMetadata);
       } catch (uploadError) {
-        // Keep the intentional Firestore-safe fallback for CORS/configuration failures.
-        if (!payload.startsWith("data:image/")) throw uploadError;
-        usedInlineFallback = true;
-        uploadedMetadata = {
-          url: payload,
-          size: compressedSize || originalSize || 0,
-          mimeType: "image/jpeg",
-          takenAt: takenAt || new Date().toISOString(),
-        };
-        console.warn("[PhotoCapture] Cloudinary unavailable; retaining compressed Base64 fallback.", uploadError);
+        // Keep the intentional Firestore-safe / offline fallback for CORS or connection failures.
+        if (payload.startsWith("data:image/")) {
+          usedInlineFallback = true;
+          uploadedMetadata = {
+            url: payload,
+            size: compressedSize || originalSize || 0,
+            mimeType: "image/jpeg",
+            takenAt: takenAt || new Date().toISOString(),
+          };
+          setIsOfflineSaved(true);
+          console.warn("[PhotoCapture] Cloudinary unavailable; retaining compressed Base64 fallback in cache.", uploadError);
+        } else {
+          throw uploadError;
+        }
       }
 
       if (progressInterval) clearInterval(progressInterval);
@@ -193,7 +211,7 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
       setUploadedPublicId(publicId);
       onPhotoUploaded(uploadedMetadata);
       if (usedInlineFallback) {
-        setError("تم حفظ الصورة مؤقتاً داخل المهمة بسبب تعذر الوصول إلى Cloudinary.");
+        setIsOfflineSaved(true);
       }
     } catch (err: any) {
       console.error("[PhotoCapture] Photo persistence failed:", err);
@@ -220,6 +238,7 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
     setCompressedBase64(null);
     setUploadedUrl(null);
     setUploadedPublicId(null);
+    setIsOfflineSaved(false);
     setProgress(0);
     setError(null);
     setOriginalSize(0);
@@ -345,9 +364,13 @@ export default function PhotoCapture({ label, onPhotoUploaded, required = true, 
           <div className="flex gap-2 w-full">
             {uploadedUrl ? (
               <div className="w-full flex flex-col gap-2">
-                <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl p-3 text-xs font-bold flex items-center justify-center gap-2">
-                  <ShieldCheck className="w-5 h-5 text-emerald-500 shrink-0" />
-                  <span>تم الرفع والتثبيت بنجاح في Cloudinary</span>
+                <div className={`${isOfflineSaved ? 'bg-amber-50 border-amber-200 text-amber-900' : 'bg-emerald-50 border-emerald-200 text-emerald-800'} border rounded-xl p-3 text-xs font-bold flex items-center justify-center gap-2`}>
+                  <ShieldCheck className={`w-5 h-5 ${isOfflineSaved ? 'text-amber-600' : 'text-emerald-500'} shrink-0`} />
+                  <span>
+                    {isOfflineSaved
+                      ? "تم حفظ الصورة محلياً في الكاش الآمن 🛡️ (جاهزة للمهمة)"
+                      : "تم الرفع والتثبيت بنجاح في Cloudinary"}
+                  </span>
                 </div>
                 <button
                   type="button"
