@@ -169,6 +169,9 @@ export default function TodayTasksPage({
 
   useEffect(() => {
     setLoading(true);
+    // Explicitly ensure today's tasks exist on initial mount
+    getTasks().catch(console.error);
+
     const unsubscribe = listenTodayTasks(user.id, (myTasks) => {
       setTasks(myTasks);
       setLoading(false);
@@ -186,7 +189,7 @@ export default function TodayTasksPage({
   const loadTodayTasks = async () => {
     setLoading(true);
     try {
-      // Efficient retry using cleaner-specific listener
+      await getTasks();
       const unsubscribe = listenTodayTasks(user.id, (myTasks) => {
         setTasks(myTasks);
         setLoading(false);

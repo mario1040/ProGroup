@@ -2265,7 +2265,7 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
         }
         let assignedTo = "";
         if (tpl.default_assignee_id) {
-          const defaultEmp = profiles.find((p) => p.id === tpl.default_assignee_id);
+          const defaultEmp = profiles.find((p) => p.id === tpl.default_assignee_id || p.username === tpl.default_assignee_id);
           if (defaultEmp && isEligibleCleaner(defaultEmp)) {
             assignedTo = defaultEmp.id;
           }
@@ -2273,7 +2273,7 @@ export async function getTasks(dateStr?: string): Promise<(TaskInstance & { zone
         if (!assignedTo) {
           const tplZone = zones.find((z) => z.id === tpl.zone_id);
           if (tplZone?.responsible_employee_id) {
-            const respEmp = profiles.find((p) => p.id === tplZone.responsible_employee_id);
+            const respEmp = profiles.find((p) => p.id === tplZone.responsible_employee_id || p.username === tplZone.responsible_employee_id);
             if (respEmp && isEligibleCleaner(respEmp)) {
               assignedTo = respEmp.id;
             }
@@ -2317,25 +2317,17 @@ export function listenTasksForDate(
 ): () => void {
   const targetDate = dateStr || getLocalDateString();
 
-  // ONLY fire off background recurring task generation once per day and ONLY for admin/supervisor (never cleaner)
-  if (!userId && !generatedRecurringDates.has(targetDate)) {
+  // Ensure daily task instances for targetDate exist across all user roles (cleaner, supervisor, admin)
+  if (!generatedRecurringDates.has(targetDate)) {
     generatedRecurringDates.add(targetDate);
     getTasks(targetDate).catch(console.error);
   }
 
-  // CRITICAL QUOTA OPTIMIZATION:
-  // If listening for a specific employee (cleaner), filter directly at the Firestore query level!
-  // This prevents cleaners from downloading or listening to other workers' tasks across the company!
-  const q = userId
-    ? query(
-        collection(db, "task_instances"),
-        where("due_date", "==", targetDate),
-        where("assigned_to", "==", userId)
-      )
-    : query(
-        collection(db, "task_instances"),
-        where("due_date", "==", targetDate)
-      );
+  // Single-field equality filter on due_date: guaranteed to never fail on composite index rules
+  const q = query(
+    collection(db, "task_instances"),
+    where("due_date", "==", targetDate)
+  );
 
   const unsubscribe = onSnapshot(q, async (snap) => {
     try {
@@ -2344,9 +2336,10 @@ export function listenTasksForDate(
         instances.push(normalizeTaskPhotoUrls(docSnap.data() as TaskInstance));
       });
 
-      const filteredInstances = userId
-        ? instances.filter(ti => ti.assigned_to === userId)
-        : instances;
+      // If empty for today, ensure getTasks runs to instantiate recurring tasks
+      if (instances.length === 0 && targetDate === getLocalDateString()) {
+        getTasks(targetDate).catch(console.error);
+      }
 
       // Keep the task snapshot visible even when one metadata collection is unavailable.
       const metadataResults = await Promise.allSettled([
@@ -2363,10 +2356,34 @@ export function listenTasksForDate(
         }
       });
 
+      // Filter for specific cleaner if userId is provided
+      let employeeTasks = instances;
+      if (userId) {
+        const emp = profiles.find((p) => p.id === userId || p.username === userId);
+        const validAssigneeIds = new Set<string>([userId]);
+        if (emp) {
+          if (emp.id) validAssigneeIds.add(emp.id);
+          if (emp.username) validAssigneeIds.add(emp.username);
+          if (emp.full_name) validAssigneeIds.add(emp.full_name);
+        }
+
+        employeeTasks = instances.filter((ti) => {
+          if (!ti.assigned_to) {
+            // Include unassigned tasks in zones where this cleaner is responsible
+            const taskZone = zones.find((z) => z.id === ti.zone_id);
+            if (taskZone && emp && (taskZone.responsible_employee_id === emp.id || taskZone.responsible_employee_id === emp.username)) {
+              return true;
+            }
+            return false;
+          }
+          return validAssigneeIds.has(ti.assigned_to);
+        });
+      }
+
       // Firestore document IDs are authoritative. Do not collapse legitimate tasks
       // that happen to share title, zone, date, and time.
       const uniqueInstances = Array.from(
-        new Map(filteredInstances.map((task) => [task.id, task])).values()
+        new Map(employeeTasks.map((task) => [task.id, task])).values()
       );
 
       const enrichedTasks = uniqueInstances.map((ti) => {
