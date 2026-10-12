@@ -13,7 +13,6 @@ import {
   getCurrentUserProfile,
   loginUser,
   logoutUser,
-  isSkipSessionFocusChecksEnabled,
 } from "./lib/api";
 import type { Profile } from "./types";
 import TodayTasksPage from "./components/TodayTasksPage";
@@ -39,33 +38,29 @@ function makeProfileEmail(username: string): string {
   return clean.includes("@") ? clean : `${clean}@${DEFAULT_DOMAIN}`;
 }
 
-function parseStoredProfile(raw: string | null): Profile | null {
+function isSessionSummary(value: unknown): value is SessionSummary {
+  if (!value || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.id === "string" &&
+    typeof v.username === "string" &&
+    (v.role === "admin" || v.role === "cleaner" || v.role === "supervisor")
+  );
+}
+
+function toSessionSummary(profile: Profile): SessionSummary {
+  return {
+    id: profile.id,
+    username: profile.username,
+    role: profile.role,
+  };
+}
+
+function parseStoredSession(raw: string | null): SessionSummary | null {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== "object") return null;
-    const v = parsed as Record<string, unknown>;
-    if (
-      typeof v.id === "string" &&
-      typeof v.username === "string" &&
-      (v.role === "admin" || v.role === "cleaner" || v.role === "supervisor")
-    ) {
-      return {
-        id: v.id,
-        username: v.username,
-        full_name: typeof v.full_name === "string" ? v.full_name : v.username,
-        role: v.role as Profile["role"],
-        phone: typeof v.phone === "string" ? v.phone : "",
-        is_active: v.is_active !== false,
-        shift_start: typeof v.shift_start === "string" ? v.shift_start : "08:00",
-        shift_end: typeof v.shift_end === "string" ? v.shift_end : "16:00",
-        assigned_zones: Array.isArray(v.assigned_zones) ? (v.assigned_zones as string[]) : [],
-        assigned_locations: Array.isArray(v.assigned_locations) ? (v.assigned_locations as string[]) : [],
-        ...((v.created_at ? { created_at: v.created_at } : {}) as any),
-        ...((v.password ? { password: v.password } : {}) as any),
-      };
-    }
-    return null;
+    return isSessionSummary(parsed) ? parsed : null;
   } catch {
     return null;
   }
@@ -103,48 +98,34 @@ export default function App() {
     let cancelled = false;
 
     const restoreSession = async () => {
+      setAuthLoading(true);
+
       try {
         const raw = localStorage.getItem(SESSION_KEY) ?? localStorage.getItem(LEGACY_SESSION_KEY);
-        const storedProfile = parseStoredProfile(raw);
+        const stored = parseStoredSession(raw);
 
-        if (!storedProfile) {
-          if (!cancelled) {
-            setUser(null);
-            setAuthLoading(false);
-          }
+        if (!stored) {
+          localStorage.removeItem(SESSION_KEY);
+          localStorage.removeItem(LEGACY_SESSION_KEY);
+          if (!cancelled) setUser(null);
           return;
         }
 
-        // Instantly restore user session so cleaners enter the application immediately
-        if (!cancelled) {
-          setUser(storedProfile);
-          setAuthLoading(false);
+        const current = await getCurrentUserProfile(makeProfileEmail(stored.username));
+        if (!current || current.is_active !== true) {
+          localStorage.removeItem(SESSION_KEY);
+          localStorage.removeItem(LEGACY_SESSION_KEY);
+          if (!cancelled) setUser(null);
+          return;
         }
 
-        // Background non-blocking verification with Firestore: only sign out if explicitly deactivated by admin
-        try {
-          const current = await getCurrentUserProfile(makeProfileEmail(storedProfile.username));
-          if (current) {
-            if (current.is_active === false) {
-              localStorage.removeItem(SESSION_KEY);
-              localStorage.removeItem(LEGACY_SESSION_KEY);
-              if (!cancelled) {
-                setUser(null);
-                setError("تم تعطيل هذا الحساب من قِبل الإدارة.");
-              }
-              return;
-            }
-            if (!cancelled) {
-              setUser(current);
-              localStorage.setItem(SESSION_KEY, JSON.stringify(current));
-            }
-          }
-        } catch (fetchErr) {
-          // Keep the existing cached session if offline or if network is slow
-          console.warn("Background profile verification skipped due to network condition; maintaining active session:", fetchErr);
-        }
+        if (!cancelled) setUser(current);
       } catch (e) {
         console.error("Failed to restore session profile", e);
+        localStorage.removeItem(SESSION_KEY);
+        localStorage.removeItem(LEGACY_SESSION_KEY);
+        if (!cancelled) setUser(null);
+      } finally {
         if (!cancelled) setAuthLoading(false);
       }
     };
@@ -172,55 +153,34 @@ export default function App() {
       }
     };
 
-    let lastChecked = Date.now();
-    const revalidateActiveSession = async (force = false) => {
+    const revalidateActiveSession = async () => {
       if (checking || cancelled) return;
-      // When skipSessionFocusChecks is enabled, never perform background queries on screen unlock/app switch
-      if (!force && isSkipSessionFocusChecksEnabled()) return;
-      const now = Date.now();
-      const minInterval = isSkipSessionFocusChecksEnabled() ? 60 * 60 * 1000 : 15 * 60 * 1000;
-      if (!force && (now - lastChecked < minInterval)) return;
-      lastChecked = now;
       checking = true;
       try {
         const current = await getCurrentUserProfile(makeProfileEmail(user.username));
-        // ONLY clear session if server responded AND user is explicitly inactive
-        if (current && current.is_active === false) {
+        if (!current || current.is_active !== true) {
           clearInvalidSession();
           return;
         }
-        if (current && !cancelled) {
-          setUser(current);
-          localStorage.setItem(SESSION_KEY, JSON.stringify(current));
-        }
+        if (!cancelled) setUser(current);
       } catch (error) {
-        // A transient network failure must never log out a worker.
-        console.warn("Active session revalidation failed; keeping the current session securely.", error);
+        // A transient network failure must not silently deactivate a valid user.
+        console.warn("Active session revalidation failed; keeping the current session temporarily.", error);
       } finally {
         checking = false;
       }
     };
 
-    // Recheck only once every 60 minutes instead of burning hundreds of reads every 5 minutes
-    const interval = window.setInterval(() => {
-      if (!isSkipSessionFocusChecksEnabled()) {
-        void revalidateActiveSession(true);
-      }
-    }, 60 * 60 * 1000);
-
-    const onVisibilityOrFocus = () => {
-      if (!isSkipSessionFocusChecksEnabled()) {
-        void revalidateActiveSession(false);
-      }
-    };
-    window.addEventListener("focus", onVisibilityOrFocus);
-    document.addEventListener("visibilitychange", onVisibilityOrFocus);
+    const interval = window.setInterval(() => void revalidateActiveSession(), 60_000);
+    window.addEventListener("focus", revalidateActiveSession);
+    document.addEventListener("visibilitychange", revalidateActiveSession);
+    void revalidateActiveSession();
 
     return () => {
       cancelled = true;
       window.clearInterval(interval);
-      window.removeEventListener("focus", onVisibilityOrFocus);
-      document.removeEventListener("visibilitychange", onVisibilityOrFocus);
+      window.removeEventListener("focus", revalidateActiveSession);
+      document.removeEventListener("visibilitychange", revalidateActiveSession);
     };
   }, [user?.id, user?.username]);
 
@@ -250,7 +210,7 @@ export default function App() {
     try {
       const profile = await loginUser(cleanUsername, password);
       setUser(profile);
-      localStorage.setItem(SESSION_KEY, JSON.stringify(profile));
+      localStorage.setItem(SESSION_KEY, JSON.stringify(toSessionSummary(profile)));
       localStorage.removeItem(LEGACY_SESSION_KEY);
       setPassword("");
       setSuccessMessage("تم تسجيل الدخول بنجاح");
@@ -291,7 +251,23 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans antialiased rtl-grid text-right flex flex-col">
-      <FirestoreQuotaBanner onRetry={() => window.location.reload()} />
+      {!isOnline && (
+        <div className="bg-rose-600 text-white px-4 py-2.5 text-xs md:text-sm font-bold flex items-center justify-between shadow-md border-b border-rose-700 gap-4 z-50">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-white shrink-0 animate-pulse" />
+            <span>
+              <strong>انقطاع الاتصال بالإنترنت:</strong> النظام يعمل بنمط السحابة المباشر (Online-Only). يرجى التحقق من اتصال شبكة الإنترنت لضمان إرسال وتحديث المهام والصور.
+            </span>
+          </div>
+          <button
+            onClick={() => window.location.reload()}
+            className="bg-slate-900 hover:bg-slate-800 text-white px-2.5 py-1 rounded-lg text-[10px] md:text-xs transition font-bold shrink-0 cursor-pointer"
+          >
+            إعادة المحاولة
+          </button>
+        </div>
+      )}
+      {isOnline && !user && <FirestoreQuotaBanner onRetry={() => window.location.reload()} />}
       {!user ? (
         <div className="min-h-screen flex flex-col items-center justify-center bg-slate-900 px-4 py-12 relative overflow-hidden">
           <div className="absolute w-96 h-96 bg-indigo-600/10 rounded-full blur-3xl -top-12 -right-12" />
